@@ -45,6 +45,7 @@ function makeCodexPane(frames: Frames) {
     beforeRead: undefined as (() => Promise<void>) | undefined,
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
+    pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -76,13 +77,21 @@ function makeCodexPane(frames: Frames) {
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    if (args.includes("send-key") && pane.live) {
+      pane.keys.push(String(args.at(-1)));
+      if (args.includes("escape")) {
+        if (!pane.pickerStuck) pane.pickerOpen = false;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (pane.pickerOpen) return { stdout: "{}", stderr: "" };
+    }
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
         pane.submitted.push(pane.queued.shift()!);
-        pane.frames.after = (typed) => fixture("idle-submitted-working").replace(PONG, typed);
+        pane.frames.after = pane.queueDrainFrame ?? ((typed) => fixture("idle-submitted-working").replace(PONG, typed));
       }
       return { stdout: "{}", stderr: "" };
     }
@@ -116,7 +125,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex") {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -147,12 +156,13 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned };
-    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready" });
+    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
+    if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
     // scenario begins; don't leave an ignored boot write racing the fixture.
     expect(context.typedDraftOwners.size).toBe(0);
     pane.frames = frames;
-    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], bufferedReads: 0 });
+    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], keys: [], bufferedReads: 0 });
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
     const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
@@ -257,6 +267,195 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
+  const pickerCases = [
+    ["codex", "mention", "Review the delta @124ccc35 before replying."],
+    ["codex", "slash", "/help"],
+    ["claude", "slash", "/help"],
+  ];
+  const pickerFrame = (cli: string, kind: string, text: string) =>
+    fixture(`issue-999-${cli}-${kind}-picker`).replace("PAYLOAD", text);
+  const plainFrame = (cli: string, text: string, submitted = false) => cli === "codex"
+    ? submitted ? fixture("idle-submitted-working").replace(PONG, text) : fixture("idle-draft").replace(PONG, text)
+    : `Claude Code · Opus 4.6\n${submitted ? `❯ ${text}\n✻ Working…\n❯ ` : `❯ ${text}`}`;
+
+  it.each(pickerCases)("#999(e) closes our %s %s picker before verified submit", async (cli, kind, text) => {
+    const target = await setup({ empty: plainFrame(cli, ""), buffered: plainFrame(cli, ""),
+      draft: text => plainFrame(cli, text), after: text => plainFrame(cli, text, true) }, undefined, 0, cli);
+    target.pane.pickerOpen = true;
+    target.pane.frames.buffered = typed => cli === "claude" ? plainFrame(cli, "") : target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    target.pane.frames.draft = typed => target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    try {
+      const result = await target.send(text, false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) a stuck composer picker fails explicitly without submitting", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => pickerFrame("codex", "mention", typed), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.pickerStuck = true;
+    target.pane.frames.buffered = typed => pickerFrame("codex", "mention", typed);
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", typed: true, submit_dispatched: false, submit_verified: false });
+      expect(target.pane.keys).toEqual(["escape"]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) refuses to close a picker over changed foreign text", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: pickerFrame("codex", "mention", "foreign @draft"),
+      draft: pickerFrame("codex", "mention", "foreign @draft"), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "draft_ownership_unverified" });
+      expect(target.pane.keys).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) closing a picker does not prove submission when Return is swallowed", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed),
+      after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.swallow = 10;
+    target.pane.frames.buffered = typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed);
+    try {
+      const result = await target.send(pickerCases[0][2], false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, submit_dispatched: true, submit_verified: null, delivery_state: "pending_verify" });
+      expect(target.pane.keys[0]).toBe("escape");
+      expect(target.pane.submitted).toEqual([]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  // #999 incident: owned input survives pending verification and a wrapped
+  // queue at idle. Return dispatch is separate from proof of consumption.
+  const incidentText = 'PR-3 case-h delta @124ccc35: Opus PASS (strict exact-or-≥40-prefix queue evidence, wrap-tolerant). Once your full hook is green: push and open the PR (size:L). The live run waits for my "0.4.97 installed" post.';
+  const incident = fixture("issue-999-idle-owned-queue");
+  const queueRows = (rows: string) => incident.replace(/  ↳[\s\S]*?    shift/, `  ↳ ${rows}\n    shift`);
+  const busyDraft = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+
+  it.each(["queued", "pending_verify"])("#999 wrapped own %s queue dispatches Return and keeps unverified recovery honest", async state => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: state === "queued" ? `Working (5s • esc to interrupt)\n${incident}` : incident });
+    try {
+      const initial = await target.send(incidentText);
+      expect(initial.delivery_state, JSON.stringify(initial)).toBe(state);
+      target.pane.frames.after = incident;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(target.pane.returns).toBe(returns + 1);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", submit_dispatched: true, submit_verified: null });
+      expect(result.error).toContain("resume");
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["", "…", "..."])("#999 own wrapped queue ending in %j verifies when Return consumes it", async suffix => {
+    const text = incidentText + suffix;
+    const screen = incident.replace(" post.", ` post.${suffix}`);
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${screen}` });
+    try {
+      await target.send(text);
+      target.pane.frames.after = screen;
+      target.pane.drainQueueOnReturn = true;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["…", "..."])("#1004 HIGH refuses a foreign truncated %s queue sharing our long prefix without Return", async suffix => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      await target.send(incidentText);
+      const prefix = incidentText.slice(0, 70);
+      const foreign = `${prefix} foreign caller's hidden suffix`;
+      target.pane.frames.after = queueRows(`${prefix}${suffix}`);
+      target.pane.queued = [foreign];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, foreign);
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(result.submit_dispatched).not.toBe(true);
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 whitespace HIGH refuses a foreign single-row whitespace collision without Return", async () => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${queueRows("delete foo")}` });
+    try {
+      await target.send("delete foo");
+      target.pane.frames.after = queueRows("deletefoo");
+      target.pane.queued = ["deletefoo"];
+      target.pane.drainQueueOnReturn = true;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 MEDIUM submits the assigned visible row rather than a stale shared-prefix candidate", async () => {
+    const prefix = "This shared authored queue prefix has at least forty characters";
+    const first = `${prefix} first request`, second = `${prefix} second request`;
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: typed => `Working (5s • esc to interrupt)\n${queueRows(typed)}` });
+    try {
+      await target.send(first);
+      await target.send(second);
+      target.pane.frames.after = queueRows(`${second}\n  ↳ ${first}`);
+      target.pane.queued = [second, first];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, second)
+        .replace("› Ask Codex to do anything", `• Queued follow-up inputs\n  ↳ ${first}\n› Ask Codex to do anything`);
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([second]);
+      expect([...target.context.typedDraftOwners.values()].flatMap(owner => owner.texts)).toEqual([first]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["other-caller", "unknown", "short-prefix", "extra-foreign"])("#999 refuses %s queue with visible text and no foreign-draft fiction", async shape => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      if (shape !== "unknown") await target.send(incidentText);
+      const screen = shape === "short-prefix" ? queueRows(`${incidentText.slice(0, 20)}…`) :
+        shape === "extra-foreign" ? incident.replace("    shift+", "  ↳ foreign queue text\n    shift+") : incident;
+      target.pane.phase = "after";
+      target.pane.frames.after = screen;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(shape === "other-caller" ? OTHER_UUID : LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue" });
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(result.error).not.toContain('"unknown"');
+      expect(target.pane.returns).toBe(returns);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999 an idle placeholder alone is never a foreign draft", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: busyDraft, after: fixture("idle-empty") });
+    try {
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result.error_code).not.toBe("blocked_by_foreign_draft");
+      expect(target.pane.returns).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("RESCOPE an older identical queue row cannot prove a new surface send", async () => {
     const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\nMessages to be submitted after next tool call\n  ↳ ${PONG}\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
     for (const swallowed of [true, false]) {
@@ -313,7 +512,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect((await target.send(PONG)).ok).toBe(true);
       const returns = target.pane.returns;
       const receipt = await target.keyReturn(OTHER_UUID);
-      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_queue");
       expect(target.pane.returns).toBe(returns);
     } finally { target.context.dispose(); }
   }, 30_000);

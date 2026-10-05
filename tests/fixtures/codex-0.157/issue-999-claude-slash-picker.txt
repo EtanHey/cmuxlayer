@@ -1,0 +1,5 @@
+Claude Code
+❯ PAYLOAD
+
+  /help    Show help
+  ↑↓ to navigate · Enter to select · Esc to cancel

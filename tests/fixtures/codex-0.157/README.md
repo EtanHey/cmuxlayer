@@ -21,3 +21,8 @@ Only the pane's own `read-screen` output is stored; nothing was hand-edited.
 | `burst-return-placeholder-frame.txt` | Text typed and Return sent with no gap: 15 ms later the composer shows only the placeholder. |
 | `burst-return-draft-reappears.txt` | 139 ms later: the same text reappears, and the Return became a newline. It never submits. |
 | `boot-brief-padded.txt` | A two-paragraph brief pasted and Return sent at once: the Return became a newline and the brief sits unsent, with blank-line padding (1 in 4 tries). |
+
+The `issue-999-*-picker.txt` files are synthetic reproductions for case (e).
+The Codex mention footer and `no matches` text come from issue #999's live
+comment; the slash menus reproduce the same completion interaction for Codex
+and Claude. These fixtures do not claim a new live capture or installed proof.

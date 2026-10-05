@@ -8,6 +8,7 @@ import { CODEX_FOOTER_RE, CODEX_HINT_LINE_RE } from "../codex-chrome.js";
 import type { CliType } from "../agent-types.js";
 import {
   antigravityComposerDraft,
+  composerPickerFooterIndex,
   isAntigravityScreen,
   isPickerOrMenuScreen,
   parseScreen,
@@ -274,6 +275,28 @@ export function normalizeKnownPlaceholderComposerInput(
     return "";
   }
   return input;
+}
+
+/** Read the draft above a completion popup, never its selectable rows. */
+export function composerPickerInputRegion(screenText: string, cli?: CliType): string | null {
+  const knownCli = cli ?? inferComposerCli(screenText);
+  if (knownCli !== "codex" && knownCli !== "claude") return null;
+  const footer = composerPickerFooterIndex(screenText);
+  if (footer < 0) return null;
+  const lines = normalizeTerminalText(screenText).split("\n");
+  const menuOption = (line: string) => /^\s*(?:[>❯›]\s*)?\/\S+\s{2,}\S/.test(line);
+  let start = footer - 1;
+  while (start >= Math.max(0, footer - 32) &&
+    (!matchComposerPromptLine(lines[start] ?? "") || menuOption(lines[start] ?? ""))) start--;
+  if (start < Math.max(0, footer - 32)) return null;
+  let end = footer;
+  for (let index = start + 1; index < footer; index++) {
+    if (/^\s*(?:no matches|loading\.\.\.)\s*$/i.test(lines[index] ?? "") || menuOption(lines[index] ?? "")) {
+      end = index;
+      break;
+    }
+  }
+  return extractComposerInputRegion(lines.slice(start, end).join("\n"), undefined, knownCli, true);
 }
 
 export function extractComposerInputRegion(
@@ -1114,19 +1137,82 @@ export function countVisibleExactQueuedRows(
   return items.filter((item) => item.exact === authoredText).length;
 }
 
-/** Submission correlation only; Return ownership continues to require exact rows. */
-export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+/**
+ * Preserve spaces inside rows; only soft-wrap boundaries may join without a space.
+ * Text differing only by a space at a visual wrap is indistinguishable here;
+ * protocol/hook acknowledgments (CONFIRMATION.md) retire that screen-evidence limit.
+ */
+function completeQueuedItemMatches(item: CodexQueuedItem, text: string): boolean {
+  const authored = normalizeTerminalText(text).replace(/\s+/g, " ").trim();
+  if (!authored) return false;
+  let offsets = new Set([0]);
+  for (const [index, row] of item.rows.entries()) {
+    const visible = normalizeTerminalText(row).replace(/\s+/g, " ").trim();
+    if (!visible) return false;
+    const next = new Set<number>();
+    for (const offset of offsets) {
+      for (const boundary of index === 0 ? [""] : ["", " "]) {
+        const segment = boundary + visible;
+        if (authored.startsWith(segment, offset)) next.add(offset + segment.length);
+      }
+    }
+    offsets = next;
+    if (offsets.size === 0) return false;
+  }
+  return offsets.has(authored.length);
+}
+
+/** Complete ownership preserves spaces; explicit >=40-char truncation only matches correlation. */
+function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation = true): boolean {
+  if (!allowTruncation) return completeQueuedItemMatches(item, text);
   const authored = compactQueueCorrelationText(text);
-  if (!authored || inferComposerCli(screenText) !== "codex") return 0;
-  return (codexQueuedItems(screenText) ?? []).filter(item => {
-    const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
-    const truncated = /(?:…|\.\.\.)$/.test(displayed);
-    const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
-    const normalized = compactQueueCorrelationText(visible);
-    return compactQueueCorrelationText(displayed) === authored || (truncated &&
-      normalized.length > 0 && authored.startsWith(normalized) &&
-      visible.length >= 40);
-  }).length;
+  if (!authored) return false;
+  const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
+  const truncated = /(?:…|\.\.\.)$/.test(displayed);
+  const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
+  const normalized = compactQueueCorrelationText(visible);
+  return compactQueueCorrelationText(displayed) === authored || (allowTruncation && truncated &&
+    normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);
+}
+
+export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+  if (inferComposerCli(screenText) !== "codex") return 0;
+  return (codexQueuedItems(screenText) ?? []).filter(item => queuedItemMatches(item, text)).length;
+}
+
+/** Assign complete queue rows to ownership entries, consuming each entry at most once. */
+export function assignVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): { queueIndex: number; text: string }[] {
+  if (inferComposerCli(screenText) !== "codex") return [];
+  const items = codexQueuedItems(screenText) ?? [];
+  const assigned = new Map<number, number>();
+  const match = (itemIndex: number, seen: Set<number>): boolean => {
+    const item = items[itemIndex];
+    if (item === undefined) return false;
+    for (let ownerIndex = 0; ownerIndex < texts.length; ownerIndex++) {
+      const text = texts[ownerIndex];
+      if (text === undefined || seen.has(ownerIndex) || !queuedItemMatches(item, text, false)) continue;
+      seen.add(ownerIndex);
+      // Reassign equivalent entries rather than starving a later complete item.
+      const previousItem = assigned.get(ownerIndex);
+      if (previousItem !== undefined && !match(previousItem, seen)) continue;
+      assigned.set(ownerIndex, itemIndex);
+      return true;
+    }
+    return false;
+  };
+  for (let index = 0; index < items.length; index++) match(index, new Set());
+  return [...assigned].flatMap(([ownerIndex, queueIndex]) => {
+    const text = texts[ownerIndex];
+    return text === undefined ? [] : [{ queueIndex, text }];
+  }).sort((a, b) => a.queueIndex - b.queueIndex);
+}
+
+export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): number {
+  return assignVisibleOwnedQueuedInputs(screenText, texts).length;
+}
+
+export function visibleCodexQueuedText(screenText: string): string {
+  return (codexQueuedItems(screenText) ?? []).map(item => item.rows.join("\n")).join("\n↳ ");
 }
 
 export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {

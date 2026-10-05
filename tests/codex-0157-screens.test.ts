@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { parseScreen } from "../src/screen-parser.js";
 import {
   countVisibleExactQueuedRows,
+  countVisibleOwnedQueuedInputs,
+  countVisibleQueuedSubmitMatches,
   screenShowsQueuedAgentInput,
 } from "../src/delivery/composer-screen.js";
 
@@ -53,6 +55,40 @@ describe("#905 Codex 0.157 queue blocks", () => {
     const twoScreen = screen.replace(block, twoItems);
     expect(screenShowsQueuedAgentInput(twoScreen, DATE, { exact: true })).toBe(true);
     expect(countVisibleExactQueuedRows(twoScreen, DATE)).toBe(1);
+  });
+
+  it("#999 each owned entry covers only one queue item, including overlapping prefixes", () => {
+    const prefix = "This authored request has a prefix of at least forty characters";
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${prefix}…\n  ↳ foreign row\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [`${prefix} first`, `${prefix} second`])).toBe(0);
+    expect(countVisibleQueuedSubmitMatches(screen, `${prefix} first`)).toBe(1);
+    const duplicates = screen.replace("foreign row", `${prefix} first`).replace(`${prefix}…`, `${prefix} first`);
+    expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`])).toBe(1);
+    expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`, `${prefix} first`])).toBe(2);
+    const mixed = screen.replace("foreign row", `${prefix} first`);
+    expect(countVisibleOwnedQueuedInputs(mixed, [`${prefix} first`, `${prefix} second`])).toBe(1);
+  });
+
+  it.each(["…", "..."])("#1004 owns complete text ending in authored %s", suffix => {
+    const text = `This complete caller-owned message has more than forty characters${suffix}`;
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${text}\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [text])).toBe(1);
+    expect(countVisibleOwnedQueuedInputs(screen, [`${text} hidden foreign suffix`])).toBe(0);
+  });
+
+  it.each([
+    ["delete foo", "deletefoo", 0],
+    ["deletefoo", "delete foo", 0],
+    ["delete\nfoo", "deletefoo", 0],
+    ["Keep meaningful spaces across a long message", "Keep meaningful spaces\n    across a long message", 1],
+    ["wrap-tolerant", "wrap-\n    tolerant", 1],
+    ["delete  foo", "delete foo", 1],
+    ["delete foo", "delete  foo", 1],
+    ["a b", "a\n    b", 1],
+    ["ab", "a\n    b", 1],
+  ])("#1004 whitespace ownership: %j vs %j => %i", (text, rows, owned) => {
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${rows}\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [text])).toBe(owned);
   });
 
   it("keeps the pre-0.157 single steer block working", () => {
