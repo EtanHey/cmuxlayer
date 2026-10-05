@@ -12,7 +12,7 @@ import {
   cleanScreenText,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
-  isCodexAccountSecurityBanner,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "../screen-parser.js";
 import type { ParsedScreenResult } from "../types.js";
@@ -95,13 +95,21 @@ export function haltDwellMs(this: HaltHost, type: AgentHaltType): number {
   }
 }
 
-export function haltUnblockAction(this: HaltHost, agent: AgentRecord, type: AgentHaltType): string {
+export function haltUnblockAction(
+  this: HaltHost,
+  agent: AgentRecord,
+  type: AgentHaltType,
+  screenText?: string,
+): string {
   switch (type) {
-    case "awaiting_input":
+    case "awaiting_input": {
+      const overlayKey = isCodexDismissibleOverlay(screenText ?? "") ? "escape" : "return";
+      const overlayHint = overlayKey === "escape" ? "overlay" : "prompt";
       return (
-        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the prompt, ` +
-        `send_to({mode: "key", surface: "${agent.surface_id}", text: "return"})`
+        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the ${overlayHint}, ` +
+        `send_to({mode: "key", surface: "${agent.surface_id}", text: "${overlayKey}"})`
       );
+    }
     case "idle_without_done":
       return `send_to({agent_id: "${agent.agent_id}", text: "Continue and report status."})`;
     case "wedged":
@@ -554,7 +562,7 @@ export async function maybeEscalateLiveHalt(
   );
   if (
     !hasHarnessApiError &&
-    !isCodexAccountSecurityBanner(screenText) &&
+    !isCodexDismissibleOverlay(screenText) &&
     parsed.paused !== true &&
     (parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -749,7 +757,7 @@ export async function maybeEscalateLiveHalt(
     0,
     Math.floor((nowMs - startedAtMs) / 1_000),
   );
-  const unblockAction = this.haltUnblockAction(episode, haltType);
+  const unblockAction = this.haltUnblockAction(episode, haltType, screenText);
   try {
     dispatchOnce(
       ancestor.agent_id,

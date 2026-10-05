@@ -11653,6 +11653,7 @@ Session ID: ${sessionId}`,
 
     it.each([
       ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
       ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
     ])("silent-stall %s wakes the parent despite prior done evidence", async (kind, screen, tag) => {
       engine.dispose();
@@ -11670,8 +11671,11 @@ Session ID: ${sessionId}`,
       await engine["maybeEscalateLiveHalt"](child, screen);
       await engine["maybeEscalateLiveHalt"](engine.getAgentState(child.agent_id) ?? child, screen);
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
-      if (kind === "security") expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
-      else expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      if (kind === "security" || kind === "hooks") {
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
+      } else expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
       expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
