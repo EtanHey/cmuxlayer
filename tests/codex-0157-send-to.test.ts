@@ -45,7 +45,7 @@ function makeCodexPane(frames: Frames) {
     beforeRead: undefined as (() => Promise<void>) | undefined,
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
-    pickerOpen: false, pickerStuck: false, keys: [] as string[],
+    pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -91,7 +91,7 @@ function makeCodexPane(frames: Frames) {
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
         pane.submitted.push(pane.queued.shift()!);
-        pane.frames.after = (typed) => fixture("idle-submitted-working").replace(PONG, typed);
+        pane.frames.after = pane.queueDrainFrame ?? ((typed) => fixture("idle-submitted-working").replace(PONG, typed));
       }
       return { stdout: "{}", stderr: "" };
     }
@@ -357,8 +357,8 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each(["wrapped", "long-prefix"])("#999 own %s queue can be verified when Return actually consumes it", async shape => {
-    const screen = shape === "wrapped" ? incident : queueRows(`${incidentText.slice(0, 70)}…`);
+  it("#999 own wrapped queue can be verified when Return actually consumes it", async () => {
+    const screen = incident;
     const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
       after: `Working (5s • esc to interrupt)\n${screen}` });
     try {
@@ -369,6 +369,46 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
       expect(target.pane.submitted).toEqual([incidentText]);
       expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 HIGH refuses a foreign truncated queue sharing our long prefix without Return", async () => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      await target.send(incidentText);
+      const prefix = incidentText.slice(0, 70);
+      const foreign = `${prefix} foreign caller's hidden suffix`;
+      target.pane.frames.after = queueRows(`${prefix}…`);
+      target.pane.queued = [foreign];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, foreign);
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(result.submit_dispatched).not.toBe(true);
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 MEDIUM submits the assigned visible row rather than a stale shared-prefix candidate", async () => {
+    const prefix = "This shared authored queue prefix has at least forty characters";
+    const first = `${prefix} first request`, second = `${prefix} second request`;
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: typed => `Working (5s • esc to interrupt)\n${queueRows(typed)}` });
+    try {
+      await target.send(first);
+      await target.send(second);
+      target.pane.frames.after = queueRows(`${second}\n  ↳ ${first}`);
+      target.pane.queued = [second, first];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, second)
+        .replace("› Ask Codex to do anything", `• Queued follow-up inputs\n  ↳ ${first}\n› Ask Codex to do anything`);
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([second]);
+      expect([...target.context.typedDraftOwners.values()].flatMap(owner => owner.texts)).toEqual([first]);
     } finally { target.context.dispose(); }
   }, 30_000);
 

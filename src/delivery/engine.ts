@@ -65,6 +65,7 @@ import {
   cursorSubmittedResponseEvidenceSignatures,
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
+  assignVisibleOwnedQueuedInputs,
   countVisibleOwnedQueuedInputs,
   visibleCodexQueuedText,
   countVisibleQueuedSubmitMatches,
@@ -815,7 +816,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (empty) {
         const entries = token.texts ?? [token.text];
         const retained = entries.map((entry, index) => ({ entry, deliveryId: token.deliveryIds?.[index] ?? "" }))
-          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || countVisibleQueuedSubmitMatches(text, entry) > 0);
+          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || countVisibleOwnedQueuedInputs(text, [entry]) > 0);
         const last = retained.at(-1);
         if (!last) { typedDraftOwners.delete(key); continue; }
         token.texts = retained.map(({ entry }) => entry);
@@ -823,7 +824,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         token.text = last.entry;
       }
       const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
-      const queued = (token.texts ?? [token.text]).some(entry => countVisibleQueuedSubmitMatches(text, entry) > 0);
+      const queued = countVisibleOwnedQueuedInputs(text, token.texts ?? [token.text]) > 0;
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !empty && !queued && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -1789,13 +1790,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
-      const ownedQueueRows = submitBaseline ? countVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : 0;
+      const ownedQueue = submitBaseline ? assignVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : [];
+      const ownedQueueRows = ownedQueue.length;
       if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
         throw new DeliverySafetyGateError("blocked_by_foreign_queue", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text));
       }
       // Ownership is bound to the caller/surface/session, including pending_verify
       // deliveries; the public receipt need not already have reached queued.
-      const ownedQueuedText = submitBaseline ? ownedEntries.find(text => countVisibleQueuedSubmitMatches(submitBaseline.text, text) > 0) : undefined;
+      const ownedQueuedText = ownedQueue[0]?.text;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           ((targetCli || inferComposerCli(submitBaseline.text)) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&

@@ -1137,15 +1137,15 @@ export function countVisibleExactQueuedRows(
   return items.filter((item) => item.exact === authoredText).length;
 }
 
-/** Shared #995/#999 match: complete wrapped text or an explicit >=40-char truncation. */
-function queuedItemMatches(item: CodexQueuedItem, text: string): boolean {
+/** Wrapped text matches ownership; explicit >=40-char truncation only matches correlation. */
+function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation = true): boolean {
   const authored = compactQueueCorrelationText(text);
   if (!authored) return false;
   const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
   const truncated = /(?:…|\.\.\.)$/.test(displayed);
   const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
   const normalized = compactQueueCorrelationText(visible);
-  return compactQueueCorrelationText(displayed) === authored || (truncated &&
+  return ((!truncated || allowTruncation) && compactQueueCorrelationText(displayed) === authored) || (allowTruncation && truncated &&
     normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);
 }
 
@@ -1154,9 +1154,9 @@ export function countVisibleQueuedSubmitMatches(screenText: string, text: string
   return (codexQueuedItems(screenText) ?? []).filter(item => queuedItemMatches(item, text)).length;
 }
 
-/** Consume each ownership entry at most once, even when prefixes overlap. */
-export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): number {
-  if (inferComposerCli(screenText) !== "codex") return 0;
+/** Assign complete queue rows to ownership entries, consuming each entry at most once. */
+export function assignVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): { queueIndex: number; text: string }[] {
+  if (inferComposerCli(screenText) !== "codex") return [];
   const items = codexQueuedItems(screenText) ?? [];
   const assigned = new Map<number, number>();
   const match = (itemIndex: number, seen: Set<number>): boolean => {
@@ -1164,9 +1164,9 @@ export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonl
     if (item === undefined) return false;
     for (let ownerIndex = 0; ownerIndex < texts.length; ownerIndex++) {
       const text = texts[ownerIndex];
-      if (text === undefined || seen.has(ownerIndex) || !queuedItemMatches(item, text)) continue;
+      if (text === undefined || seen.has(ownerIndex) || !queuedItemMatches(item, text, false)) continue;
       seen.add(ownerIndex);
-      // Reassign ambiguous prefixes rather than starving a later exact item.
+      // Reassign equivalent entries rather than starving a later complete item.
       const previousItem = assigned.get(ownerIndex);
       if (previousItem !== undefined && !match(previousItem, seen)) continue;
       assigned.set(ownerIndex, itemIndex);
@@ -1174,7 +1174,15 @@ export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonl
     }
     return false;
   };
-  return items.filter((_, index) => match(index, new Set())).length;
+  for (let index = 0; index < items.length; index++) match(index, new Set());
+  return [...assigned].flatMap(([ownerIndex, queueIndex]) => {
+    const text = texts[ownerIndex];
+    return text === undefined ? [] : [{ queueIndex, text }];
+  }).sort((a, b) => a.queueIndex - b.queueIndex);
+}
+
+export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): number {
+  return assignVisibleOwnedQueuedInputs(screenText, texts).length;
 }
 
 export function visibleCodexQueuedText(screenText: string): string {
