@@ -308,7 +308,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       ));
 
       expect(result.error_code).not.toBe("nothing_owned_to_submit");
-      expect(result.error_code).toBe("blocked_by_foreign_draft");
+      expect(result.error_code).toBe("blocked_by_foreign_queue");
       expect(mutatedPane(exec), JSON.stringify(result)).toBe(false);
       screen = screen.replace("› Ask Codex to do anything", "› human draft");
       exec.mockClear();
@@ -316,7 +316,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         { mode: "key", surface: "surface:new", text: "return", press_enter: false },
         {},
       ));
-      expect(foreign.error_code).toBe("blocked_by_foreign_draft");
+      expect(foreign.error_code).toBe("blocked_by_foreign_queue");
       expect(mutatedPane(exec)).toBe(false);
     } finally {
       context.dispose();
@@ -375,7 +375,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       );
 
       expect(result.error_code).toMatch(
-        /blocked_by_foreign_draft/,
+        /blocked_by_foreign_queue/,
       );
       expect(mutatedPane(exec)).toBe(false);
     } finally {

@@ -1114,19 +1114,37 @@ export function countVisibleExactQueuedRows(
   return items.filter((item) => item.exact === authoredText).length;
 }
 
-/** Submission correlation only; Return ownership continues to require exact rows. */
-export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+/** Shared #995/#999 match: complete wrapped text or an explicit >=40-char truncation. */
+function queuedItemMatches(item: CodexQueuedItem, text: string): boolean {
   const authored = compactQueueCorrelationText(text);
-  if (!authored || inferComposerCli(screenText) !== "codex") return 0;
+  if (!authored) return false;
+  const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
+  const truncated = /(?:…|\.\.\.)$/.test(displayed);
+  const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
+  const normalized = compactQueueCorrelationText(visible);
+  return compactQueueCorrelationText(displayed) === authored || (truncated &&
+    normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);
+}
+
+export function countVisibleQueuedSubmitMatches(screenText: string, text: string): number {
+  if (inferComposerCli(screenText) !== "codex") return 0;
+  return (codexQueuedItems(screenText) ?? []).filter(item => queuedItemMatches(item, text)).length;
+}
+
+/** Consume each ownership entry at most once, even when prefixes overlap. */
+export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): number {
+  if (inferComposerCli(screenText) !== "codex") return 0;
+  const remaining = [...texts];
   return (codexQueuedItems(screenText) ?? []).filter(item => {
-    const displayed = item.rows.join(" ").replace(/\s+/g, " ").trim();
-    const truncated = /(?:…|\.\.\.)$/.test(displayed);
-    const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
-    const normalized = compactQueueCorrelationText(visible);
-    return compactQueueCorrelationText(displayed) === authored || (truncated &&
-      normalized.length > 0 && authored.startsWith(normalized) &&
-      visible.length >= 40);
+    const index = remaining.findIndex(text => queuedItemMatches(item, text));
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+    return true;
   }).length;
+}
+
+export function visibleCodexQueuedText(screenText: string): string {
+  return (codexQueuedItems(screenText) ?? []).map(item => item.rows.join("\n")).join("\n↳ ");
 }
 
 export function screenShowsCursorFollowupNeedsEnter(screenText: string): boolean {

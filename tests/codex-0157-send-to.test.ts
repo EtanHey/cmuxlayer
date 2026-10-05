@@ -257,6 +257,72 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
+  // #999 incident: owned input survives pending verification and a wrapped
+  // queue at idle. Return dispatch is separate from proof of consumption.
+  const incidentText = 'PR-3 case-h delta @124ccc35: Opus PASS (strict exact-or-≥40-prefix queue evidence, wrap-tolerant). Once your full hook is green: push and open the PR (size:L). The live run waits for my "0.4.97 installed" post.';
+  const incident = fixture("issue-999-idle-owned-queue");
+  const queueRows = (rows: string) => incident.replace(/  ↳[\s\S]*?    shift/, `  ↳ ${rows}\n    shift`);
+  const busyDraft = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+
+  it.each(["queued", "pending_verify"])("#999 wrapped own %s queue dispatches Return and keeps unverified recovery honest", async state => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: state === "queued" ? `Working (5s • esc to interrupt)\n${incident}` : incident });
+    try {
+      const initial = await target.send(incidentText);
+      expect(initial.delivery_state, JSON.stringify(initial)).toBe(state);
+      target.pane.frames.after = incident;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(target.pane.returns).toBe(returns + 1);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", submit_dispatched: true, submit_verified: null });
+      expect(result.error).toContain("resume");
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["wrapped", "long-prefix"])("#999 own %s queue can be verified when Return actually consumes it", async shape => {
+    const screen = shape === "wrapped" ? incident : queueRows(`${incidentText.slice(0, 70)}…`);
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${screen}` });
+    try {
+      await target.send(incidentText);
+      target.pane.frames.after = screen;
+      target.pane.drainQueueOnReturn = true;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([incidentText]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["other-caller", "unknown", "short-prefix", "extra-foreign"])("#999 refuses %s queue with visible text and no foreign-draft fiction", async shape => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      if (shape !== "unknown") await target.send(incidentText);
+      const screen = shape === "short-prefix" ? queueRows(`${incidentText.slice(0, 20)}…`) :
+        shape === "extra-foreign" ? incident.replace("    shift+", "  ↳ foreign queue text\n    shift+") : incident;
+      target.pane.phase = "after";
+      target.pane.frames.after = screen;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(shape === "other-caller" ? OTHER_UUID : LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue" });
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(result.error).not.toContain('"unknown"');
+      expect(target.pane.returns).toBe(returns);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999 an idle placeholder alone is never a foreign draft", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: busyDraft, after: fixture("idle-empty") });
+    try {
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result.error_code).not.toBe("blocked_by_foreign_draft");
+      expect(target.pane.returns).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("RESCOPE an older identical queue row cannot prove a new surface send", async () => {
     const render = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\nMessages to be submitted after next tool call\n  ↳ ${PONG}\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
     for (const swallowed of [true, false]) {
@@ -313,7 +379,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect((await target.send(PONG)).ok).toBe(true);
       const returns = target.pane.returns;
       const receipt = await target.keyReturn(OTHER_UUID);
-      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_queue");
       expect(target.pane.returns).toBe(returns);
     } finally { target.context.dispose(); }
   }, 30_000);

@@ -528,6 +528,7 @@ export class DeliverySafetyGateError extends Error {
       | "blocked_by_interactive_prompt"
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft"
+      | "blocked_by_foreign_queue"
       | "queued_stalled_idle"
       | "composer_unrecognized"
       | "owned_boot_contract_pending"
@@ -536,10 +537,15 @@ export class DeliverySafetyGateError extends Error {
       | "boot_instance_changed",
     readonly screen: ParsedScreenResult,
     readonly draftText?: string,
+    receipt?: PublicDeliveryReceipt,
   ) {
     super(
       error_code === "queued_stalled_idle"
-        ? "Codex has queued inputs while idle; nothing was typed or submitted; read_screen and report the stalled queue to the lead"
+        ? draftText !== undefined
+          ? `Codex owned queue remains unverified after Return: ${JSON.stringify(draftText)}; no submission confirmed. Read the pane; if it remains stalled, close and resume the agent by ID with spawn_agent({resume_agent_id}).`
+          : "Codex has queued inputs while idle; nothing was typed or submitted; read_screen and report the stalled queue to the lead"
+        : error_code === "blocked_by_foreign_queue"
+        ? `Codex queued inputs are not owned by this caller: ${JSON.stringify(draftText)}; Return was not sent. Read the queue and ask its owner to recover it.`
         : error_code === "composer_unrecognized"
         ? "could not identify the input box on this screen; nothing was typed or submitted; read_screen and report to the lead"
         : error_code === "draft_ownership_unverified"
@@ -556,6 +562,11 @@ export class DeliverySafetyGateError extends Error {
           ? "The engine-issued boot contract is still pending in this composer. Its Return could not be verified, so no followup text was typed."
         : "target surface has an open picker/menu; refused to type (would be consumed as menu keystrokes)",
     );
+    if (receipt) {
+      this.receipt = receipt;
+      this.delivered = receipt.delivered;
+      this.submit_verified = receipt.submit_verified;
+    }
     this.name = "DeliverySafetyGateError";
   }
 }

@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { parseScreen } from "../src/screen-parser.js";
 import {
   countVisibleExactQueuedRows,
+  countVisibleOwnedQueuedInputs,
   screenShowsQueuedAgentInput,
 } from "../src/delivery/composer-screen.js";
 
@@ -53,6 +54,15 @@ describe("#905 Codex 0.157 queue blocks", () => {
     const twoScreen = screen.replace(block, twoItems);
     expect(screenShowsQueuedAgentInput(twoScreen, DATE, { exact: true })).toBe(true);
     expect(countVisibleExactQueuedRows(twoScreen, DATE)).toBe(1);
+  });
+
+  it("#999 each owned entry covers only one queue item, including overlapping prefixes", () => {
+    const prefix = "This authored request has a prefix of at least forty characters";
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${prefix}…\n  ↳ foreign row\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [`${prefix} first`, `${prefix} second`])).toBe(1);
+    const duplicates = screen.replace("foreign row", `${prefix} first`).replace(`${prefix}…`, `${prefix} first`);
+    expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`])).toBe(1);
+    expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`, `${prefix} first`])).toBe(2);
   });
 
   it("keeps the pre-0.157 single steer block working", () => {

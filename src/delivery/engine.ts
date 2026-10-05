@@ -64,7 +64,8 @@ import {
   cursorSubmittedResponseEvidenceSignatures,
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
-  countVisibleExactQueuedRows,
+  countVisibleOwnedQueuedInputs,
+  visibleCodexQueuedText,
   countVisibleQueuedSubmitMatches,
   countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
@@ -813,7 +814,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (empty) {
         const entries = token.texts ?? [token.text];
         const retained = entries.map((entry, index) => ({ entry, deliveryId: token.deliveryIds?.[index] ?? "" }))
-          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || screenShowsQueuedAgentInput(text, entry, { exact: true }));
+          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || countVisibleQueuedSubmitMatches(text, entry) > 0);
         const last = retained.at(-1);
         if (!last) { typedDraftOwners.delete(key); continue; }
         token.texts = retained.map(({ entry }) => entry);
@@ -821,7 +822,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         token.text = last.entry;
       }
       const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
-      const queued = (token.texts ?? [token.text]).some(entry => screenShowsQueuedAgentInput(text, entry, { exact: true }));
+      const queued = (token.texts ?? [token.text]).some(entry => countVisibleQueuedSubmitMatches(text, entry) > 0);
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !empty && !queued && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -1650,6 +1651,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     baseline: { text: string; parsed: ParsedScreenResult } | null;
     owned_text?: string;
+    owned_queue?: boolean;
   }): Promise<{
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
@@ -1661,7 +1663,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (
       opts.baseline?.parsed.control_state !== "permission_prompt" &&
       baselineComposerInput !== null &&
-      baselineComposerInput.trim() === ""
+      baselineComposerInput.trim() === "" && !opts.owned_queue
     ) {
       return {
         submit_verified: null,
@@ -1686,6 +1688,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         return { submit_verified: true, submit_verification_reason: null };
       }
       const composerInput = extractComposerInputRegion(snapshot.text);
+      if (opts.owned_queue && opts.owned_text && opts.baseline &&
+          countVisibleQueuedSubmitMatches(snapshot.text, opts.owned_text) < countVisibleQueuedSubmitMatches(opts.baseline.text, opts.owned_text) &&
+          codexScreenShowsSubmit(opts.baseline.text, snapshot.text, opts.owned_text)) {
+        return { submit_verified: true, submit_verification_reason: null };
+      }
       const transitionedFromIdleDraftToWorking =
         opts.baseline !== null &&
         baselineComposerInput !== null &&
@@ -1782,40 +1789,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
-      const ownedQueueRows = submitBaseline ? [...new Set(ownedEntries)].reduce((count, text) => {
-        const visible = countVisibleExactQueuedRows(submitBaseline.text, text) ?? 0;
-        return count + (visible <= ownedEntries.filter(entry => entry === text).length ? visible : 0);
-      }, 0) : 0;
+      const ownedQueueRows = submitBaseline ? countVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : 0;
       if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
-        throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed);
+        throw new DeliverySafetyGateError("blocked_by_foreign_queue", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text));
       }
-      const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
-        targetCli === "codex"
-        ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
-            receipt.agent_id === targetAgent.agent_id &&
-            receipt.delivery_state === "queued" &&
-            receipt.composer_accepted === true &&
-            receipt.press_enter && ownedEntries.includes(receipt.text)
-          ) ?? []
-        : [];
-      const ownedQueuedReceipt = submitBaseline
-        ? eligibleQueuedReceipts.find((receipt) => {
-            const visibleCount = countVisibleExactQueuedRows(
-              submitBaseline.text,
-              receipt.text,
-            );
-            const ownedCount = eligibleQueuedReceipts.filter(
-              (candidate) => candidate.text === receipt.text,
-            ).length;
-            return visibleCount !== null && visibleCount > 0 && visibleCount <= ownedCount &&
-              screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
-          })
-        : undefined;
+      // Ownership is bound to the caller/surface/session, including pending_verify
+      // deliveries; the public receipt need not already have reached queued.
+      const ownedQueuedText = submitBaseline ? ownedEntries.find(text => countVisibleQueuedSubmitMatches(submitBaseline.text, text) > 0) : undefined;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           ((targetCli || inferComposerCli(submitBaseline.text)) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
             extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null &&
-            !ownedQueuedReceipt))) {
+            !ownedQueuedText))) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError(submitBaseline?.text.trim() ? "composer_unrecognized" : "draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
@@ -1827,19 +1812,19 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const currentRegion = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const ownedText = ownerCurrent && owner && currentRegion !== null
-          ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? ""
-          : (ownedQueuedReceipt?.text ?? "");
+          ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? (ownedQueuedText ?? "")
+          : (ownedQueuedText ?? "");
         ownedSubmitText = ownedText;
         if (ownerCurrent && owner?.bootAgentId && owner.bootInstanceId) {
           ownedBoot = { agentId: owner.bootAgentId, instanceId: owner.bootInstanceId };
         }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
-        if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
+        if ((!ownedQueuedText || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
-        if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+        if (!ownedQueuedText && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
       }
@@ -1876,9 +1861,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 workspace: opts.workspace,
                 baseline: submitBaseline,
                 owned_text: ownedSubmitText,
+                owned_queue: Boolean(ownedQueuedText),
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      if (ownedQueuedText && submitBaseline && !codexScreenHasActiveTurn(submitBaseline.text) && verification.submit_verified !== true) {
+        throw new DeliverySafetyGateError("queued_stalled_idle", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text), buildPublicDeliveryReceipt({
+          delivery_state: "pending_verify", typed: false, submit_attempted: true,
+          submit_dispatched: true, submit_verified: null, retry_count: 0,
+          rpc_methods: [...rpcMethods], timings_ms: opts.timings,
+        }));
+      }
       if (verification.submit_verified === true) {
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
