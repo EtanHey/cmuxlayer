@@ -8,7 +8,8 @@
   "panes_closed": [
     580,
     585,
-    587
+    587,
+    697
   ],
   "captures": [
     {
@@ -70,6 +71,25 @@
       "surface": "surface:587",
       "original_snapshot_hash": "6dd98db0cbcae71b327a4bd85d0ac3d07177e666f8afe170ab4363dce7467302",
       "sanitized_sha256": "7ecc3138a094dfaa57b8c5c77ab37a94e4e59ebad00ed36f86e21a6b051e80e8"
+    },
+    {
+      "file": "codex-hooks-review.txt",
+      "surface": "surface:697",
+      "original_snapshot_hash": "26bf8cb8df2ee079f6c3fbf62af14a521171edbdfbf60b4cefff943038e85b3d",
+      "sanitized_sha256": "8697c88c82104da2de27edeba88851d3bd7afc1b0e48ad3dc2584028ed08e603",
+      "requested_cwd": "scratch directory",
+      "observed_cwd": "launcher opened registered repo instead; no prompt delivered",
+      "requested_model": "gpt-6-luna low",
+      "observed_model": "GPT-6-Luna default after Esc",
+      "spawn_result": "15-second readiness timeout",
+      "dismissal": "one Esc, hooks not trusted",
+      "method": "real installed MCP through fresh SDK stdio client (attached MCP transport closed)",
+      "sanitization": [
+        "right-edge spaces",
+        "trailing blank terminal padding (interior blank rows retained)"
+      ],
+      "raw_lines": 33,
+      "sanitized_lines": 11
     }
   ]
 }

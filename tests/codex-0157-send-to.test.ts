@@ -50,9 +50,11 @@ function makeCodexPane(frames: Frames) {
     pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
     bannerVariant: "boot", bannerOpen: false, bannerStuck: false, bannerAfterType: false,
     bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
+    shellUntilLaunch: false, launcherCommand: "",
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
+    if (pane.shellUntilLaunch) return `$ ${pane.launcherCommand}`;
     if (pane.bannerOpen) return overlayCapture(`codex-${pane.bannerVariant}`).replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
       if (--pane.bufferedReads <= 0) pane.phase = "draft";
@@ -84,7 +86,7 @@ function makeCodexPane(frames: Frames) {
   const handleReturn = (args: string[]) => {
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
-      if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.bannerOpen = true; }
+      if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.shellUntilLaunch = false; pane.bannerOpen = true; }
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
@@ -120,6 +122,7 @@ function makeCodexPane(frames: Frames) {
   const handleText = (args: string[]) => {
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
+      if (pane.shellUntilLaunch) pane.launcherCommand = typed;
       if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) {
         pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2;
         if (pane.bannerAfterType) pane.bannerOpen = true;
@@ -150,7 +153,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -160,6 +163,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       after: text => `OpenAI Codex\n${codexRows(text)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`,
     });
     pane.live = true;
+    if (launchOverlay) { pane.bannerVariant = launchOverlay.variant; pane.bannerOnReturn = true; pane.bannerStuck = launchOverlay.stuck; pane.shellUntilLaunch = true; }
     pane.swallow = swallow;
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
@@ -181,7 +185,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
         boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
-    if (bootPrompt) return { pane, context, spawned };
+    if (bootPrompt) return { pane, context, spawned, keyWrites };
     engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
     if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
@@ -450,14 +454,14 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic"].map(variant => [stuck, variant] as const)))("#999(e) security banner is Esc-only before typing (stuck=%s, %s)", async (stuck, variant) => {
+  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [stuck, variant] as const)))("#999(e) security banner is Esc-only before typing (stuck=%s, %s)", async (stuck, variant) => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
       draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
     try {
       target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
       const result = await target.send(PONG, false, true);
       if (stuck) {
-        expect(result).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed", typed: false, submit_dispatched: false });
+        expect(result).toMatchObject({ ok: false, error_code: variant === "hooks-review" ? "hooks_review_not_dismissed" : "account_security_banner_not_dismissed", typed: false, submit_dispatched: false });
         expect(target.pane.text).toBe("");
         expect(target.pane.keys).toEqual(["escape"]);
       } else {
@@ -468,18 +472,39 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each([false, true])("#999(e) owned draft below security banner stays owned on key Return (stuck=%s)", async stuck => {
+  it.each([false, true])("Hooks review during spawn reaches boot delivery or fails explicitly (stuck=%s)", async stuck => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => fixture("idle-draft").replace(`› ${PONG}`, codexRows(typed)), after: typed => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(typed)) }, PONG, 0, "codex", true, { variant: "hooks-review", stuck });
+    try {
+      if (stuck) expect(target.spawned).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed" });
+      else { expect(target.spawned, JSON.stringify({ spawn: target.spawned, keys: target.pane.keys, submitted: target.pane.submitted, phase: target.pane.phase, text: target.pane.text })).toMatchObject({ ok: true, boot_prompt_submit_verified: true }); expect(target.pane.submitted.some(text => text.includes(PONG))).toBe(true); }
+      expect(target.pane.keys.filter(key => key === "escape")).toHaveLength(1);
+      expect(target.pane.keys).not.toContain("1"); expect(target.pane.keys).not.toContain("2");
+      expect(target.keyWrites).toHaveBeenCalledWith(expect.any(String), "escape", expect.objectContaining({ workspace: "workspace:1" }));
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true].flatMap(stuck => ["boot", "hooks-review"].map(variant => [stuck, variant] as const)))("#999(e) owned draft below security banner stays owned on key Return (stuck=%s, %s)", async (stuck, variant) => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
       draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
     try {
       await target.typeDraft(PONG); target.pane.phase = "draft";
-      target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
       const result = await target.keyReturn(LEAD_UUID);
       expect(result, JSON.stringify(result)).toMatchObject(stuck
-        ? { ok: false, error_code: "account_security_banner_not_dismissed", submit_attempted: false }
+        ? { ok: false, error_code: variant === "hooks-review" ? "hooks_review_not_dismissed" : "account_security_banner_not_dismissed", submit_attempted: false }
         : { ok: true, submit_verified: true });
       expect(target.pane.keys).toEqual(stuck ? ["escape"] : ["escape", "return"]);
       expect(target.context.typedDraftOwners.size).toBe(stuck ? 1 : 0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("Hooks review dismissal preserves a real foreign draft underneath", async () => {
+    const foreign = plainFrame("codex", "synthetic human draft");
+    const target = await setup({ empty: foreign, buffered: foreign, draft: foreign, after: foreign });
+    try {
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true;
+      expect(await target.send(PONG, false, true)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft", typed: false, submit_dispatched: false });
+      expect(target.pane.keys).toEqual(["escape"]); expect(target.pane.submitted).toEqual([]);
     } finally { target.context.dispose(); }
   }, 30_000);
 

@@ -587,7 +587,7 @@ export interface AccountSecurityBannerEvent {
   event_type: "account_security_banner";
   agent_id: string | null;
   surface: string;
-  variant: "advanced_account_security" | "daybreak" | "security";
+  variant: "advanced_account_security" | "daybreak" | "security" | "hooks_review";
   outcome: "dismissed" | "failed";
 }
 

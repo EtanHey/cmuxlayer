@@ -10093,7 +10093,7 @@ Session ID: ${sessionId}`,
       }
     });
 
-    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic"].map(variant => [origin, variant])))("#999(e) %s boot dismisses %s account security before readiness", async (origin, variant) => {
+    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("#999(e) %s boot dismisses %s account security before readiness", async (origin, variant) => {
       const id = `security-${origin}`;
       stateMgr.writeState(makeRecord({ agent_id: id, state: "booting", surface_id: "surface:42", cli: "codex",
         ...(origin === "resume" ? { boot_resumed_at: new Date().toISOString() } : {}) }));

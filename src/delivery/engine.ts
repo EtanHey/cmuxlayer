@@ -27,7 +27,7 @@ import type {
 import {
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
-  isCodexAccountSecurityBanner,
+  isCodexDismissibleOverlay,
   isPickerOrMenuScreen,
   parseScreen,
   codexScreenHasActiveTurn,
@@ -1810,7 +1810,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
-        const hadBanner = isCodexAccountSecurityBanner(snapshot.text);
+        const hadBanner = isCodexDismissibleOverlay(snapshot.text);
         securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
           (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
         const safe = await dismissAccountSecurityBanner(snapshot, {
@@ -2633,7 +2633,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           lines: 80,
           scrollback: false,
         });
-        if (isCodexAccountSecurityBanner(screen.text)) {
+        if (isCodexDismissibleOverlay(screen.text)) {
           screen = await withSurfaceWrite(target.surface, async () => {
             const assertRoute = async () => {
               await opts.assertStableSurfaceIdentity?.();
