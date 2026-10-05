@@ -357,29 +357,30 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it("#999 own wrapped queue can be verified when Return actually consumes it", async () => {
-    const screen = incident;
+  it.each(["", "…", "..."])("#999 own wrapped queue ending in %j verifies when Return consumes it", async suffix => {
+    const text = incidentText + suffix;
+    const screen = incident.replace(" post.", ` post.${suffix}`);
     const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
       after: `Working (5s • esc to interrupt)\n${screen}` });
     try {
-      await target.send(incidentText);
+      await target.send(text);
       target.pane.frames.after = screen;
       target.pane.drainQueueOnReturn = true;
       const result = await target.keyReturn(LEAD_UUID);
       expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
-      expect(target.pane.submitted).toEqual([incidentText]);
+      expect(target.pane.submitted).toEqual([text]);
       expect(target.context.typedDraftOwners.size).toBe(0);
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it("#1004 HIGH refuses a foreign truncated queue sharing our long prefix without Return", async () => {
+  it.each(["…", "..."])("#1004 HIGH refuses a foreign truncated %s queue sharing our long prefix without Return", async suffix => {
     const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
       after: `Working (5s • esc to interrupt)\n${incident}` });
     try {
       await target.send(incidentText);
       const prefix = incidentText.slice(0, 70);
       const foreign = `${prefix} foreign caller's hidden suffix`;
-      target.pane.frames.after = queueRows(`${prefix}…`);
+      target.pane.frames.after = queueRows(`${prefix}${suffix}`);
       target.pane.queued = [foreign];
       target.pane.drainQueueOnReturn = true;
       target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, foreign);

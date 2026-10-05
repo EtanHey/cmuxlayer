@@ -1145,7 +1145,7 @@ function queuedItemMatches(item: CodexQueuedItem, text: string, allowTruncation 
   const truncated = /(?:…|\.\.\.)$/.test(displayed);
   const visible = displayed.replace(/(?:…|\.\.\.)$/, "").trim();
   const normalized = compactQueueCorrelationText(visible);
-  return ((!truncated || allowTruncation) && compactQueueCorrelationText(displayed) === authored) || (allowTruncation && truncated &&
+  return compactQueueCorrelationText(displayed) === authored || (allowTruncation && truncated &&
     normalized.length > 0 && authored.startsWith(normalized) && visible.length >= 40);
 }
 

@@ -69,6 +69,13 @@ describe("#905 Codex 0.157 queue blocks", () => {
     expect(countVisibleOwnedQueuedInputs(mixed, [`${prefix} first`, `${prefix} second`])).toBe(1);
   });
 
+  it.each(["…", "..."])("#1004 owns complete text ending in authored %s", suffix => {
+    const text = `This complete caller-owned message has more than forty characters${suffix}`;
+    const screen = `OpenAI Codex\n• Queued follow-up inputs\n  ↳ ${text}\n› Ask Codex to do anything`;
+    expect(countVisibleOwnedQueuedInputs(screen, [text])).toBe(1);
+    expect(countVisibleOwnedQueuedInputs(screen, [`${text} hidden foreign suffix`])).toBe(0);
+  });
+
   it("keeps the pre-0.157 single steer block working", () => {
     expect(screenShowsQueuedAgentInput(fixture("midturn-steer-queued"), LIST)).toBe(true);
     expect(screenShowsQueuedAgentInput(fixture("midturn-wrapped-steer-queued"), LONG)).toBe(true);
