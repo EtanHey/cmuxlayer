@@ -284,6 +284,12 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
         readScreen: (surface, readOpts) =>
           client.readScreen(surface, readOpts),
+        withSurfaceWrite: (surface, run, writeOpts) => withSurfaceWrite(
+          surface,
+          // Bind the transport target too: a UUID lock cannot prevent ref reuse.
+          () => run(key => client.sendKey(writeOpts.stableSurfaceIdentity || surface, key, writeOpts)),
+          { ...writeOpts, toolName: "send_key", observePtyWrite: true },
+        ),
         send: (surface, text, sendOpts) => {
           const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
             sendOpts ?? {};

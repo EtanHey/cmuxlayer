@@ -310,6 +310,10 @@ describe("AgentEngine", () => {
       },
     );
     const surfaceProvider = async () => liveSurfaces;
+    Object.assign(mockClient, {
+      withSurfaceWrite: async <T>(surface: string, run: (sendKey: (key: string) => Promise<void>) => Promise<T>, opts: { workspace?: string }) =>
+        run(key => mockClient.sendKey(surface, key, { workspace: opts.workspace })),
+    });
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       // #926: `node:child_process` is mocked here; no process carries a session.
@@ -10115,6 +10119,18 @@ Session ID: ${sessionId}`,
       await engine.runSweep(); await engine.runSweep();
       expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
       expect(engine.getAgentState("security-wedged")).toMatchObject({ state: "error", error: expect.stringContaining("account_security_banner_not_dismissed") });
+    });
+
+    it("#1007 never sends Esc from an old banner after the agent rebinds", async () => {
+      const agent = makeRecord({ agent_id: "security-rebound", state: "booting", surface_id: "surface:43", cli: "codex" });
+      stateMgr.writeState(agent); engine.getRegistry().set(agent.agent_id, agent);
+      liveSurfaces = [makeSurface("surface:43")];
+      const closed = { surface: "surface:43", text: readFileSync(new URL("./fixtures/composer-overlays/codex-dismissed.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false };
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(closed);
+      const old = { ...closed, surface: "surface:42", text: readFileSync(new URL("./fixtures/composer-overlays/codex-boot.txt", import.meta.url), "utf8") };
+      expect(await engine["dismissBootSecurityBanner"](agent, old)).toEqual(closed);
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:43", expect.anything());
     });
 
     it("promotes booting agents to ready when their CLI prompt appears", async () => {

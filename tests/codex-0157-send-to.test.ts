@@ -4,7 +4,7 @@
 // composer paints only its placeholder, and that Return becomes a newline. A
 // Return pressed while a turn runs queues the text as a steer message.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -49,6 +49,7 @@ function makeCodexPane(frames: Frames) {
     endTurnAtPostTabRead: 0, postTabReads: 0,
     pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
     bannerOpen: false, bannerStuck: false, bannerAfterType: false,
+    bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
@@ -83,6 +84,7 @@ function makeCodexPane(frames: Frames) {
   const handleReturn = (args: string[]) => {
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
+      if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.bannerOpen = true; }
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
@@ -118,15 +120,17 @@ function makeCodexPane(frames: Frames) {
   const handleText = (args: string[]) => {
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
-      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) { pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2; }
-      if (pane.bannerAfterType) pane.bannerOpen = true;
+      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) {
+        pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2;
+        if (pane.bannerAfterType) pane.bannerOpen = true;
+      }
       return { stdout: "{}", stderr: "" };
     }
     return null;
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     const inputResult = handleKey(args) ?? handleText(args);
-    if (inputResult) return inputResult;
+    if (inputResult) { if (args.includes("escape")) await pane.onEscape?.(); return inputResult; }
     if (args.includes("read-screen")) {
       const beforeRead = pane.beforeRead; pane.beforeRead = undefined; await beforeRead?.();
       if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
@@ -146,7 +150,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex") {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -160,6 +164,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
+    const keyWrites = observeKeyWrites ? vi.spyOn(context.client, "sendKey") : undefined;
     const server = serverModule.createServer({ context, inboxBaseDir: testDir, lifecycleInitializer: async () => {} }) as any;
     const engine = engineForTests(server);
     await context.lifecycleReadyPromise;
@@ -198,7 +203,12 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
     const sendChunks = (text: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "surface", surface: spawned.surface_id, text, press_enter: true, allow_long_inline: true, chunk_size: 20 }, {})));
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks };
+    const rawBoot = async () => {
+      const { internalToolForTests } = await import("../src/mcp/registration.js");
+      const path = join(testDir, "synthetic-boot.txt"); writeFileSync(path, PONG);
+      return as(LEAD_UUID, async () => parseToolResult(await internalToolForTests(server, "send_command").handler({ surface: spawned.surface_id, command: "cmuxlayerCodex -s cmuxlayer", boot_prompt_path: path, boot_prompt_timeout_ms: 5_000 }, {})));
+    };
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites };
   }
 
   it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
@@ -362,6 +372,51 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     ["claude", "claude-slash", "/"],
     ["cursor", "cursor-path", "/999e_no_match_capture"],
   ] as const;
+
+  it("#1007 bound banner Esc retains the stable surface identity", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") }, undefined, 0, "codex", true);
+    try {
+      const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+      expect(agent.surface_uuid).toBeTruthy();
+      target.keyWrites?.mockClear();
+      target.pane.bannerOpen = true;
+      await target.engine["dismissBootSecurityBanner"](agent, { surface: agent.surface_id, text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+      expect(target.keyWrites).toHaveBeenCalledWith(agent.surface_uuid, "escape", { workspace: agent.workspace_id, stableSurfaceIdentity: agent.surface_uuid });
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1007 raw boot preserves the structured persistent-banner safety code", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
+    try {
+      target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      expect(await target.rawBoot()).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed" });
+      expect(target.pane.keys).toEqual(["return", "escape"]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["agent boot", "raw boot"])("#1007 %s banner reads share the UUID delivery lock", async route => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      let concurrent: any; let concurrentWrites = 0;
+      const attempt = async () => {
+        const before = target.exec.mock.calls.length;
+        concurrent = await target.typeDraft(PONG);
+        concurrentWrites = target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      };
+      if (route === "raw boot") {
+        target.pane.bannerOnReturn = true;
+        target.pane.onEscape = async () => { target.pane.beforeRead = attempt; };
+        await target.rawBoot();
+      } else {
+        target.pane.bannerOpen = true; target.pane.beforeRead = attempt;
+        const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+        await target.engine["dismissBootSecurityBanner"](agent, { surface: "surface:new", text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+      }
+      expect(concurrent).toMatchObject({ ok: false });
+      expect(JSON.stringify(concurrent)).toMatch(/busy|still in progress/u);
+      expect(concurrentWrites).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
   const matrixPlain = (cli: string, text: string, submitted = false) => cli === "cursor"
     ? `Cursor Agent\n${submitted ? `→ ${text}\nThinking…\n` : ""}→ ${submitted ? "Plan, search, build anything" : text}\nAuto`
     : plainFrame(cli, text, submitted);

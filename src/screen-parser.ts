@@ -1774,7 +1774,7 @@ const COMPLETION_OPTION_RE = /^\s*(?:[>❯›]\s*)?\/[\w:-]+\s{2,}\S/u;
 export function composerPickerBounds(text: string, cli?: CliType): { start: number; end: number } | null {
   const lines = normalizeText(text).split("\n");
   let composer = -1;
-  for (let index = lines.length - 1; index >= Math.max(0, lines.length - 40); index--) {
+  for (let index = lines.length - 1; index >= 0; index--) {
     if (/^\s*[›❯>→](?:\s|$)/u.test(lines[index] ?? "") && !COMPLETION_OPTION_RE.test(lines[index] ?? "")) { composer = index; break; }
   }
   if (composer < 0) return null;
@@ -1804,6 +1804,7 @@ export function composerPickerBounds(text: string, cli?: CliType): { start: numb
 
 /** The live Codex setup overlay is dangerous even when an input box is below it. */
 export function isCodexAccountSecurityBanner(text: string): boolean {
+  // This setup banner is a bottom overlay; historical scrollback cannot authorize Esc.
   const lines = normalizeText(text).split("\n").slice(-40);
   const reverseFooter = [...lines].reverse().findIndex(line => /^\s*Press a number to choose\s*·\s*esc to dismiss\s*·\s*type to continue\s*$/iu.test(line));
   if (reverseFooter < 0) return false;

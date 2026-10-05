@@ -40,4 +40,14 @@ describe("#999(e) real captured composer overlays", () => {
     const stale = capture("codex-mention").replace("@999e_no_match_capture", "Ask Codex to do anything");
     expect(isPickerOrMenuScreen(stale, "codex")).toBe(false);
   });
+
+  it("recognizes a Claude slash menu with 45 options from captured rows", () => {
+    const rows = capture("claude-slash").split("\n");
+    const options = rows.filter(line => /^\s*\/\w[\w-]*\s{2,}\S/u.test(line));
+    const first = rows.findIndex(line => line === options[0]);
+    expect(options.length).toBeGreaterThan(0);
+    const long = [...rows.slice(0, first), ...Array.from({ length: 45 }, (_, i) => options[i % options.length])].join("\n");
+    expect(isPickerOrMenuScreen(long, "claude")).toBe(true);
+    expect(composerPickerInputRegion(long, "claude")).toBe("/");
+  });
 });

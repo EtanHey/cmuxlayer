@@ -2463,14 +2463,25 @@ export class AgentEngine {
       if (ctx && !this.assertSweepInputCurrent(ctx)) throw new Error("Security-banner boot observation changed");
       await this.resolveUnchangedAgentIoRoute(agent.agent_id, route, "security-banner dismissal");
     };
+    if (!this.client.withSurfaceWrite) throw new Error("Security-banner dismissal requires a shared surface-write transaction");
     try {
-      return await dismissAccountSecurityBanner(screen, {
-        escape: async () => {
+      return await this.client.withSurfaceWrite(route.surface_id, async sendKey => {
+        const read = async () => {
           await assertCurrent();
-          await this.client.sendKey(route.surface_id, "escape", { workspace: route.workspace_id ?? undefined, ...this.stableSurfaceWriteOptions(route.surface_uuid) });
-        },
-        read: async () => { await assertCurrent(); return this.readAgentScreen(agent, { lines: BOOT_SESSION_CAPTURE_LINES }); },
-      });
+          const observed = await this.client.readScreen(
+            this.client.supportsStableSurfaceReads && route.surface_uuid ? route.surface_uuid : route.surface_id,
+            { workspace: route.workspace_id ?? undefined, lines: BOOT_SESSION_CAPTURE_LINES },
+          );
+          await assertCurrent();
+          return observed;
+        };
+        // The triggering screen can predate a rebind or another delivery.
+        // Only fresh evidence under the shared UUID lock authorizes Esc.
+        return dismissAccountSecurityBanner(await read(), {
+          escape: async () => { await assertCurrent(); await sendKey("escape"); },
+          read,
+        });
+      }, { workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
     } catch (error) {
       if (error instanceof DeliverySafetyGateError) {
         await assertCurrent();

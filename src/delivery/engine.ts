@@ -2644,7 +2644,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               escape: async () => { await sendKeyWithRetry(target.surface, "escape", target.workspace, assertRoute, 1); },
               read,
             });
-          });
+          }, { stableSurfaceIdentity: opts.stableSurfaceIdentity });
         }
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
@@ -3776,6 +3776,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const deliveredChars = chunks
         .slice(0, sentChunks)
         .reduce((sum, chunk) => sum + chunk.length, 0);
+      if (error instanceof DeliverySafetyGateError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       throw new BootPromptDeliveryError(
         `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
