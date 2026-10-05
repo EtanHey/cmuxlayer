@@ -100,6 +100,23 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("#1007 native banner transaction excludes concurrent UUID-routed input", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true }); mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const uuid = "11111111-2222-4333-8444-555555555555";
+    vi.spyOn(runtime as any, "resolveFreshMutationRoute").mockResolvedValue({ ...makeRecord(), surface_uuid: uuid });
+    try {
+      await (runtime as any).engine.client.withSurfaceWrite("surface:1", async (sendKey: (key: string) => Promise<void>) => {
+        await expect(runtime.sendTurn({ threadId: "agent-1", text: "concurrent" })).rejects.toThrow(/busy/u);
+        expect(client.send).not.toHaveBeenCalled();
+        await sendKey("escape");
+      }, { workspace: "workspace:app", stableSurfaceIdentity: uuid });
+      expect(client.sendKey).toHaveBeenCalledWith(uuid, "escape", { workspace: "workspace:app", stableSurfaceIdentity: uuid });
+      await runtime.sendTurn({ threadId: "agent-1", text: "after dismissal" });
+      expect(client.sendKey.mock.calls.map((call: unknown[]) => call[1])).toEqual(["escape", "return"]);
+    } finally { runtime.dispose(); rmSync(TEST_DIR, { recursive: true, force: true }); }
+  });
   it.each([undefined, "0", "1"])("gates production public filing with flag %s", (flag) => {
     vi.stubEnv("VITEST", "false");
     vi.stubEnv("NODE_ENV", "production");

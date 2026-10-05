@@ -1760,17 +1760,63 @@ export function composerPickerFooterIndex(screenText: string): number {
   const lines = normalizeText(screenText).split("\n");
   for (let index = lines.length - 1; index >= Math.max(0, lines.length - 32); index--) {
     const line = lines[index] ?? "";
-    if (!/^\s*(?:no matches\s*[·•]\s*)?enter\/tab insert\s*[·•]\s*esc close\s*$/i.test(line) &&
-        !/^\s*↑(?:↓|\/↓) to navigate\s*[·•]\s*Enter to select\s*[·•]\s*Esc to cancel\s*$/i.test(line)) continue;
+    if (!/^\s*(?:no matches\s*[·•]\s*)?enter\/tab insert\s*[·•]\s*esc close(?:\s*[·•]\s*↑\/↓ select\s*[·•]\s*←\/→ filter)?\s*$/iu.test(line) &&
+        !/^\s*↑(?:↓|\/↓) to navigate\s*[·•]\s*Enter to select\s*[·•]\s*Esc to cancel\s*$/iu.test(line)) continue;
     if (lines.slice(index + 1).some(isReadyComposerLine)) return -1;
     return index;
   }
   return -1;
 }
 
+const COMPLETION_OPTION_RE = /^\s*(?:[>❯›]\s*)?\/[\w:-]+\s{2,}\S/u;
+
+/** Bounds of the composer only, excluding completion rows on either side. */
+export function composerPickerBounds(text: string, cli?: CliType): { start: number; end: number } | null {
+  const lines = normalizeText(text).split("\n");
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^\s*[›❯>→](?:\s|$)/u.test(lines[index] ?? "") && !COMPLETION_OPTION_RE.test(lines[index] ?? "")) { composer = index; break; }
+  }
+  if (composer < 0) return null;
+  const footer = composerPickerFooterIndex(text);
+  if (footer >= 0) {
+    if (composer > footer) return { start: composer, end: lines.length };
+    let end = footer;
+    for (let index = composer + 1; index < footer; index++) {
+      if (/^\s*(?:no matches|loading\.\.\.)\s*$/iu.test(lines[index] ?? "") || COMPLETION_OPTION_RE.test(lines[index] ?? "")) { end = index; break; }
+    }
+    return { start: composer, end };
+  }
+  const input = (lines[composer] ?? "").replace(/^\s*[›❯>→]\s*/u, "");
+  const options = lines.map((line, index) => COMPLETION_OPTION_RE.test(line) ? index : -1).filter(index => index >= 0);
+  const lastOption = options.at(-1) ?? -1;
+  if (input.startsWith("/") && options.length >= 2) {
+    if ((cli === "codex" || cli === undefined) && lastOption < composer &&
+        lines.slice(lastOption + 1, composer).every(line => !line.trim())) return { start: composer, end: lines.length };
+    const first = options.find(index => index > composer);
+    if (first !== undefined && lines.slice(composer + 1, first).every(line => !line.trim() || /^─{8,}$/u.test(line.trim()))) return { start: composer, end: first };
+  }
+  if ((cli === "cursor" || cli === undefined) && /^\s*→/u.test(lines[composer] ?? "") &&
+      lines.slice(composer + 1).some(line => /^\s*▀{8,}\s*$/u.test(line)) &&
+      /^\s*No matches\s*$/iu.test([...lines].reverse().find(line => line.trim()) ?? "")) return { start: composer, end: composer + 1 };
+  return null;
+}
+
+/** The live Codex setup overlay is dangerous even when an input box is below it. */
+export function isCodexAccountSecurityBanner(text: string): boolean {
+  // This setup banner is a bottom overlay; historical scrollback cannot authorize Esc.
+  const lines = normalizeText(text).split("\n").slice(-40);
+  const reverseFooter = [...lines].reverse().findIndex(line => /^\s*Press a number to choose\s*·\s*esc to dismiss\s*·\s*type to continue\s*$/iu.test(line));
+  if (reverseFooter < 0) return false;
+  const footer = lines.length - 1 - reverseFooter;
+  return /Set up Advanced Account Security with a hardware security key/iu.test(lines.slice(Math.max(0, footer - 8), footer).join(" ").replace(/\s+/gu, " ")) &&
+    lines.slice(Math.max(0, footer - 5), footer).some(line => /^\s*›\s*1\. Set up security\s*$/u.test(line)) &&
+    lines.slice(footer + 1).some(line => /^\s*›(?:\s|$)/u.test(line));
+}
+
 export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   const normalized = normalizeText(text);
-  if (composerPickerFooterIndex(normalized) >= 0 || analyzeActiveChooser(normalized)) return true;
+  if (composerPickerBounds(normalized, cli) || isCodexAccountSecurityBanner(normalized) || analyzeActiveChooser(normalized)) return true;
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })

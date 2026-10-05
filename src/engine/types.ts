@@ -780,6 +780,12 @@ export interface AgentEngineClient {
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
+  /** One shared input transaction; its bound key writer avoids nested locks. */
+  withSurfaceWrite?<T>(
+    surface: string,
+    run: (sendKey: (key: string) => Promise<void>) => Promise<T>,
+    opts: { workspace?: string; stableSurfaceIdentity?: string | null },
+  ): Promise<T>;
   listWindows?(): Promise<{ windows: CmuxWindow[] }>;
   listAllWorkspaces?(): Promise<AllWindowWorkspaceEnumeration>;
   listWorkspaces(opts?: {

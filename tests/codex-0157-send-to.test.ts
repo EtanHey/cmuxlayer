@@ -4,7 +4,7 @@
 // composer paints only its placeholder, and that Return becomes a newline. A
 // Return pressed while a turn runs queues the text as a steer message.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -14,6 +14,8 @@ import { engineForTests } from "../src/server.js";
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`./fixtures/codex-0.157/${name}.txt`, import.meta.url), "utf8");
+const overlayCapture = (name: string): string =>
+  readFileSync(new URL(`./fixtures/composer-overlays/${name}.txt`, import.meta.url), "utf8");
 
 const PONG = "Reply with the single word pong and nothing else.";
 const LIST = "Please also list the files in this folder when you finish.";
@@ -46,9 +48,12 @@ function makeCodexPane(frames: Frames) {
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
     pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
+    bannerOpen: false, bannerStuck: false, bannerAfterType: false,
+    bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
   };
   const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
   const read = (): string => {
+    if (pane.bannerOpen) return overlayCapture("codex-boot").replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
       if (--pane.bufferedReads <= 0) pane.phase = "draft";
       return frame(pane.frames.buffered);
@@ -76,36 +81,56 @@ function makeCodexPane(frames: Frames) {
     ] };
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
-  const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
-    if (args.includes("send-key") && pane.live) {
-      pane.keys.push(String(args.at(-1)));
-      if (args.includes("escape")) {
-        if (!pane.pickerStuck) pane.pickerOpen = false;
-        return { stdout: "{}", stderr: "" };
-      }
-      if (pane.pickerOpen) return { stdout: "{}", stderr: "" };
-    }
+  const handleReturn = (args: string[]) => {
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
+      if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.bannerOpen = true; }
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
       else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
-        pane.submitted.push(pane.queued.shift()!);
+        const queued = pane.queued.shift();
+        if (queued !== undefined) pane.submitted.push(queued);
         pane.frames.after = pane.queueDrainFrame ?? ((typed) => fixture("idle-submitted-working").replace(PONG, typed));
       }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const handleTab = (args: string[]) => {
     if (args.includes("send-key") && args.includes("tab") && pane.live) {
       pane.tabs += 1;
       if (pane.swallowTabs > 0) pane.swallowTabs -= 1;
       else if (pane.phase === "draft") { pane.queued.push(pane.text); pane.phase = "after"; }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const handleKey = (args: string[]) => {
+    if (args.includes("send-key") && pane.live) {
+      pane.keys.push(String(args.at(-1)));
+      if (args.includes("escape")) {
+        if (!pane.pickerStuck) pane.pickerOpen = false;
+        if (!pane.bannerStuck) pane.bannerOpen = false;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (pane.pickerOpen) return { stdout: "{}", stderr: "" };
+    }
+    return handleReturn(args) ?? handleTab(args);
+  };
+  const handleText = (args: string[]) => {
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
-      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) { pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2; }
+      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) {
+        pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2;
+        if (pane.bannerAfterType) pane.bannerOpen = true;
+      }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    const inputResult = handleKey(args) ?? handleText(args);
+    if (inputResult) { if (args.includes("escape")) await pane.onEscape?.(); return inputResult; }
     if (args.includes("read-screen")) {
       const beforeRead = pane.beforeRead; pane.beforeRead = undefined; await beforeRead?.();
       if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
@@ -125,7 +150,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex") {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -139,6 +164,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
+    const keyWrites = observeKeyWrites ? vi.spyOn(context.client, "sendKey") : undefined;
     const server = serverModule.createServer({ context, inboxBaseDir: testDir, lifecycleInitializer: async () => {} }) as any;
     const engine = engineForTests(server);
     await context.lifecycleReadyPromise;
@@ -175,7 +201,14 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
         { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen };
+    const sendChunks = (text: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ mode: "surface", surface: spawned.surface_id, text, press_enter: true, allow_long_inline: true, chunk_size: 20 }, {})));
+    const rawBoot = async () => {
+      const { internalToolForTests } = await import("../src/mcp/registration.js");
+      const path = join(testDir, "synthetic-boot.txt"); writeFileSync(path, PONG);
+      return as(LEAD_UUID, async () => parseToolResult(await internalToolForTests(server, "send_command").handler({ surface: spawned.surface_id, command: "cmuxlayerCodex -s cmuxlayer", boot_prompt_path: path, boot_prompt_timeout_ms: 5_000 }, {})));
+    };
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites };
   }
 
   it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
@@ -333,11 +366,168 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
+  const realPickers = [
+    ["codex", "codex-mention", "@999e_no_match_capture"],
+    ["codex", "codex-slash", "/"],
+    ["claude", "claude-slash", "/"],
+    ["cursor", "cursor-path", "/999e_no_match_capture"],
+  ] as const;
+
+  it("#1007 bound banner Esc retains the stable surface identity", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") }, undefined, 0, "codex", true);
+    try {
+      const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+      expect(agent.surface_uuid).toBeTruthy();
+      target.keyWrites?.mockClear();
+      target.pane.bannerOpen = true;
+      await target.engine["dismissBootSecurityBanner"](agent, { surface: agent.surface_id, text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+      expect(target.keyWrites).toHaveBeenCalledWith(agent.surface_uuid, "escape", { workspace: agent.workspace_id, stableSurfaceIdentity: agent.surface_uuid });
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1007 raw boot preserves the structured persistent-banner safety code", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
+    try {
+      target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      expect(await target.rawBoot()).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed" });
+      expect(target.pane.keys).toEqual(["return", "escape"]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["agent boot", "raw boot"])("#1007 %s banner reads share the UUID delivery lock", async route => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      let concurrent: any; let concurrentWrites = 0;
+      const attempt = async () => {
+        const before = target.exec.mock.calls.length;
+        concurrent = await target.typeDraft(PONG);
+        concurrentWrites = target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      };
+      if (route === "raw boot") {
+        target.pane.bannerOnReturn = true;
+        target.pane.onEscape = async () => { target.pane.beforeRead = attempt; };
+        await target.rawBoot();
+      } else {
+        target.pane.bannerOpen = true; target.pane.beforeRead = attempt;
+        const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+        await target.engine["dismissBootSecurityBanner"](agent, { surface: "surface:new", text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+      }
+      expect(concurrent).toMatchObject({ ok: false });
+      expect(JSON.stringify(concurrent)).toMatch(/busy|still in progress/u);
+      expect(concurrentWrites).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+  const matrixPlain = (cli: string, text: string, submitted = false) => cli === "cursor"
+    ? `Cursor Agent\n${submitted ? `→ ${text}\nThinking…\n` : ""}→ ${submitted ? "Plan, search, build anything" : text}\nAuto`
+    : plainFrame(cli, text, submitted);
+
+  it.each(realPickers)("#999(e) real %s %s closes only an owned picker and submits", async (cli, name, text) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: matrixPlain(cli, ""),
+      draft: typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed),
+      after: typed => matrixPlain(cli, typed, true) }, undefined, 0, cli);
+    try {
+      target.pane.pickerOpen = true;
+      target.pane.frames.buffered = typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed);
+      expect(await target.send(text, false, true)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(realPickers.flatMap(([cli, name, text]) => ["text retry", "key Return"].map(route => [cli, name, text, route])))("#999(e) retains %s %s ownership for %s via %s", async (cli, name, text, route) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: matrixPlain(cli, ""),
+      draft: typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed),
+      after: typed => matrixPlain(cli, typed, true) }, undefined, 0, cli);
+    try {
+      expect(await target.typeDraft(text)).toMatchObject({ typed: true });
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      const result = route === "text retry" ? await target.send(text, false, true) : await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("#999(e) security banner is Esc-only before typing (stuck=%s)", async stuck => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      const result = await target.send(PONG, false, true);
+      if (stuck) {
+        expect(result).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed", typed: false, submit_dispatched: false });
+        expect(target.pane.text).toBe("");
+        expect(target.pane.keys).toEqual(["escape"]);
+      } else {
+        expect(result).toMatchObject({ ok: true, submit_verified: true });
+        expect(target.pane.keys).toEqual(["escape", "return"]);
+        expect(target.pane.submitted).toEqual([PONG]);
+      }
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("#999(e) owned draft below security banner stays owned on key Return (stuck=%s)", async stuck => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      await target.typeDraft(PONG); target.pane.phase = "draft";
+      target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject(stuck
+        ? { ok: false, error_code: "account_security_banner_not_dismissed", submit_attempted: false }
+        : { ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(stuck ? ["escape"] : ["escape", "return"]);
+      expect(target.context.typedDraftOwners.size).toBe(stuck ? 1 : 0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(realPickers)("#999(e) stuck real %s %s picker fails without Return", async (cli, name, text) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: overlayCapture(name),
+      draft: overlayCapture(name), after: matrixPlain(cli, "") }, undefined, 0, cli);
+    try {
+      target.pane.pickerOpen = true; target.pane.pickerStuck = true;
+      expect(await target.send(text, false, true)).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", submit_dispatched: false });
+      expect(target.pane.keys).toEqual(["escape"]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) another caller cannot close and submit the real owned picker", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: overlayCapture("codex-mention"), after: fixture("idle-empty") });
+    try {
+      await target.typeDraft("@999e_no_match_capture");
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      expect(await target.keyReturn(OTHER_UUID)).toMatchObject({ ok: false, error_code: "draft_ownership_unverified" });
+      expect(target.pane.keys).toEqual([]);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) security appearing between chunks preserves its distinct failure and stops input", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
+    try {
+      target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      const payload = "Synthetic packet ".repeat(1_100);
+      const before = target.exec.mock.calls.length;
+      const result = await target.sendChunks(payload);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed", typed: true });
+      expect(target.pane.keys.filter(key => key === "escape" || key === "return")).toEqual(["escape"]);
+      expect(target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer"))).toHaveLength(1);
+      expect(payload.startsWith(target.pane.text)).toBe(true);
+      expect(target.pane.text.length).toBeLessThan(payload.length);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   // #999 incident: owned input survives pending verification and a wrapped
   // queue at idle. Return dispatch is separate from proof of consumption.
   const incidentText = 'PR-3 case-h delta @124ccc35: Opus PASS (strict exact-or-≥40-prefix queue evidence, wrap-tolerant). Once your full hook is green: push and open the PR (size:L). The live run waits for my "0.4.97 installed" post.';
   const incident = fixture("issue-999-idle-owned-queue");
-  const queueRows = (rows: string) => incident.replace(/  ↳[\s\S]*?    shift/, `  ↳ ${rows}\n    shift`);
+  const queueRows = (rows: string) => incident.replace(/ {2}↳[\s\S]*? {4}shift/u, `  ↳ ${rows}\n    shift`);
   const busyDraft = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
 
   it.each(["queued", "pending_verify"])("#999 wrapped own %s queue dispatches Return and keeps unverified recovery honest", async state => {

@@ -283,15 +283,23 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         clearStatus: async () => {},
         readScreen: (surface, readOpts) =>
           this.client.readScreen(surface, readOpts),
+        withSurfaceWrite: (surface, run, writeOpts) => this.runWorkspaceMutation(
+          "send_key", writeOpts.workspace,
+          () => this.withSurfaceWrite(
+            writeOpts.stableSurfaceIdentity ? `uuid:${writeOpts.stableSurfaceIdentity.toLowerCase()}` : surface,
+            // Bind the transport target too: a UUID lock cannot prevent ref reuse.
+            () => run(key => this.client.sendKey(writeOpts.stableSurfaceIdentity || surface, key, writeOpts)),
+          ),
+        ),
         send: (surface, text, sendOpts) =>
           this.runWorkspaceMutation("send_command", sendOpts?.workspace, () =>
-            this.withSurfaceWrite(surface, () =>
+            this.withSurfaceWrite(sendOpts?.stableSurfaceIdentity ? `uuid:${sendOpts.stableSurfaceIdentity.toLowerCase()}` : surface, () =>
               this.client.send(surface, text, sendOpts),
             ),
           ),
         sendKey: (surface, key, keyOpts) =>
           this.runWorkspaceMutation("send_key", keyOpts?.workspace, () =>
-            this.withSurfaceWrite(surface, () =>
+            this.withSurfaceWrite(keyOpts?.stableSurfaceIdentity ? `uuid:${keyOpts.stableSurfaceIdentity.toLowerCase()}` : surface, () =>
               this.client.sendKey(surface, key, keyOpts),
             ),
           ),

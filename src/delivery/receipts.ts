@@ -527,6 +527,7 @@ export class DeliverySafetyGateError extends Error {
     readonly error_code:
       | "blocked_by_interactive_prompt"
       | "composer_picker_not_closed"
+      | "account_security_banner_not_dismissed"
       | "blocked_by_permission_prompt"
       | "blocked_by_foreign_draft"
       | "blocked_by_foreign_queue"
@@ -545,6 +546,8 @@ export class DeliverySafetyGateError extends Error {
         ? draftText !== undefined
           ? `Codex owned queue remains unverified after Return: ${JSON.stringify(draftText)}; no submission confirmed. Read the pane; if it remains stalled, close and resume the agent by ID with spawn_agent({resume_agent_id}).`
           : "Codex has queued inputs while idle; nothing was typed or submitted; read_screen and report the stalled queue to the lead"
+        : error_code === "account_security_banner_not_dismissed"
+        ? "account_security_banner_not_dismissed: Codex security banner persists after one Esc; no text or submit was sent."
         : error_code === "composer_picker_not_closed"
         ? "Composer picker did not close after Esc; Return was not sent. Read the pane before retrying."
         : error_code === "blocked_by_foreign_queue"
