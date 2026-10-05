@@ -11590,6 +11590,40 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it.each(["queued", "steer_pending"] as const)("P0 STEER stale %s alerts the parent once without replay or interrupt", async delivery_state => {
+      engine.dispose();
+      const nowMs = Date.now() + 2000;
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient,
+        { spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+          deliveryAttentionMs: 1000, deliveryVerifyDeadlineMs: 1000, haltNow: () => nowMs });
+      const parent = makeRecord({ agent_id: "stale-parent", surface_id: "surface:stale-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stale-child", surface_id: "surface:stale-child", state: "working", cli: "codex", parent_agent_id: parent.agent_id, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      const receipt = engine.acceptComposerQueue({ delivery_id: "stale-receipt", agent_id: child.agent_id,
+        text: "synthetic urgent lead correction", press_enter: true, source_event: "send_to", retry_count: 0, delivery_state });
+      const verify = vi.fn().mockResolvedValue({ outcome: "pending" }); engine.setDeliveryVerifier(verify);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(nowMs);
+      try {
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state, terminal: false, needs_attention: true });
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)?.attention_reason).toContain("1000ms");
+        const screen = "OpenAI Codex\nWorking (2s • esc to interrupt)\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch";
+        await (engine as any).maybeEscalateLiveHalt(child, screen);
+        await (engine as any).maybeEscalateLiveHalt(engine.getAgentState(child.agent_id), screen);
+        const alerts = readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(row => row.tag === "agent_halt_delivery_stalled");
+        expect(alerts).toHaveLength(1); expect(alerts[0]?.task).toContain(receipt.delivery_id);
+        expect(alerts[0]?.task).not.toContain("text: \"escape\"");
+        expect(mockClient.sendKey).not.toHaveBeenCalled();
+        verify.mockResolvedValue({ outcome: "delivered", submit_verified: true });
+        clock.mockReturnValue(nowMs + 60_000);
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", needs_attention: false, attention_reason: null });
+      } finally { clock.mockRestore(); }
+    });
+
     it("wakes the parent immediately when a harness API error freezes a child", async () => {
       const nowMs = Date.parse("2026-08-27T07:00:00.000Z");
       engine.dispose();

@@ -186,6 +186,7 @@ import {
   screenTranscriptContainsText,
   composerHoldsForeignDraft,
   screenShowsQueuedAgentInput,
+  codexPendingDeliveryKind,
   screenShowsQueuedCursorFollowup,
   screenShowsPendingShellInput,
   classifyPendingLauncherLine,
@@ -2896,6 +2897,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       text: string;
       press_enter: boolean;
       allow_busy?: boolean;
+      codex_busy_mode?: "steer" | "queue";
       retry_owned_draft?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
@@ -3083,7 +3085,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const queuedBehindTurn =
         args.source_event === "send_to" && liveRouteState.state === "working";
       const bypassLifecycleGate =
-        args.allow_busy === true || args.source_event === "send_to";
+        args.allow_busy === true || args.source_event === "send_to" ||
+        (expectedCli === "codex" && liveRouteState.state === "working" &&
+          (args.source_event === "report_to_parent" || args.source_event === "dispatch_nudge"));
       if (
         !bypassLifecycleGate &&
         !isLiveDeliverable(liveRouteState) &&
@@ -3176,6 +3180,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
+            codex_busy_mode: args.codex_busy_mode,
             retry_owned_draft: args.retry_owned_draft,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
@@ -3220,7 +3225,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               verifiedDelivery: args.source_event === "send_to",
             });
           }
-          return { ...delivery, queued_behind_turn: queuedBehindTurn || delivery.queue_verified === true };
+          return { ...delivery, queued_behind_turn: expectedCli === "codex"
+            ? delivery.delivery === "queued" && delivery.queued_behind_turn === true
+            : queuedBehindTurn || delivery.queue_verified === true };
           } catch (error) {
             if (error !== retrySettled || !settledRetry) throw error;
             return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
@@ -3247,6 +3254,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agent_id: receipt.agent_id,
             text: receipt.text,
             press_enter: receipt.press_enter,
+            codex_busy_mode: receipt.codex_busy_mode,
             allow_busy: false,
             source_event: receipt.source_event,
             delivery_id: receipt.delivery_id,
@@ -3270,6 +3278,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_dispatched: delivery.submit_dispatched,
           ...(delivery.delivery === "submitted" ||
           delivery.delivery === "queued" ||
+          delivery.delivery === "steer_pending" ||
           delivery.delivery === "queued_followup" ||
           delivery.delivery === "rescued" ||
           delivery.delivery === "pending_verify"
@@ -3286,6 +3295,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery:
         | "submitted"
         | "queued"
+        | "steer_pending"
         | "queued_followup"
         | "rescued"
         | "pending_verify";
@@ -3295,7 +3305,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         message,
         inboxPath(recipient.agent_id, inboxOpts),
       );
-      if (recipient.state === "working") {
+      if (recipient.state === "working" && recipient.cli !== "codex") {
         const queued = engine.queueDelivery({
           agent_id: recipient.agent_id,
           text: pointer,
@@ -3336,6 +3346,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (
         delivered.delivery !== "submitted" &&
         delivered.delivery !== "queued" &&
+        delivered.delivery !== "steer_pending" &&
         delivered.delivery !== "queued_followup" &&
         delivered.delivery !== "rescued" &&
         delivered.delivery !== "pending_verify"
@@ -3346,6 +3357,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       if (
         delivered.delivery === "queued" ||
+        delivered.delivery === "steer_pending" ||
         delivered.delivery === "queued_followup"
       ) {
         engine.acceptComposerQueue({
@@ -3613,6 +3625,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
+        // An older identical Tab queue is not this delivery. Its continued
+        // presence must not hide a fresh committed steer at the tool boundary.
+        if ((cli === "codex" || agent.cli === "codex") && !pending && !pendingKind &&
+          codexScreenShowsSubmit(baseline, resolvedSnapshot.text, receipt.text)) {
+          settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return { outcome: "delivered" as const, submit_verified: true };
+        }
         // Compaction can temporarily render Codex's ready footer while the
         // queued message still belongs to the active turn's next tool call.
         const compactingCodexQueue =
@@ -3625,6 +3646,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
+            ...(queued ? { delivery_state: pendingKind ?? (receipt.delivery_state === "steer_pending" ? "steer_pending" : "queued") } : {}),
             ...(queued
               ? {
                   reason: compactingCodexQueue
@@ -3661,7 +3683,6 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             correlationTail,
           ) &&
           !pending;
-        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
         const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
           (screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)) ||
           (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))

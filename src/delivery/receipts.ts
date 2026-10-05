@@ -17,6 +17,7 @@ export type PublicDeliveryState =
   | "typed"
   | "submitted"
   | "queued"
+  | "steer_pending"
   | "queued_followup"
   | "rescued"
   | "failed"
@@ -261,6 +262,7 @@ export function buildPublicDeliveryReceipt(input: {
   const evidencedState =
     input.delivery_state === "typed" ||
     input.delivery_state === "queued" ||
+    input.delivery_state === "steer_pending" ||
     input.delivery_state === "queued_followup" ||
     input.delivery_state === "rescued" ||
     input.delivery_state === "failed" ||
@@ -339,6 +341,7 @@ export function defaultNonDeliveryWarning(
 ): string | undefined {
   switch (state) {
     case "pending_verify":
+    case "steer_pending":
     case "queued":
     case "queued_followup":
       return (
@@ -396,6 +399,7 @@ export interface DeliveryRecord {
   chunk_delay_ms: number;
   chunks: string[];
   press_enter: boolean;
+  codex_busy_mode?: "steer" | "queue";
   verify_submit: boolean;
   submit_verified: boolean | null;
   submit_verification_reason?: SubmitVerificationFailureReason;
