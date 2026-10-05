@@ -13,7 +13,7 @@ fi
 # Guard 2 — regression harness
 [ ! -f scripts/run_tests.sh ] && { echo "⚠️  no scripts/run_tests.sh"; exit 0; }
 
-env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh
+HS="${HOME:-}/Gits/golems/scripts/hooks/heavy-suite.py"; if [ -f "$HS" ] && command -v python3 >/dev/null; then python3 "$HS" -- env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh; else echo "heavy-suite: helper missing; running unqueued" >&2; env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bash scripts/run_tests.sh; fi
 exit_status=$?
 
 if [ "$exit_status" -ne 0 ]; then
