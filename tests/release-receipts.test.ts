@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(__dirname, "..");
 const receiptCli = join(repoRoot, "scripts", "release-receipt.mjs");
+const gitLocalVars = spawnSync("git", ["rev-parse", "--local-env-vars"], { encoding: "utf8" }).stdout.trim().split("\n").join(" ");
 
 const tmpRoots: string[] = [];
 
@@ -152,6 +153,7 @@ case "\${args[0]:-}" in
   fetch) exit 0 ;;
   rev-parse)
     case "\${args[1]:-}" in
+      --local-env-vars) printf '%s\\n' ${gitLocalVars} ;;
       v*) exit 1 ;;
       HEAD)
         if [ "$other_repo" -eq 1 ]; then echo "1111111111111111111111111111111111111111"; elif [ -f "$STUB_GIT_HEAD_FILE" ]; then cat "$STUB_GIT_HEAD_FILE"; else echo "1111111111111111111111111111111111111111"; fi ;;
@@ -343,6 +345,21 @@ function readReceipt(fixture: Fixture, version: string): any {
 }
 
 describe("release receipt ledger CLI", () => {
+  it("clears inherited git-local environment before the release suite", () => {
+    const fixture = makeReleaseFixture();
+    writeExecutable(join(fixture.root, "bin", "bun"), `#!/usr/bin/env bash
+if [ "$*" = "run test" ]; then
+  printf '%s|%s|%s\\n' "\${GIT_DIR-unset}" "\${GIT_WORK_TREE-unset}" "\${GIT_INDEX_FILE-unset}"
+  exit 73
+fi
+`);
+    const result = runScript(fixture, "release.sh", ["0.4.1", "--yes"], {
+      GIT_DIR: join(fixture.repoDir, ".git"), GIT_WORK_TREE: fixture.repoDir, GIT_INDEX_FILE: join(fixture.repoDir, ".git/index"),
+    });
+    expect(result.status).toBe(73);
+    expect(result.stdout).toContain("unset|unset|unset");
+  });
+
   it("initialises a receipt carrying version, tag, commit and timestamp", () => {
     const dir = makeRoot("cmuxlayer-receipt-cli-");
     const init = runReceipt(
