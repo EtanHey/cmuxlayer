@@ -1255,7 +1255,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
-          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? "queued",
+          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? (opts.codex_busy_mode === "queue" ? "queued" : "steer_pending"),
         };
       }
       if (

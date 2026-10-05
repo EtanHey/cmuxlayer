@@ -11590,27 +11590,27 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
-    it.each(["queued", "steer_pending"] as const)("P0 STEER stale %s alerts the parent once without replay or interrupt", async delivery_state => {
+    it.each(["queued", "steer_pending", "queued_followup"] as const)("P0 STEER stale %s alerts the parent once without replay or interrupt", async delivery_state => {
       engine.dispose();
       const nowMs = Date.now() + 2000;
       engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient,
         { spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
           deliveryAttentionMs: 1000, deliveryVerifyDeadlineMs: 1000, haltNow: () => nowMs });
       const parent = makeRecord({ agent_id: "stale-parent", surface_id: "surface:stale-parent", state: "working", role: "orchestrator" });
-      const child = makeRecord({ agent_id: "stale-child", surface_id: "surface:stale-child", state: "working", cli: "codex", parent_agent_id: parent.agent_id, halt_escalation: true });
+      const child = makeRecord({ agent_id: "stale-child", surface_id: "surface:stale-child", state: "working", cli: delivery_state === "queued_followup" ? "cursor" : "codex", parent_agent_id: parent.agent_id, halt_escalation: true });
       stateMgr.writeState(parent); stateMgr.writeState(child);
       liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
       await engine.getRegistry().reconstitute();
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
       const receipt = engine.acceptComposerQueue({ delivery_id: "stale-receipt", agent_id: child.agent_id,
-        text: "synthetic urgent lead correction", press_enter: true, source_event: "send_to", retry_count: 0, delivery_state });
+        text: "synthetic urgent lead correction", press_enter: true, source_event: delivery_state === "queued_followup" ? "report_to_parent" : "send_to", retry_count: 0, delivery_state });
       const verify = vi.fn().mockResolvedValue({ outcome: "pending" }); engine.setDeliveryVerifier(verify);
       const clock = vi.spyOn(Date, "now").mockReturnValue(nowMs);
       try {
         await engine.verifyPendingDeliveries();
         expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state, terminal: false, needs_attention: true });
         expect(engine.getDeliveryReceipt(receipt.delivery_id)?.attention_reason).toContain("1000ms");
-        const screen = "OpenAI Codex\nWorking (2s • esc to interrupt)\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch";
+        const screen = delivery_state === "queued_followup" ? "Cursor Agent\nThinking (2s)\n> " : "OpenAI Codex\nWorking (2s • esc to interrupt)\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch";
         await (engine as any).maybeEscalateLiveHalt(child, screen);
         await (engine as any).maybeEscalateLiveHalt(engine.getAgentState(child.agent_id), screen);
         const alerts = readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(row => row.tag === "agent_halt_delivery_stalled");

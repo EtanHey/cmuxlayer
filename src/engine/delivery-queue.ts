@@ -661,7 +661,7 @@ export class DeliveryQueue {
 
   private markStalePendingDeliveries(): void {
     for (const receipt of this.deliveryReceipts.values()) {
-      if (receipt.terminal || (receipt.delivery_state !== "queued" && receipt.delivery_state !== "steer_pending")) continue;
+      if (receipt.terminal || (receipt.delivery_state !== "queued" && receipt.delivery_state !== "steer_pending" && receipt.delivery_state !== "queued_followup")) continue;
       const age = Date.now() - Date.parse(receipt.created_at);
       if (!Number.isFinite(age) || age < this.deliveryAttentionMs || receipt.needs_attention) continue;
       receipt.needs_attention = true;
