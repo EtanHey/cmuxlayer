@@ -171,7 +171,7 @@ fi
 echo "release: gating on typecheck + tests…"
 run "bun run typecheck"
 receipt_record "gates.typecheck" "pass"
-run "HS=\"\$HOME/Gits/golems/scripts/hooks/heavy-suite.py\"; if [ -f \"\$HS\" ] && command -v python3 >/dev/null; then python3 \"\$HS\" -- env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test; else echo \"heavy-suite: helper missing; running unqueued\" >&2; env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test; fi"
+run "HS=\"\${HOME:-}/Gits/golems/scripts/hooks/heavy-suite.py\"; if [ -f \"\$HS\" ] && command -v python3 >/dev/null; then python3 \"\$HS\" -- env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test; else echo \"heavy-suite: helper missing; running unqueued\" >&2; env -u CMUX_SOCKET_PATH -u CMUX_DAEMON_SOCKET bun run test; fi"
 receipt_record "gates.tests" "pass"
 
 # --- real-cmux contract gate (#370) ---------------------------------------
