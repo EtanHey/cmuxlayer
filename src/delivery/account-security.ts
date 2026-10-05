@@ -9,10 +9,11 @@ export async function dismissAccountSecurityBanner<T extends { text: string }>(
 ): Promise<T> {
   if (!isCodexAccountSecurityBanner(screen.text)) return screen;
   await io.escape();
-  await sleep(100);
-  const closed = await io.read();
-  if (isCodexAccountSecurityBanner(closed.text)) {
-    throw new DeliverySafetyGateError("account_security_banner_not_dismissed", parseScreen(closed.text));
+  let observed = screen;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await sleep(200);
+    observed = await io.read();
+    if (!isCodexAccountSecurityBanner(observed.text)) return observed;
   }
-  return closed;
+  throw new DeliverySafetyGateError("account_security_banner_not_dismissed", parseScreen(observed.text));
 }

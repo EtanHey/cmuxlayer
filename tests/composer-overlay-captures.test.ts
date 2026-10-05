@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isPickerOrMenuScreen, parseScreen } from "../src/screen-parser.js";
 import { composerPickerInputRegion } from "../src/delivery/composer-screen.js";
+import { dismissAccountSecurityBanner } from "../src/delivery/account-security.js";
 
 const capture = (name: string) => readFileSync(new URL(`./fixtures/composer-overlays/${name}.txt`, import.meta.url), "utf8");
 
@@ -19,6 +20,16 @@ describe("#999(e) real captured composer overlays", () => {
   it("recognizes the security banner as blocked input, even above a ready composer", () => {
     expect(isPickerOrMenuScreen(capture("codex-boot"), "codex")).toBe(true);
     expect(parseScreen(capture("codex-boot")).control_state).not.toBe("ready");
+  });
+
+  it("waits for a slow security-banner redraw after exactly one Esc", async () => {
+    const banner = { text: capture("codex-boot") };
+    const closed = { text: capture("codex-dismissed") };
+    const escape = vi.fn().mockResolvedValue(undefined);
+    const read = vi.fn().mockResolvedValueOnce(banner).mockResolvedValue(closed);
+    expect(await dismissAccountSecurityBanner(banner, { escape, read })).toBe(closed);
+    expect(escape).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it.each(["codex-dismissed", "cursor-closed", "claude-closed"])("does not mistake Esc-closed %s for an overlay", name => {
