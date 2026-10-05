@@ -1134,13 +1134,21 @@ export function countVisibleQueuedSubmitMatches(screenText: string, text: string
 /** Consume each ownership entry at most once, even when prefixes overlap. */
 export function countVisibleOwnedQueuedInputs(screenText: string, texts: readonly string[]): number {
   if (inferComposerCli(screenText) !== "codex") return 0;
-  const remaining = [...texts];
-  return (codexQueuedItems(screenText) ?? []).filter(item => {
-    const index = remaining.findIndex(text => queuedItemMatches(item, text));
-    if (index < 0) return false;
-    remaining.splice(index, 1);
-    return true;
-  }).length;
+  const items = codexQueuedItems(screenText) ?? [];
+  const assigned = new Map<number, number>();
+  const match = (itemIndex: number, seen: Set<number>): boolean => {
+    for (let ownerIndex = 0; ownerIndex < texts.length; ownerIndex++) {
+      if (seen.has(ownerIndex) || !queuedItemMatches(items[itemIndex]!, texts[ownerIndex]!)) continue;
+      seen.add(ownerIndex);
+      // Reassign ambiguous prefixes rather than starving a later exact item.
+      const previousItem = assigned.get(ownerIndex);
+      if (previousItem !== undefined && !match(previousItem, seen)) continue;
+      assigned.set(ownerIndex, itemIndex);
+      return true;
+    }
+    return false;
+  };
+  return items.filter((_, index) => match(index, new Set())).length;
 }
 
 export function visibleCodexQueuedText(screenText: string): string {

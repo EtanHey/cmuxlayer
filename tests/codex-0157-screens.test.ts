@@ -63,6 +63,8 @@ describe("#905 Codex 0.157 queue blocks", () => {
     const duplicates = screen.replace("foreign row", `${prefix} first`).replace(`${prefix}…`, `${prefix} first`);
     expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`])).toBe(1);
     expect(countVisibleOwnedQueuedInputs(duplicates, [`${prefix} first`, `${prefix} first`])).toBe(2);
+    const mixed = screen.replace("foreign row", `${prefix} first`);
+    expect(countVisibleOwnedQueuedInputs(mixed, [`${prefix} first`, `${prefix} second`])).toBe(2);
   });
 
   it("keeps the pre-0.157 single steer block working", () => {
