@@ -257,6 +257,23 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   });
 
+  it.each(["steer", "queue"] as const)("P0 STEER cropped pending row preserves %s mode without delivery", async mode => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n GPT-6-Luna low · ~/scratch`,
+      after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call\n  ↳ ${text.slice(0, 15)}…\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch` });
+    try {
+      target.pane.steerOnReturn = true;
+      target.engine.getRegistry().set(target.spawned.agent_id, { ...target.engine.getAgentState(target.spawned.agent_id), state: "working" });
+      const receipt = await target.context.lifecycleAgentInputDeliverer?.({ agent_id: target.spawned.agent_id,
+        text: "Synthetic urgent correction with a cropped pending row", press_enter: true, source_event: "dispatch_nudge", ...(mode === "queue" ? { codex_busy_mode: "queue" } : {}) });
+      expect(receipt).toMatchObject({ delivery_state: mode === "queue" ? "queued" : "steer_pending", submitted: false, delivered: false, terminal: false });
+      expect(receipt?.queued_behind_turn === true).toBe(mode === "queue");
+      expect(target.pane.tabs).toBe(mode === "queue" ? 1 : 0);
+      expect(target.pane.returns).toBe(mode === "queue" ? 0 : 1);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
   it.each(["report", "watch", "dispatch"])("P0 STEER %s wakes busy Codex at the next boundary", async route => {
     const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
       draft: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n GPT-6-Luna low · ~/scratch`,

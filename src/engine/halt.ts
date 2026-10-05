@@ -482,7 +482,7 @@ export async function maybeEscalateLiveHalt(
   ctx: SweepAgentContext = {},
 ): Promise<AgentRecord> {
   if (!this.assertSweepInputCurrent(ctx)) return agent;
-  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending"].includes(receipt.delivery_state));
+  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending", "queued_followup"].includes(receipt.delivery_state));
   const nowMs = this.haltNow();
   const nowIso = new Date(nowMs).toISOString();
   const parsed = parseScreen(screenText);
