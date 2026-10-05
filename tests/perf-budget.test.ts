@@ -258,6 +258,140 @@ function withRawPercentiles<T extends WarmPass>(warm: T): T & { p50_ms: number; 
 }
 
 describe("daemon performance budget", () => {
+  it.each([
+    ["marginal pass", 276, 270, true, 1],
+    ["marginal repeat fail", 276, 276, false, 1],
+    ["large fail", 290, 270, false, 0],
+    ["pass", 270, 290, true, 0],
+    ["inclusive margin", 288.75, 275, true, 1],
+  ])("re-samples once: %s", async (_name, initial, retry, passed, calls) => {
+    const candidate = structuredClone(result);
+    candidate.latency.send_to_surface_warm.p95_ms = initial;
+    let count = 0;
+    const samples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async (operation: string) => {
+      count++;
+      expect(operation).toBe("send_to_surface_warm");
+      return { ...candidate.latency.send_to_surface_warm, p95_ms: retry,
+        request_bytes: baseline.replay.bytes[operation],
+        request_sha256: baseline.replay.request_sha256[operation], sample_count: 96 };
+    });
+    candidate.marginal_resamples = samples;
+    const comparison = compareBenchmark(baseline, candidate);
+    const row = comparison.rows.find((entry) => entry.operation === "send_to_surface_warm" && entry.metric === "p95_ms");
+    expect(count).toBe(calls);
+    expect(comparison.passed).toBe(passed);
+    expect(row.ceiling).toBe(275);
+    if (calls) {
+      expect(row.marginal_resample.initial).toBe(initial);
+      expect(row.marginal_resample.current).toBe(retry);
+      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(`${initial} ms → re-sample ${retry} ms`);
+      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(passed ? "PASS (marginal)" : "FAIL (marginal)");
+      expect(await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { throw new Error("second retry"); })).toEqual(samples);
+    }
+  });
+
+  it("keeps contract failures and passing sibling metrics authoritative", async () => {
+    const candidate = structuredClone(result);
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => ({
+      ...candidate.latency.send_to_surface_warm, p50_ms: 999, p95_ms: 270,
+      request_bytes: 999, request_sha256: "wrong", sample_count: 95, transport: "cli",
+    }));
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.rows.find((entry) => entry.operation === "send_to_surface_warm" && entry.metric === "p50_ms").current).toBe(210);
+    expect(comparison.failures.join(" ")).toMatch(/marginal re-sample/);
+    expect(checkerModule.MARGINAL_RESAMPLE_RATIO).toBe(1.05);
+    expect(() => validateBaseline({ ...baseline, regression_ratio: 1.26 })).toThrow(/1.25/);
+  });
+
+  it.each([[74, true], [81.4, false]])("re-samples the #852 p50 and CLI alias together: %s", async (freshP50, passed) => {
+    const sameCeilingBaseline = attest({
+      ...baseline,
+      measurements: { ...baseline.measurements,
+        send_to_surface_warm: { p50_ms: 65.016, p95_ms: 70, lock_hold_ms: 20 },
+        cli_send_ms: 65.016,
+      },
+    });
+    const candidate = structuredClone(result) as any;
+    candidate.latency.send_to_surface_warm = { ...candidate.latency.send_to_surface_warm,
+      p50_ms: 81.38, p95_ms: 82 };
+    const initial = compareBenchmark(sameCeilingBaseline, candidate);
+    const aliases = (comparison: ReturnType<typeof compareBenchmark>) => comparison.rows.filter((entry) =>
+      entry.operation === "send_to_surface_warm" && ["p50_ms", "cli_send_ms"].includes(entry.metric));
+    expect(aliases(initial).map((entry) => [entry.current, entry.ceiling, entry.passed])).toEqual([
+      [81.38, 81.27, false], [81.38, 81.27, false],
+    ]);
+    let calls = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(sameCeilingBaseline, candidate, {}, async (operation: string) => {
+      calls++;
+      expect(operation).toBe("send_to_surface_warm");
+      return { ...candidate.latency.send_to_surface_warm, p50_ms: freshP50,
+        sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64) };
+    });
+    const comparison = compareBenchmark(sameCeilingBaseline, candidate);
+    expect(calls).toBe(1);
+    expect(comparison.passed).toBe(passed);
+    for (const entry of aliases(comparison)) {
+      expect(entry.passed).toBe(passed);
+      expect(entry.ceiling).toBe(81.27);
+      expect(entry.marginal_resample).toMatchObject({ initial: 81.38, current: freshP50 });
+    }
+  });
+
+  it.each(checkerModule.CANONICAL_OPERATIONS)("routes a fresh sample to %s only", async (operation: string) => {
+    const candidate = structuredClone(result) as any;
+    const before = compareBenchmark(baseline, candidate);
+    const ceiling = before.rows.find((entry) => entry.operation === operation && entry.metric === "p95_ms").ceiling;
+    const measurement = operation === "first_send_after_spawn"
+      ? { p50_ms: 950, p95_ms: 950, lock_hold_ms: 21, transport: "socket" }
+      : candidate.latency[operation] ?? candidate.latency.daemon_path[operation];
+    const initial = { ...measurement, p95_ms: ceiling * 1.001 };
+    if (operation === "first_send_after_spawn") candidate.latency.first_send_after_spawn.sampled = initial;
+    else if (candidate.latency[operation]) candidate.latency[operation] = initial;
+    else candidate.latency.daemon_path[operation] = initial;
+    const fresh = { ...initial, p95_ms: ceiling, sample_count: checkerModule.canonicalSamplesPerRun(operation),
+      request_bytes: baseline.replay.bytes[operation], request_sha256: baseline.replay.request_sha256[operation] };
+    const samplerCalls: string[] = [];
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async (selected: string) => {
+      samplerCalls.push(selected);
+      return fresh;
+    });
+    expect(samplerCalls).toEqual([operation]);
+    const after = compareBenchmark(baseline, candidate);
+    expect(after.passed).toBe(true);
+    expect(after.rows.find((entry) => entry.operation === operation && entry.metric === "p95_ms").marginal_resample.current).toBe(ceiling);
+    expect(after.rows.filter((entry) => entry.operation !== operation)).toEqual(before.rows.filter((entry) => entry.operation !== operation));
+  });
+
+  it("shares one sample across marginal metrics, preserving a large sibling miss", async () => {
+    const candidate = structuredClone(result) as any;
+    candidate.latency.send_to_surface_warm.p50_ms = 251;
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    let count = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => {
+      count++;
+      return { ...candidate.latency.send_to_surface_warm, p50_ms: 240, p95_ms: 270,
+        request_bytes: 180, request_sha256: "4".repeat(64), sample_count: 96 };
+    });
+    expect(count).toBe(1);
+    expect(compareBenchmark(baseline, candidate).passed).toBe(true);
+    candidate.latency.send_to_surface_warm.p50_ms = 300;
+    expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
+  it.each([
+    { sample_count: 95 }, { request_bytes: 999 }, { request_sha256: "wrong" }, { transport: "cli" },
+  ])("rejects a re-sample with invalid workload proof %j", async (invalid) => {
+    const candidate = structuredClone(result) as any;
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, async () => ({
+      ...candidate.latency.send_to_surface_warm, p95_ms: 270,
+      sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64), ...invalid,
+    }));
+    expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
   it("requires an explicit reason for any committed-row increase", () => {
     expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
       /without --reason/,

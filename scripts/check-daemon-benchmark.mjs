@@ -33,6 +33,51 @@ export const CANONICAL_OPERATIONS = [
   "read_screen_10_parallel",
 ];
 export const BENCHMARK_HISTORY_LIMIT = 50;
+// #852: ten near-identical hosted runs ranged 66–81ms; 81.38ms failed an
+// 81.27ms ceiling. One fresh sample may resolve a <=5% miss, never widen it.
+export const MARGINAL_RESAMPLE_RATIO = 1.05;
+
+function marginalRow(entry) {
+  return !entry.passed && !entry.exact && !entry.informational &&
+    entry.sampling === "sampled" &&
+    ["p50_ms", "p95_ms", "lock_hold_ms", "cli_send_ms"].includes(entry.metric) &&
+    Number.isFinite(entry.current) && entry.current <= entry.ceiling * MARGINAL_RESAMPLE_RATIO;
+}
+
+/** One sampler call per operation; percentile/lock rows share that fresh sample. */
+export async function sampleMarginalRows(baseline, result, options, sampleOperation) {
+  if (result.marginal_resamples) return result.marginal_resamples;
+  const comparison = compareBenchmark(baseline, result, options);
+  const samples = {};
+  for (const operation of new Set(comparison.rows.filter(marginalRow).map((entry) => entry.operation))) {
+    samples[operation] = await sampleOperation(operation);
+  }
+  return samples;
+}
+
+function resultWithOperation(result, operation, measurement) {
+  const candidate = structuredClone(result);
+  delete candidate.marginal_resamples;
+  if (operation === "first_send_after_spawn") {
+    candidate.latency.first_send_after_spawn.sampled = measurement;
+  } else if (["send_to_surface_warm", "send_to_agent_warm", "spawn_close_during_sweep"].includes(operation)) {
+    candidate.latency[operation] = measurement;
+  } else {
+    candidate.latency.daemon_path[operation] = measurement;
+    if (operation.endsWith("_10_parallel")) candidate.latency[operation] = measurement;
+  }
+  candidate.replay.bytes[operation] = measurement?.request_bytes;
+  candidate.replay.request_sha256[operation] = measurement?.request_sha256;
+  candidate.replay.row_metadata[operation].samples_per_run = measurement?.sample_count;
+  return candidate;
+}
+
+function rowFailure(entry) {
+  const metric = entry.metric.replace("_ms", "");
+  return entry.exact
+    ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
+    : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
+}
 
 // AIDEV-NOTE (#791): the two warm tail rows sample twice the canonical 8x12
 // workload. Their p95 is then the ~10th-largest of 192 samples instead of the
@@ -885,14 +930,27 @@ export function compareBenchmark(
       ),
     );
   }
-  const failures = rows
-    .filter((entry) => !entry.passed)
-    .map((entry) => {
-      const metric = entry.metric.replace("_ms", "");
-      return entry.exact
-        ? `${entry.operation} ${metric}: ${entry.current} ${entry.unit} does not match committed ${entry.baseline} ${entry.unit}`
-        : `${entry.operation} ${metric}: ${entry.current}${entry.unit} exceeds ${entry.ceiling}${entry.unit}`;
+  const resampleFailures = [];
+  for (const [operation, measurement] of Object.entries(result.marginal_resamples ?? {})) {
+    const eligible = rows.filter((entry) => entry.operation === operation && marginalRow(entry));
+    if (!eligible.length) continue;
+    const retry = compareBenchmark(baseline, resultWithOperation(result, operation, measurement), {
+      expectedRounds, history, historyDegraded, historyDegradedReason,
     });
+    const metricFailures = new Set(retry.rows.filter((entry) => !entry.passed && !entry.exact).map(rowFailure));
+    const invalid = retry.failures.filter((failure) => !metricFailures.has(failure));
+    resampleFailures.push(...invalid.map((failure) => `marginal re-sample ${operation}: ${failure}`));
+    for (const entry of eligible) {
+      const fresh = retry.rows.find((row) => row.operation === operation && row.metric === entry.metric);
+      entry.marginal_resample = {
+        initial: entry.current, current: fresh.current, raw_current: fresh.raw_current,
+        verdict_basis: fresh.verdict_basis,
+        paired_control_evaluation: retry.paired_control_evaluation[operation],
+      };
+      entry.passed = invalid.length === 0 && Number.isFinite(fresh.current) && fresh.current <= entry.ceiling;
+    }
+  }
+  const failures = [...rows.filter((entry) => !entry.passed).map(rowFailure), ...resampleFailures];
   for (const operation of baseline.replay.operations) {
     const expected = baseline.replay.row_metadata[operation];
     const candidate = result?.replay?.row_metadata?.[operation];
@@ -965,6 +1023,7 @@ export function resultWithComparison(result, comparison) {
     ...result,
     perf_budget: { paired_control_evaluation: comparison.paired_control_evaluation,
       first_send_rounds: comparison.first_send_rounds,
+      marginal_resamples: comparison.rows.filter((entry) => entry.marginal_resample),
       rows: comparison.rows.filter((entry) => entry.operation.startsWith("first_send_after_spawn")) },
   };
 }
@@ -979,7 +1038,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "|---|:---:|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.informational ? entry.alert ? "ALERT (info)" : "INFO" : entry.passed ? "PASS" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.marginal_resample ? ` → re-sample ${formatted(entry.marginal_resample.current, entry.unit)}` : ""}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.informational ? entry.alert ? "ALERT (info)" : "INFO" : entry.passed ? entry.marginal_resample ? "PASS (marginal)" : "PASS" : entry.marginal_resample ? "FAIL (marginal)" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );
@@ -990,6 +1049,8 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "",
     `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
     "First-send and warm-agent p50/p95 may subtract only the part of a paired 1ms fake-socket timer's overrun that overlaps the measured send and exceeds the run's median overlap. A timer firing up to 2ms early is valid zero-overrun proof. Invalid pairs use raw send latency individually. Current shows the adjusted value with raw latency alongside it when paired proof is in use.",
+    "",
+    "Marginal re-samples (informational): sampled timing misses within 5% get one fresh operation sample; it must meet the same ceiling. Both values remain visible. Contract and intrinsic failures remain authoritative.",
     "",
     "Paired control evaluation (verdict basis; invalid receipts retain raw latency):",
     ...["first_send_after_spawn", "send_to_agent_warm"].map((operation) => {
@@ -1096,6 +1157,11 @@ async function main() {
   }
   const runResult = await runBenchmark({
     artifactDir: process.env.CMUXLAYER_PERF_ARTIFACT_DIR,
+    benchmarkEnv: legacyBaseline ? {} : {
+      CMUXLAYER_BENCH_MARGINAL_BASELINE: baselinePath,
+      CMUXLAYER_BENCH_HISTORY_PATH: process.env.CMUXLAYER_BENCH_HISTORY_PATH ??
+        join(resolve(process.env.CMUXLAYER_PERF_ARTIFACT_DIR ?? defaultArtifactDir), "history.json"),
+    },
   });
   if (legacyBaseline) {
     const markdown = [
