@@ -940,7 +940,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     // only the current composer in a copied frame to inspect the turn status.
     const rows = normalizeTerminalText(snapshot.text).split("\n");
     let prompt = -1;
-    rows.forEach((row, index) => { if (/^[ \t]*[❯>](?:\s|$)/.test(row)) prompt = index; });
+    rows.forEach((row, index) => { if (/^[ \t]*[❯>](?:\s|$)/u.test(row)) prompt = index; });
     if (requireIdle && prompt >= 0 && hasVisibleAgentProgress([...rows.slice(0, prompt), "❯ "].join("\n"), "claude")) return false;
     const region = extractComposerInputRegion(snapshot.text, undefined, "claude", true);
     if (region === null || !region.trim() || !composerRegionMatchesPayload(region, opts.text, "claude", snapshot.text)) return false;
@@ -1971,7 +1971,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
                   region === null || !composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) ||
                   screenTranscriptContainsText(latest.text, ownedSubmitText)) {
-                throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline!.parsed);
+                throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline?.parsed ?? parseScreen(""));
               }
             }
             if (ownedBoot && stateMgr.readState(ownedBoot.agentId)?.boot_instance_id !== ownedBoot.instanceId) {

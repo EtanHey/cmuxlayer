@@ -887,7 +887,7 @@ describe("enter reliability", () => {
     const read = client.readScreen.bind(client);
     let reads = 0;
     let finalRead = false;
-    client.readScreen = async (...args) => {
+    client.readScreen = (...args) => {
       if (finalRead && ++reads >= 2) client.postReturnPendingScreenText = shape === "foreign" ? deadlockDraft.replace("contract.md", "contract.md HUMAN_WORDS") :
         shape === "empty" ? deadlockReady : deadlockDraft.replace("\n❯", `\n${deadlockTranscript}\n❯`);
       return read(...args);
