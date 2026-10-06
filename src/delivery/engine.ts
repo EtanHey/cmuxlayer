@@ -1850,7 +1850,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           read: async () => {
             await assertBinding?.();
             const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
-            if (!closed) throw new DeliverySafetyGateError("account_security_banner_not_dismissed", snapshot.parsed);
+            if (!closed) throw new DeliverySafetyGateError("hooks_review_not_dismissed", snapshot.parsed);
             return closed;
           },
         }, { agent_id: resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.agent_id ?? null,
@@ -1860,7 +1860,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         return safe;
       };
       // Every input mutation, including a retry or launcher Return, rechecks
-      // the dangerous overlay. Never type or select its default setup option.
+      // Hooks review. Account-security notices do not own composer input.
       opts = { ...opts, beforeMutation: async () => {
         await assertBinding?.();
         // The existing pre-type/key baseline is already a safe observation.

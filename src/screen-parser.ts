@@ -1849,7 +1849,9 @@ export function codexAccountSecurityBannerVariant(text: string): "advanced_accou
 }
 
 export function isCodexDismissibleOverlay(text: string): boolean {
-  return codexDismissibleOverlayVariant(text) !== null;
+  // Account-security notices are inline chrome: text and Enter belong to the
+  // composer. Hooks review owns input and still requires Esc to skip.
+  return codexDismissibleOverlayVariant(text) === "hooks_review";
 }
 
 export function isCodexAccountSecurityBanner(text: string): boolean {
