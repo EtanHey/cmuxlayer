@@ -32,6 +32,10 @@ jobs:
       - name: Guard against tracked docs.local
         run: bash scripts/guard-no-docslocal.sh
 
+  # Keep the committed baseline calibrated to current PR-class runners by
+  # importing their perf artifact via baseline_source_run_id: observed PR send
+  # rows are about 15–20% slower than push/dispatch runs. After reviewed runner
+  # calibration, the §12 pristine-sprint target is to tighten measured ceilings.
   perf-budget:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
