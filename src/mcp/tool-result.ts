@@ -135,7 +135,7 @@ export function shapeSuccessfulSendToResult(
   const full = result.structuredContent;
   const proof = (receipt: Record<string, unknown>): boolean =>
     (receipt.delivery_state === "submitted" && receipt.submitted === true) ||
-    ((receipt.delivery_state === "queued" || receipt.delivery_state === "queued_followup") && receipt.queue_verified === true);
+    ((receipt.delivery_state === "queued" || receipt.delivery_state === "steer_pending" || receipt.delivery_state === "queued_followup") && receipt.queue_verified === true);
   const textSubmit = (args.mode === "agent" || args.mode === "surface" || args.mode === undefined) && args.press_enter !== false;
   if (!full || full.ok !== true || result.isError === true) return result;
   const attemptedReceipts = Array.isArray(full.receipts) ? full.receipts.filter(receipt => receipt?.resolution !== "filtered_out" && !receipt?.skipped) : [];

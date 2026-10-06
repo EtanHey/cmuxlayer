@@ -115,6 +115,8 @@ By default cmuxLayer registers exactly 10 tools, and all 10 are callable through
 
 For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. `send_to` also preserves the registry-independent escape hatch: use `mode:"surface"`, `mode:"command"`, or `mode:"key"` with a raw surface ref for shells, launch/resume commands, and stuck-pane recovery.
 
+Busy Codex messages use Return to steer at the next tool boundary. Pass `codex_busy_mode:"queue"` to `send_to` only for deliberate Tab delivery after the turn. `steer_pending` and `queued` both mean `delivered:false`; use `wait_for({delivery_id})` for confirmation. After 10 minutes, unresolved pending deliveries raise `needs_attention` and a parent alert without interruption or replay. Set `CMUXLAYER_DELIVERY_ATTENTION_MS` to a positive integer in milliseconds to change that threshold.
+
 See [Agent Routing and Handling Workflow](docs/guides/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
 ## MCP tools (10 registered and callable)

@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type {
+  AccountSecurityBannerEvent,
   AgentCliExitEvent,
   AgentHaltEscalationEvent,
   CloseForensicsEvent,
@@ -68,6 +69,10 @@ export class EventLog {
     this.appendEntry(transition);
   }
 
+  appendAccountSecurityBanner(event: AccountSecurityBannerEvent): void {
+    this.appendEntry(event);
+  }
+
   appendDelivery(event: DeliveryTelemetryEvent): void {
     this.appendEntry(event);
   }
@@ -108,7 +113,7 @@ export class EventLog {
 
   readAll(): StateTransition[] {
     return this.readEntries().filter(
-      (entry): entry is StateTransition => "agent_id" in entry,
+      (entry): entry is StateTransition => "event" in entry && "from_state" in entry,
     );
   }
 

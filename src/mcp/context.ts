@@ -151,6 +151,8 @@ export interface CreateServerOptions {
   seatManifestNow?: () => string;
   /** Background send_to verify deadline; defaults to 10 minutes. */
   deliveryVerifyDeadlineMs?: number;
+  /** Pending queue/steer age before attention, default 10min. */
+  deliveryAttentionMs?: number;
   /**
    * Local evidence tickets for failed_confirmed deliveries. Omitted in tests;
    * production createServer injects ~/.cmuxlayer/tickets when not VITEST/NODE_ENV=test.
@@ -172,6 +174,7 @@ export type LifecycleAgentInputDeliverer = (args: {
   text: string;
   press_enter: boolean;
   allow_busy?: boolean;
+  codex_busy_mode?: "steer" | "queue";
   source_event: DeliveryEventType;
   delivery_id?: string;
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
@@ -417,7 +420,7 @@ export async function assertLifecycleReadyForTool(
 }
 
 export interface TypedDraftOwner {
-  caller: string; text: string; texts?: string[]; deliveryIds?: string[]; at: number; ref: string; uuid: string | null;
+  caller: string | null; text: string; texts?: string[]; deliveryIds?: string[]; at: number; ref: string; uuid: string | null;
   workspace: string | null; fp: string; seen: boolean;
   /** #793: the managed agent whose unsubmitted boot draft this is. */
   bootAgentId?: string;

@@ -1,0 +1,28 @@
+Last login: Mon Oct  5 06:18:33 on ttys038
+cd -- '/srv/scratch'
+fixture-user ~  $ cd /srv/scratch && claude --model haiku
+ ▐▛███▛█   Claude Code v2.1.289
+▝▜██████▀  Haiku 4.5 · Claude Max
+ ▝▝   ▝▝   ~/scratch
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  /pr-loop                               Full PR loop plus the agent-identity signature on GitHub
+                                         writes. Triggers: create PR, finish work, post PR comme…
+  /large-plan                            Scaffold multi-phase plans with async agents. Triggers:
+                                         large feature, multi-PR refactor, parallel cmux. (user)
+  /qa-video                              Video QA/extraction for screen, local video, YouTube.
+                                         Triggers: narrated QA, bugs, QA checklist, video gems. …
+  /loop                                  Run a prompt or slash command on a recurring interval
+                                         (e.g. /loop 5m /foo). Omit the interval to let the mode…
+  /repogolem                             Launch repoGolem agents in any repo. Triggers: spawn
+                                         agent, launcher, brainlayerClaude, flags -s/-c/-w/--wor…
+  /add-dir                               Add a new working directory
+  /advisor                               Let Claude consult a stronger model at key moments
+  /artifacts                             Browse your published and shared artifacts
+  /auto-mode-setup                       Teach auto mode about your environment, plus optional
+                                         rule tweaks
+  /autocompact                           Set how full the context gets before auto-summarizing
+  /autofix-pr                            Monitor and autofix any issues with the current PR

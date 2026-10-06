@@ -310,6 +310,10 @@ describe("AgentEngine", () => {
       },
     );
     const surfaceProvider = async () => liveSurfaces;
+    Object.assign(mockClient, {
+      withSurfaceWrite: async <T>(surface: string, run: (sendKey: (key: string) => Promise<void>) => Promise<T>, opts: { workspace?: string }) =>
+        run(key => mockClient.sendKey(surface, key, { workspace: opts.workspace })),
+    });
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
       // #926: `node:child_process` is mocked here; no process carries a session.
@@ -4843,6 +4847,45 @@ describe("AgentEngine", () => {
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe(
         "booting",
       );
+    });
+
+    it.each([
+      { metadata: true, focus: undefined, expected: false },
+      { metadata: true, focus: false, expected: false },
+      { metadata: true, focus: true, expected: true },
+      { metadata: false, focus: undefined, expected: true },
+      { metadata: false, focus: false, expected: false },
+      { metadata: false, focus: true, expected: true },
+    ])("resume focus policy metadata=$metadata focus=$focus", async ({ metadata, focus, expected }) => {
+      Object.assign(mockClient, { supportsSurfaceRuntimeMetadata: metadata });
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-focus-resume",
+        state: "done",
+        pid: DEAD_PID,
+        surface_id: "surface:old",
+        workspace_id: "ws:1",
+        repo: "brainlayer",
+        cli: "codex",
+        cli_session_id: sessionId,
+        launcher_name: "brainlayerCodex",
+      }));
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+      liveSurfaces = [makeSurface("surface:witness")];
+
+      const result = await engine.resumeAgent("agent-focus-resume", { focus });
+
+      expect(result.surface_id).toBe("surface:new");
+      expect(engine.getAgentState(result.agent_id)?.state).toBe("booting");
+      expect(mockClient.focusSurface).toHaveBeenCalledTimes(expected ? 1 : 0);
+      expect(mockClient.selectWorkspace).toHaveBeenCalledTimes(expected ? 1 : 0);
+      const creationOptions = [
+        ...(mockClient.newSurface as ReturnType<typeof vi.fn>).mock.calls.map(([opts]) => opts),
+        ...(mockClient.newSplit as ReturnType<typeof vi.fn>).mock.calls.map(([, opts]) => opts),
+      ];
+      expect(creationOptions).toEqual([expect.objectContaining({ focus: expected })]);
+      expect(mockClient.send).toHaveBeenCalledWith("surface:new", expect.stringContaining(`resume ${sessionId}`), { workspace: "ws:1" });
     });
 
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
@@ -10089,6 +10132,47 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("%s boot skips only Hooks review, leaving %s security chrome alone", async (origin, variant) => {
+      const id = `security-${origin}`;
+      stateMgr.writeState(makeRecord({ agent_id: id, state: "booting", surface_id: "surface:42", cli: "codex",
+        ...(origin === "resume" ? { boot_resumed_at: new Date().toISOString() } : {}) }));
+      liveSurfaces = [makeSurface("surface:42")];
+      let banner = true;
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? variant : "dismissed"}.txt`, import.meta.url), "utf8") + (banner && variant === "daybreak-synthetic" ? "\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch" : ""), lines: 35, scrollback_used: false,
+      }));
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(async (_surface, key) => { if (key === "escape") banner = false; });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep(); await engine.runSweep();
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(variant === "hooks-review" ? 1 : 0);
+      if (variant === "hooks-review") expect(mockClient.sendKey.mock.calls[0][1]).toBe("escape");
+      expect(engine.getAgentState(id)?.state).toBe("ready");
+      if (variant === "hooks-review") expect(stateMgr.getEventLog().readEntries()).toContainEqual(expect.objectContaining({ event_type: "account_security_banner", agent_id: id, surface: "surface:42", outcome: "dismissed" }));
+    });
+
+    it("#999(e) a persistent security notice permits boot readiness without Esc", async () => {
+      stateMgr.writeState(makeRecord({ agent_id: "security-wedged", state: "booting", surface_id: "surface:42", cli: "codex" }));
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:42",
+        text: readFileSync(new URL("./fixtures/composer-overlays/codex-boot.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep(); await engine.runSweep();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(engine.getAgentState("security-wedged")).toMatchObject({ state: "ready" });
+    });
+
+    it("#1007 never sends Esc from an old banner after the agent rebinds", async () => {
+      const agent = makeRecord({ agent_id: "security-rebound", state: "booting", surface_id: "surface:43", cli: "codex" });
+      stateMgr.writeState(agent); engine.getRegistry().set(agent.agent_id, agent);
+      liveSurfaces = [makeSurface("surface:43")];
+      const closed = { surface: "surface:43", text: readFileSync(new URL("./fixtures/composer-overlays/codex-dismissed.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false };
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(closed);
+      const old = { ...closed, surface: "surface:42", text: readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8") };
+      expect(await engine["dismissBootSecurityBanner"](agent, old)).toEqual(closed);
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:43", expect.anything());
+    });
+
     it("promotes booting agents to ready when their CLI prompt appears", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -11546,6 +11630,40 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it.each(["queued", "steer_pending", "queued_followup"] as const)("P0 STEER stale %s alerts the parent once without replay or interrupt", async delivery_state => {
+      engine.dispose();
+      const nowMs = Date.now() + 2000;
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient,
+        { spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+          deliveryAttentionMs: 1000, deliveryVerifyDeadlineMs: 1000, haltNow: () => nowMs });
+      const parent = makeRecord({ agent_id: "stale-parent", surface_id: "surface:stale-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stale-child", surface_id: "surface:stale-child", state: "working", cli: delivery_state === "queued_followup" ? "cursor" : "codex", parent_agent_id: parent.agent_id, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      const receipt = engine.acceptComposerQueue({ delivery_id: "stale-receipt", agent_id: child.agent_id,
+        text: "synthetic urgent lead correction", press_enter: true, source_event: delivery_state === "queued_followup" ? "report_to_parent" : "send_to", retry_count: 0, delivery_state });
+      const verify = vi.fn().mockResolvedValue({ outcome: "pending" }); engine.setDeliveryVerifier(verify);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(nowMs);
+      try {
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state, terminal: false, needs_attention: true });
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)?.attention_reason).toContain("1000ms");
+        const screen = delivery_state === "queued_followup" ? "Cursor Agent\nThinking (2s)\n> " : "OpenAI Codex\nWorking (2s • esc to interrupt)\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch";
+        await (engine as any).maybeEscalateLiveHalt(child, screen);
+        await (engine as any).maybeEscalateLiveHalt(engine.getAgentState(child.agent_id), screen);
+        const alerts = readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(row => row.tag === "agent_halt_delivery_stalled");
+        expect(alerts).toHaveLength(1); expect(alerts[0]?.task).toContain(receipt.delivery_id);
+        expect(alerts[0]?.task).not.toContain("text: \"escape\"");
+        expect(mockClient.sendKey).not.toHaveBeenCalled();
+        verify.mockResolvedValue({ outcome: "delivered", submit_verified: true });
+        clock.mockReturnValue(nowMs + 60_000);
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", needs_attention: false, attention_reason: null });
+      } finally { clock.mockRestore(); }
+    });
+
     it("wakes the parent immediately when a harness API error freezes a child", async () => {
       const nowMs = Date.parse("2026-08-27T07:00:00.000Z");
       engine.dispose();
@@ -11604,6 +11722,40 @@ Session ID: ${sessionId}`,
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
         "Reading stale-work.ts",
       );
+    });
+
+    it.each([
+      ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
+    ])("silent-stall %s escalates only blockers despite prior done evidence", async (kind, screen, tag) => {
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+        haltNow: () => Date.parse("2026-10-05T08:00:00Z"), haltAwaitingInputDwellMs: 0,
+      });
+      const parent = makeRecord({ agent_id: "stall-parent", surface_id: "surface:stall-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stall-child", surface_id: "surface:stall-child", state: "working", cli: "codex", role: "worker", parent_agent_id: parent.agent_id, spawn_depth: 1, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      mockClient.readScreen.mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      vi.spyOn(engine, "hasCurrentRecordedOutputDoneEvidence").mockReturnValue(true);
+      await engine["maybeEscalateLiveHalt"](child, screen);
+      await engine["maybeEscalateLiveHalt"](engine.getAgentState(child.agent_id) ?? child, screen);
+      if (kind === "security") {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).not.toBe(true);
+        expect(engine.getAgentState(child.agent_id)?.state).toBe("working");
+      } else {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
+      }
+      if (kind === "hooks") {
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
+      } else if (kind === "capacity") expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
     it("wakes the parent immediately when a child transitions into a harness API error", async () => {

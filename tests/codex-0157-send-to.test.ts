@@ -4,7 +4,7 @@
 // composer paints only its placeholder, and that Return becomes a newline. A
 // Return pressed while a turn runs queues the text as a steer message.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -14,6 +14,8 @@ import { engineForTests } from "../src/server.js";
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`./fixtures/codex-0.157/${name}.txt`, import.meta.url), "utf8");
+const overlayCapture = (name: string): string =>
+  readFileSync(new URL(`./fixtures/composer-overlays/${name}.txt`, import.meta.url), "utf8");
 
 const PONG = "Reply with the single word pong and nothing else.";
 const LIST = "Please also list the files in this folder when you finish.";
@@ -45,9 +47,20 @@ function makeCodexPane(frames: Frames) {
     beforeRead: undefined as (() => Promise<void>) | undefined,
     failWhileEmpty: false, endTurnAfterDraftRead: false, drainQueueOnReturn: false,
     endTurnAtPostTabRead: 0, postTabReads: 0,
+    pickerOpen: false, pickerStuck: false, keys: [] as string[], queueDrainFrame: null as Frame | null,
+    bannerVariant: "boot", bannerOpen: false, bannerStuck: false, bannerAfterType: false, steerOnReturn: false,
+    bannerOnReturn: false, onEscape: undefined as (() => Promise<void>) | undefined,
+    shellUntilLaunch: false, launcherCommand: "",
   };
-  const frame = (f: Frame): string => (typeof f === "string" ? f : f(pane.text));
+  const frame = (f: Frame): string => {
+    const text = typeof f === "string" ? f : f(pane.text);
+    // Legacy queue-recovery cases explicitly request Tab; the section must
+    // reflect Tab's after-turn semantics rather than the old shared heading.
+    return pane.phase === "after" && pane.tabs > 0 ? text.replace(/• Messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?/g, "• Queued follow-up inputs") : text;
+  };
   const read = (): string => {
+    if (pane.shellUntilLaunch) return `$ ${pane.launcherCommand}`;
+    if (pane.bannerOpen && pane.bannerVariant === "hooks-review") return overlayCapture("codex-hooks-review").replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
       if (--pane.bufferedReads <= 0) pane.phase = "draft";
       return frame(pane.frames.buffered);
@@ -60,6 +73,11 @@ function makeCodexPane(frames: Frames) {
       pane.endTurnAfterDraftRead = false;
       pane.endTurnAtPostTabRead = 0;
       pane.frames.draft = (typed) => fixture("idle-draft").replace(PONG, typed);
+    }
+    if (pane.bannerOpen) {
+      const banner = overlayCapture(`codex-${pane.bannerVariant}`);
+      const footer = "Press a number to choose · esc to dismiss · type to continue";
+      return `${banner.slice(0, banner.indexOf(footer) + footer.length)}\n${shown.slice(shown.search(/^\s*›/mu))}`;
     }
     return shown;
   };
@@ -75,28 +93,57 @@ function makeCodexPane(frames: Frames) {
     ] };
     return { workspace: "workspace:1", surface: "surface:new", surface_id: NEW_UUID, pane: "pane:1", title: "", type: "terminal" };
   };
-  const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+  const handleReturn = (args: string[]) => {
     if (args.includes("send-key") && args.includes("return") && pane.live) {
       pane.returns += 1;
+      if (pane.bannerOnReturn) { pane.bannerOnReturn = false; pane.shellUntilLaunch = false; pane.bannerOpen = true; }
       if (pane.phase === "draft" && pane.swallow > 0) { pane.swallow -= 1; pane.repaint = true; }
-      else if (pane.phase === "draft") { pane.submitted.push(pane.text); pane.phase = "after"; }
+      else if (pane.phase === "draft") { (pane.steerOnReturn ? pane.queued : pane.submitted).push(pane.text); pane.phase = "after"; }
       else if (pane.phase === "after" && pane.drainQueueOnReturn && pane.queued.length > 0) {
-        pane.submitted.push(pane.queued.shift()!);
-        pane.frames.after = (typed) => fixture("idle-submitted-working").replace(PONG, typed);
+        const queued = pane.queued.shift();
+        if (queued !== undefined) pane.submitted.push(queued);
+        pane.frames.after = pane.queueDrainFrame ?? ((typed) => fixture("idle-submitted-working").replace(PONG, typed));
       }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const handleTab = (args: string[]) => {
     if (args.includes("send-key") && args.includes("tab") && pane.live) {
       pane.tabs += 1;
       if (pane.swallowTabs > 0) pane.swallowTabs -= 1;
       else if (pane.phase === "draft") { pane.queued.push(pane.text); pane.phase = "after"; }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const handleKey = (args: string[]) => {
+    if (args.includes("send-key") && pane.live) {
+      pane.keys.push(String(args.at(-1)));
+      if (args.includes("escape")) {
+        if (!pane.pickerStuck) pane.pickerOpen = false;
+        if (!pane.bannerStuck) pane.bannerOpen = false;
+        return { stdout: "{}", stderr: "" };
+      }
+      if (pane.pickerOpen) return { stdout: "{}", stderr: "" };
+    }
+    return handleReturn(args) ?? handleTab(args);
+  };
+  const handleText = (args: string[]) => {
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
-      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) { pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2; }
+      if (pane.shellUntilLaunch) pane.launcherCommand = typed;
+      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) {
+        pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2;
+        if (pane.bannerAfterType) pane.bannerOpen = true;
+      }
       return { stdout: "{}", stderr: "" };
     }
+    return null;
+  };
+  const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
+    const inputResult = handleKey(args) ?? handleText(args);
+    if (inputResult) { if (args.includes("escape")) await pane.onEscape?.(); return inputResult; }
     if (args.includes("read-screen")) {
       const beforeRead = pane.beforeRead; pane.beforeRead = undefined; await beforeRead?.();
       if (pane.failWhileEmpty && pane.phase === "empty") throw new Error("transient read failure");
@@ -116,7 +163,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -126,10 +173,12 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       after: text => `OpenAI Codex\n${codexRows(text)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`,
     });
     pane.live = true;
+    if (launchOverlay) { pane.bannerVariant = launchOverlay.variant; pane.bannerOnReturn = true; pane.bannerStuck = launchOverlay.stuck; pane.shellUntilLaunch = true; }
     pane.swallow = swallow;
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
+    const keyWrites = observeKeyWrites ? vi.spyOn(context.client, "sendKey") : undefined;
     const server = serverModule.createServer({ context, inboxBaseDir: testDir, lifecycleInitializer: async () => {} }) as any;
     const engine = engineForTests(server);
     await context.lifecycleReadyPromise;
@@ -146,27 +195,164 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
         boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
-    if (bootPrompt) return { pane, context, spawned };
-    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready" });
+    if (bootPrompt) return { pane, context, spawned, keyWrites };
+    engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
+    if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
     // scenario begins; don't leave an ignored boot write racing the fixture.
     expect(context.typedDraftOwners.size).toBe(0);
     pane.frames = frames;
-    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], bufferedReads: 0 });
+    Object.assign(pane, { phase: "empty", text: "", returns: 0, tabs: 0, submitted: [], queued: [], keys: [], bufferedReads: 0 });
     const as = <T>(uuid: string, fn: () => Promise<T>) =>
       runWithCallerContext({ surfaceId: uuid, workspaceId: "workspace:1" }, fn);
     const typeDraft = (text: string, surface?: string) => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ ...(surface ? { mode: "surface", surface } : { agent_id: spawned.agent_id }), text, press_enter: false }, {})));
     const readScreen = () => server._registeredTools.read_screen.handler({ surface: spawned.surface_id }, {});
-    const send = (text: string, targeting = false, verbose = false) => as(LEAD_UUID, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose }, {})));
+    const send = (text: string, targeting = false, verbose = false, codexBusyMode: "steer" | "queue" | null = "queue") => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ ...(targeting ? { targeting: { agent_ids: [spawned.agent_id] } } : { agent_id: spawned.agent_id }), text, press_enter: true, verbose, ...(codexBusyMode ? { codex_busy_mode: codexBusyMode } : {}) }, {})));
     const keyReturn = (uuid: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface: spawned.surface_id, text: "return" }, {})));
-    const surfaceSend = (text: string, background: boolean) => as(LEAD_UUID, async () => parseToolResult(
+    const surfaceSend = (text: string, background: boolean, codexBusyMode: "steer" | "queue" | null = "queue") => as(LEAD_UUID, async () => parseToolResult(
       await server._registeredTools.send_to.handler(
-        { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background }, {})));
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen };
+        { mode: "surface", surface: spawned.surface_id, text, press_enter: true, background, ...(codexBusyMode ? { codex_busy_mode: codexBusyMode } : {}) }, {})));
+    const sendChunks = (text: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ mode: "surface", surface: spawned.surface_id, text, press_enter: true, allow_long_inline: true, chunk_size: 20 }, {})));
+    const rawBoot = async () => {
+      const { internalToolForTests } = await import("../src/mcp/registration.js");
+      const path = join(testDir, "synthetic-boot.txt"); writeFileSync(path, PONG);
+      return as(LEAD_UUID, async () => parseToolResult(await internalToolForTests(server, "send_command").handler({ surface: spawned.surface_id, command: "cmuxlayerCodex -s cmuxlayer", boot_prompt_path: path, boot_prompt_timeout_ms: 5_000 }, {})));
+    };
+    const report = (blocker: string) => as(OTHER_UUID, async () => {
+      engine.getRegistry().set("other-seat", { ...engine.getRegistry().get("other-seat"), role: "worker", parent_agent_id: spawned.agent_id, collab_path: null });
+      return parseToolResult(await server._registeredTools.report_to_parent.handler({ blocker }, {}));
+    });
+    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites, report };
   }
+
+  it.each([false, true])("P0 STEER default busy send lands at next tool boundary (targeting=%s)", async targeting => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.send(LIST, targeting, true, null);
+      const accepted = targeting ? receipt.receipts[0] : receipt;
+      expect(target.pane.tabs).toBe(0);
+      expect(target.pane.returns).toBe(1);
+      expect(target.pane.keys).not.toContain("escape");
+      expect(receipt.ok).toBe(true);
+      expect(accepted).toMatchObject({ submitted: false, delivered: false,
+        delivery_state: "steer_pending", terminal: false });
+      expect(target.engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "steer_pending", terminal: false });
+      // Committed user turn, not a still-visible next-tool queue or old echo.
+      target.pane.frames.after = fixture("midturn-steer-queued").replace(
+        `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}`,
+        `› ${LIST}\n\n• New boundary observed.`);
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true, terminal: true });
+    } finally { target.context.dispose(); }
+  });
+
+  it.each([false, true])("P0 STEER surface send defaults to Return (background=%s)", async background => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.surfaceSend(LIST, background, null);
+      await vi.waitFor(() => expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+        delivery_state: "steer_pending", terminal: false, submit_verified: null }), { timeout: 10_000 });
+      expect(target.pane.tabs).toBe(0);
+      expect(target.pane.returns).toBe(1);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
+  it.each(["steer", "queue"] as const)("P0 STEER cropped pending row preserves %s mode without delivery", async mode => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n GPT-6-Luna low · ~/scratch`,
+      after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call\n  ↳ ${text.slice(0, 15)}…\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch` });
+    try {
+      target.pane.steerOnReturn = true;
+      target.engine.getRegistry().set(target.spawned.agent_id, { ...target.engine.getAgentState(target.spawned.agent_id), state: "working" });
+      const receipt = await target.context.lifecycleAgentInputDeliverer?.({ agent_id: target.spawned.agent_id,
+        text: "Synthetic urgent correction with a cropped pending row", press_enter: true, source_event: "dispatch_nudge", ...(mode === "queue" ? { codex_busy_mode: "queue" } : {}) });
+      expect(receipt).toMatchObject({ delivery_state: mode === "queue" ? "queued" : "steer_pending", submitted: false, delivered: false, terminal: false });
+      expect(receipt?.queued_behind_turn === true).toBe(mode === "queue");
+      expect(target.pane.tabs).toBe(mode === "queue" ? 1 : 0);
+      expect(target.pane.returns).toBe(mode === "queue" ? 0 : 1);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
+  it.each(["report", "watch", "dispatch"])("P0 STEER %s wakes busy Codex at the next boundary", async route => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n GPT-6-Luna low · ~/scratch`,
+      after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Messages to be submitted after next tool call\n  ↳ ${text}\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch` });
+    try {
+      target.pane.steerOnReturn = true;
+      target.engine.getRegistry().set(target.spawned.agent_id, { ...target.engine.getAgentState(target.spawned.agent_id), state: "working" });
+      if (route === "report") {
+        const receipt = await target.report("Synthetic urgent blocker");
+        expect(receipt).toMatchObject({ ok: true, delivery: "steer_pending", route: "direct" });
+        expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "steer_pending", composer_accepted: true, source_event: "report_to_parent", terminal: false });
+      } else if (route === "watch") {
+        const path = join(testDir, "synthetic-watch.md"); writeFileSync(path, "");
+        setTimeout(() => writeFileSync(path, "DONE"), 30);
+        const result = await target.engine.waitForWatch({ owner: target.spawned.agent_id, target: path, marker: "DONE", deadline: Date.now() + 5000, provenance: "engine" }, 2500);
+        expect(result.watch).toMatchObject({ notification_pending: false, notification_attempts: 0 });
+        expect(target.engine.listDeliveryReceipts()).toContainEqual(expect.objectContaining({ agent_id: target.spawned.agent_id, source_event: "report_to_parent", delivery_state: "steer_pending", composer_accepted: true }));
+      } else {
+        const receipt = await target.context.lifecycleAgentInputDeliverer?.({ agent_id: target.spawned.agent_id, text: "Synthetic urgent correction", press_enter: true, source_event: "dispatch_nudge" });
+        expect(receipt).toMatchObject({ delivery_state: "steer_pending", delivered: false });
+      }
+      expect(target.pane.returns).toBe(1); expect(target.pane.tabs).toBe(0);
+      expect(target.pane.keys).not.toContain("escape");
+    } finally { target.context.dispose(); }
+  });
+
+  it("P0 STEER a new steer is distinguished from an older identical Tab queue", async () => {
+    const oldQueue = `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Queued follow-up inputs\n  ↳ ${LIST}\n› Ask Codex to do anything\n  GPT-6-Sol medium · ~/scratch`;
+    const after = oldQueue.replace("• Queued follow-up inputs", `• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ ${LIST}\n\n• Queued follow-up inputs`);
+    const target = await setup({ empty: oldQueue, buffered: oldQueue,
+      draft: text => oldQueue.replace("› Ask Codex to do anything", codexRows(text)), after });
+    try {
+      target.pane.steerOnReturn = true;
+      const receipt = await target.send(LIST, false, true, null);
+      expect(receipt).toMatchObject({ ok: true, delivery_state: "steer_pending", submitted: false });
+      expect(receipt.queued_behind_turn).not.toBe(true);
+      target.pane.frames.after = oldQueue.replace("Working (5s • esc to interrupt)", `${codexRows(LIST)}\n• Fresh tool boundary\nWorking (6s • esc to interrupt)`);
+      await target.engine.verifyPendingDeliveries();
+      expect(target.engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    } finally { target.context.dispose(); }
+  });
+
+  it.each([false, true])("P0 STEER duplicate pending steer retains acceptance without retyping (targeting=%s)", async targeting => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: fixture("midturn-steer-queued") });
+    try {
+      target.pane.steerOnReturn = true;
+      const first = await target.send(LIST, targeting, true, null);
+      const accepted = targeting ? first.receipts[0] : first;
+      const writes = [...target.pane.keys];
+      const chunks = target.exec.mock.calls.filter(([, args]) => args.includes("send")).length;
+      const second = await target.send(LIST, targeting, true, null);
+      const duplicate = targeting ? second.receipts[0] : second;
+      expect(second).toMatchObject({ ok: true });
+      expect(duplicate).toMatchObject({ duplicate_of: accepted.delivery_id,
+        delivery_state: "steer_pending", queue_verified: true, submitted: false, delivered: false });
+      expect(target.pane.keys).toEqual(writes);
+      expect(target.exec.mock.calls.filter(([, args]) => args.includes("send")).length).toBe(chunks);
+    } finally { target.context.dispose(); }
+  });
+
+  it("P0 STEER explicit queue opts into Tab and reports queued without delivery", async () => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: text => `OpenAI Codex\nWorking (5s • esc to interrupt)\n• Queued follow-up inputs\n  ↳ ${text}\n› Ask Codex to do anything\n  GPT-6-Sol medium · ~/scratch` });
+    try {
+      const receipt = await target.send(LONG, false, true, "queue");
+      expect(target.pane.tabs).toBe(1); expect(target.pane.returns).toBe(0);
+      expect(receipt).toMatchObject({ ok: true, submitted: false, delivered: false, delivery_state: "queued", terminal: false });
+    } finally { target.context.dispose(); }
+  });
 
   it("RESCOPE bounds retain only the newest eight unverified entries and their delivery IDs", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
@@ -182,7 +368,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(owner.texts).toEqual(Array.from({ length: 8 }, (_, index) => `unverified request ${192 + index}`));
       expect(owner.deliveryIds).toEqual(ids.slice(-8));
     } finally { target.context.dispose(); }
-  });
+  }, 15_000);
 
   it("RESCOPE bounds evict the oldest timestamps after 200 unverified surfaces", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
@@ -200,7 +386,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         "surface:bounded-0", ...Array.from({ length: 127 }, (_, index) => `surface:bounded-${73 + index}`),
       ]);
     } finally { target.context.dispose(); }
-  });
+  }, 15_000);
 
   it("RESCOPE bounds prune transcript-seen entries above an empty composer but retain queued entries", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
@@ -254,6 +440,407 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(await target.send(PONG)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", typed: false });
       expect(target.exec.mock.calls.filter(([, argv]: [string, string[]]) => argv.includes("send") || argv.includes("set-buffer"))).toHaveLength(writes);
       expect(target.pane.returns + target.pane.tabs).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  const pickerCases = [
+    ["codex", "mention", "Review the delta @124ccc35 before replying."],
+    ["codex", "slash", "/help"],
+    ["claude", "slash", "/help"],
+  ];
+  const pickerFrame = (cli: string, kind: string, text: string) =>
+    fixture(`issue-999-${cli}-${kind}-picker`).replace("PAYLOAD", text);
+  const plainFrame = (cli: string, text: string, submitted = false) => cli === "codex"
+    ? submitted ? fixture("idle-submitted-working").replace(PONG, text) : fixture("idle-draft").replace(PONG, text)
+    : `Claude Code · Opus 4.6\n${submitted ? `❯ ${text}\n✻ Working…\n❯ ` : `❯ ${text}`}`;
+
+  it.each(pickerCases)("#999(e) closes our %s %s picker before verified submit", async (cli, kind, text) => {
+    const target = await setup({ empty: plainFrame(cli, ""), buffered: plainFrame(cli, ""),
+      draft: text => plainFrame(cli, text), after: text => plainFrame(cli, text, true) }, undefined, 0, cli);
+    target.pane.pickerOpen = true;
+    target.pane.frames.buffered = typed => cli === "claude" ? plainFrame(cli, "") : target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    target.pane.frames.draft = typed => target.pane.pickerOpen ? pickerFrame(cli, kind, typed) : plainFrame(cli, typed);
+    try {
+      const result = await target.send(text, false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) a stuck composer picker fails explicitly without submitting", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => pickerFrame("codex", "mention", typed), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.pickerStuck = true;
+    target.pane.frames.buffered = typed => pickerFrame("codex", "mention", typed);
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", typed: true, submit_dispatched: false, submit_verified: false });
+      expect(target.pane.keys).toEqual(["escape"]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) refuses to close a picker over changed foreign text", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: pickerFrame("codex", "mention", "foreign @draft"),
+      draft: pickerFrame("codex", "mention", "foreign @draft"), after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    try {
+      const result = await target.send(pickerCases[0][2]);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "draft_ownership_unverified" });
+      expect(target.pane.keys).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) closing a picker does not prove submission when Return is swallowed", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed),
+      after: fixture("idle-empty") });
+    target.pane.pickerOpen = true;
+    target.pane.swallow = 10;
+    target.pane.frames.buffered = typed => target.pane.pickerOpen ? pickerFrame("codex", "mention", typed) : plainFrame("codex", typed);
+    try {
+      const result = await target.send(pickerCases[0][2], false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, submit_dispatched: true, submit_verified: null, delivery_state: "pending_verify" });
+      expect(target.pane.keys[0]).toBe("escape");
+      expect(target.pane.submitted).toEqual([]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  const realPickers = [
+    ["codex", "codex-mention", "@999e_no_match_capture"],
+    ["codex", "codex-slash", "/"],
+    ["claude", "claude-slash", "/"],
+    ["cursor", "cursor-path", "/999e_no_match_capture"],
+  ] as const;
+
+  it.each(["boot", "daybreak-real"])("P0 nonblocking %s banner sends and verifies without Esc", async variant => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      target.pane.bannerVariant = variant;
+      target.pane.bannerOpen = true; target.pane.bannerStuck = true;
+      const result = await target.send(PONG, false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, typed: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["return"]);
+      expect(target.pane.submitted).toEqual([PONG]);
+      expect(target.pane.bannerOpen).toBe(true);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["boot", "daybreak-real"])("P0 nonblocking %s boot prompt verifies without Esc", async variant => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => fixture("idle-draft").replace(`› ${PONG}`, codexRows(typed)), after: typed => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(typed)) }, PONG, 0, "codex", false, { variant, stuck: true });
+    try {
+      expect(target.spawned, JSON.stringify(target.spawned)).toMatchObject({ ok: true, boot_prompt_submit_verified: true });
+      expect(target.pane.keys).not.toContain("escape");
+      expect(target.pane.submitted.some(text => text.includes(PONG))).toBe(true);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("P0 nonblocking security notice still protects a foreign draft", async () => {
+    const foreign = plainFrame("codex", "synthetic human draft");
+    const target = await setup({ empty: foreign, buffered: foreign, draft: foreign, after: foreign });
+    try {
+      target.pane.bannerVariant = "daybreak-real"; target.pane.bannerOpen = true;
+      expect(await target.send(PONG, false, true)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft", typed: false, submit_dispatched: false });
+      expect(target.pane.keys).toEqual([]); expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1007 bound banner Esc retains the stable surface identity", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") }, undefined, 0, "codex", true);
+    try {
+      const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+      expect(agent.surface_uuid).toBeTruthy();
+      target.keyWrites?.mockClear();
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true;
+      await target.engine["dismissBootSecurityBanner"](agent, { surface: agent.surface_id, text: overlayCapture("codex-hooks-review"), lines: 35, scrollback_used: false });
+      expect(target.keyWrites).toHaveBeenCalledWith(agent.surface_uuid, "escape", { workspace: agent.workspace_id, stableSurfaceIdentity: agent.surface_uuid });
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1007 raw boot preserves the structured persistent-Hooks safety code", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
+    try {
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      expect(await target.rawBoot()).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed" });
+      expect(target.pane.keys).toEqual(["return", "escape"]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["agent boot", "raw boot"])("#1007 %s banner reads share the UUID delivery lock", async route => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      let concurrent: any; let concurrentWrites = 0;
+      const attempt = async () => {
+        const before = target.exec.mock.calls.length;
+        concurrent = await target.typeDraft(PONG);
+        concurrentWrites = target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
+      };
+      if (route === "raw boot") {
+        target.pane.bannerVariant = "hooks-review"; target.pane.bannerOnReturn = true;
+        target.pane.onEscape = async () => { target.pane.beforeRead = attempt; };
+        await target.rawBoot();
+      } else {
+        target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true; target.pane.beforeRead = attempt;
+        const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
+        await target.engine["dismissBootSecurityBanner"](agent, { surface: "surface:new", text: overlayCapture("codex-hooks-review"), lines: 35, scrollback_used: false });
+      }
+      expect(concurrent).toMatchObject({ ok: false });
+      expect(JSON.stringify(concurrent)).toMatch(/busy|still in progress/u);
+      expect(concurrentWrites).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+  const matrixPlain = (cli: string, text: string, submitted = false) => cli === "cursor"
+    ? `Cursor Agent\n${submitted ? `→ ${text}\nThinking…\n` : ""}→ ${submitted ? "Plan, search, build anything" : text}\nAuto`
+    : plainFrame(cli, text, submitted);
+
+  it.each(realPickers)("#999(e) real %s %s closes only an owned picker and submits", async (cli, name, text) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: matrixPlain(cli, ""),
+      draft: typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed),
+      after: typed => matrixPlain(cli, typed, true) }, undefined, 0, cli);
+    try {
+      target.pane.pickerOpen = true;
+      target.pane.frames.buffered = typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed);
+      expect(await target.send(text, false, true)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(realPickers.flatMap(([cli, name, text]) => ["text retry", "key Return"].map(route => [cli, name, text, route])))("#999(e) retains %s %s ownership for %s via %s", async (cli, name, text, route) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: matrixPlain(cli, ""),
+      draft: typed => target.pane.pickerOpen ? overlayCapture(name) : matrixPlain(cli, typed),
+      after: typed => matrixPlain(cli, typed, true) }, undefined, 0, cli);
+    try {
+      expect(await target.typeDraft(text)).toMatchObject({ typed: true });
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      const result = route === "text retry" ? await target.send(text, false, true) : await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [stuck, variant] as const)))("security is nonblocking; Hooks is Esc-only (stuck=%s, %s)", async (stuck, variant) => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      const result = await target.send(PONG, false, true);
+      if (stuck && variant === "hooks-review") {
+        expect(result).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed", typed: false, submit_dispatched: false });
+        expect(target.pane.text).toBe("");
+        expect(target.pane.keys).toEqual(["escape"]);
+      } else {
+        expect(result).toMatchObject({ ok: true, submit_verified: true });
+        expect(target.pane.keys).toEqual(variant === "hooks-review" ? ["escape", "return"] : ["return"]);
+        expect(target.pane.submitted).toEqual([PONG]);
+      }
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("Hooks review during spawn reaches boot delivery or fails explicitly (stuck=%s)", async stuck => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => fixture("idle-draft").replace(`› ${PONG}`, codexRows(typed)), after: typed => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(typed)) }, PONG, 0, "codex", true, { variant: "hooks-review", stuck });
+    try {
+      if (stuck) expect(target.spawned).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed" });
+      else { expect(target.spawned, JSON.stringify({ spawn: target.spawned, keys: target.pane.keys, submitted: target.pane.submitted, phase: target.pane.phase, text: target.pane.text })).toMatchObject({ ok: true, boot_prompt_submit_verified: true }); expect(target.pane.submitted.some(text => text.includes(PONG))).toBe(true); }
+      expect(target.pane.keys.filter(key => key === "escape")).toHaveLength(1);
+      expect(target.pane.keys).not.toContain("1"); expect(target.pane.keys).not.toContain("2");
+      expect(target.keyWrites).toHaveBeenCalledWith(expect.any(String), "escape", expect.objectContaining({ workspace: "workspace:1" }));
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true].flatMap(stuck => ["boot", "hooks-review"].map(variant => [stuck, variant] as const)))("#999(e) owned draft below security banner stays owned on key Return (stuck=%s, %s)", async (stuck, variant) => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      await target.typeDraft(PONG); target.pane.phase = "draft";
+      target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject(stuck && variant === "hooks-review"
+        ? { ok: false, error_code: "hooks_review_not_dismissed", submit_attempted: false }
+        : { ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(variant !== "hooks-review" ? ["return"] : stuck ? ["escape"] : ["escape", "return"]);
+      expect(target.context.typedDraftOwners.size).toBe(stuck && variant === "hooks-review" ? 1 : 0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("Hooks review dismissal preserves a real foreign draft underneath", async () => {
+    const foreign = plainFrame("codex", "synthetic human draft");
+    const target = await setup({ empty: foreign, buffered: foreign, draft: foreign, after: foreign });
+    try {
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true;
+      expect(await target.send(PONG, false, true)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft", typed: false, submit_dispatched: false });
+      expect(target.pane.keys).toEqual(["escape"]); expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(realPickers)("#999(e) stuck real %s %s picker fails without Return", async (cli, name, text) => {
+    const target = await setup({ empty: matrixPlain(cli, ""), buffered: overlayCapture(name),
+      draft: overlayCapture(name), after: matrixPlain(cli, "") }, undefined, 0, cli);
+    try {
+      target.pane.pickerOpen = true; target.pane.pickerStuck = true;
+      expect(await target.send(text, false, true)).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", submit_dispatched: false });
+      expect(target.pane.keys).toEqual(["escape"]);
+      expect(target.context.typedDraftOwners.size).toBe(1);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) another caller cannot close and submit the real owned picker", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: overlayCapture("codex-mention"), after: fixture("idle-empty") });
+    try {
+      await target.typeDraft("@999e_no_match_capture");
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      expect(await target.keyReturn(OTHER_UUID)).toMatchObject({ ok: false, error_code: "draft_ownership_unverified" });
+      expect(target.pane.keys).toEqual([]);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999(e) Hooks appearing between chunks preserves its distinct failure and stops input", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
+    try {
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      const payload = "Synthetic packet ".repeat(1_100);
+      const before = target.exec.mock.calls.length;
+      const result = await target.sendChunks(payload);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed", typed: true });
+      expect(target.pane.keys.filter(key => key === "escape" || key === "return")).toEqual(["escape"]);
+      expect(target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer"))).toHaveLength(1);
+      expect(payload.startsWith(target.pane.text)).toBe(true);
+      expect(target.pane.text.length).toBeLessThan(payload.length);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  // #999 incident: owned input survives pending verification and a wrapped
+  // queue at idle. Return dispatch is separate from proof of consumption.
+  const incidentText = 'PR-3 case-h delta @124ccc35: Opus PASS (strict exact-or-≥40-prefix queue evidence, wrap-tolerant). Once your full hook is green: push and open the PR (size:L). The live run waits for my "0.4.97 installed" post.';
+  const incident = fixture("issue-999-idle-owned-queue");
+  const queueRows = (rows: string) => incident.replace(/ {2}↳[\s\S]*? {4}shift/u, `  ↳ ${rows}\n    shift`);
+  const busyDraft = (text: string) => `OpenAI Codex\nWorking (5s • esc to interrupt)\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`;
+
+  it.each(["queued", "pending_verify"])("#999 wrapped own %s queue dispatches Return and keeps unverified recovery honest", async state => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: state === "queued" ? `Working (5s • esc to interrupt)\n${incident}` : incident });
+    try {
+      const initial = await target.send(incidentText);
+      expect(initial.delivery_state, JSON.stringify(initial)).toBe(state);
+      target.pane.frames.after = incident;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(target.pane.returns).toBe(returns + 1);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "queued_stalled_idle", submit_dispatched: true, submit_verified: null });
+      expect(result.error).toContain("resume");
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(target.context.typedDraftOwners.size).toBeGreaterThan(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["", "…", "..."])("#999 own wrapped queue ending in %j verifies when Return consumes it", async suffix => {
+    const text = incidentText + suffix;
+    const screen = incident.replace(" post.", ` post.${suffix}`);
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${screen}` });
+    try {
+      await target.send(text);
+      target.pane.frames.after = screen;
+      target.pane.drainQueueOnReturn = true;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([text]);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["…", "..."])("#1004 HIGH refuses a foreign truncated %s queue sharing our long prefix without Return", async suffix => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      await target.send(incidentText);
+      const prefix = incidentText.slice(0, 70);
+      const foreign = `${prefix} foreign caller's hidden suffix`;
+      target.pane.frames.after = queueRows(`${prefix}${suffix}`);
+      target.pane.queued = [foreign];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, foreign);
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(result.submit_dispatched).not.toBe(true);
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 whitespace HIGH refuses a foreign single-row whitespace collision without Return", async () => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${queueRows("delete foo")}` });
+    try {
+      await target.send("delete foo");
+      target.pane.frames.after = queueRows("deletefoo");
+      target.pane.queued = ["deletefoo"];
+      target.pane.drainQueueOnReturn = true;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue", submit_attempted: false });
+      expect(target.pane.returns).toBe(returns);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#1004 MEDIUM submits the assigned visible row rather than a stale shared-prefix candidate", async () => {
+    const prefix = "This shared authored queue prefix has at least forty characters";
+    const first = `${prefix} first request`, second = `${prefix} second request`;
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: typed => `Working (5s • esc to interrupt)\n${queueRows(typed)}` });
+    try {
+      await target.send(first);
+      await target.send(second);
+      target.pane.frames.after = queueRows(`${second}\n  ↳ ${first}`);
+      target.pane.queued = [second, first];
+      target.pane.drainQueueOnReturn = true;
+      target.pane.queueDrainFrame = fixture("idle-submitted-working").replace(PONG, second)
+        .replace("› Ask Codex to do anything", `• Queued follow-up inputs\n  ↳ ${first}\n› Ask Codex to do anything`);
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toEqual([second]);
+      expect([...target.context.typedDraftOwners.values()].flatMap(owner => owner.texts)).toEqual([first]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["other-caller", "unknown", "short-prefix", "extra-foreign"])("#999 refuses %s queue with visible text and no foreign-draft fiction", async shape => {
+    const target = await setup({ empty: busyDraft(""), buffered: busyDraft(""), draft: busyDraft,
+      after: `Working (5s • esc to interrupt)\n${incident}` });
+    try {
+      if (shape !== "unknown") await target.send(incidentText);
+      const screen = shape === "short-prefix" ? queueRows(`${incidentText.slice(0, 20)}…`) :
+        shape === "extra-foreign" ? incident.replace("    shift+", "  ↳ foreign queue text\n    shift+") : incident;
+      target.pane.phase = "after";
+      target.pane.frames.after = screen;
+      const returns = target.pane.returns;
+      const result = await target.keyReturn(shape === "other-caller" ? OTHER_UUID : LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_queue" });
+      expect(result.error).toContain("PR-3 case-h delta");
+      expect(result.error).not.toContain('"unknown"');
+      expect(target.pane.returns).toBe(returns);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("#999 an idle placeholder alone is never a foreign draft", async () => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: busyDraft, after: fixture("idle-empty") });
+    try {
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result.error_code).not.toBe("blocked_by_foreign_draft");
+      expect(target.pane.returns).toBe(0);
     } finally { target.context.dispose(); }
   }, 30_000);
 
@@ -313,7 +900,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect((await target.send(PONG)).ok).toBe(true);
       const returns = target.pane.returns;
       const receipt = await target.keyReturn(OTHER_UUID);
-      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_draft");
+      expect(receipt.error_code, JSON.stringify(receipt)).toBe("blocked_by_foreign_queue");
       expect(target.pane.returns).toBe(returns);
     } finally { target.context.dispose(); }
   }, 30_000);
@@ -438,7 +1025,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("P0 mid-turn: %s queues the relay without leaving it in the composer", async label => {
+  it.each(["GPT-6-Sol medium", "Daybreak Blue high", "GPT-6.1-Sol high", "GPT-6.1-Sol medium"])("explicit queue mid-turn: %s queues the relay without leaving it in the composer", async label => {
     const replay = (name: string) => fixture(name).replaceAll("GPT-6-Sol medium", label);
     const target = await setup({
       empty: replay("midturn-empty"), buffered: replay("midturn-empty"),

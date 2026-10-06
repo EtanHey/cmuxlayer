@@ -29,7 +29,8 @@ export type AgentHaltType =
   | "idle_without_done"
   | "wedged"
   | "paused"
-  | "harness_api_error";
+  | "harness_api_error"
+  | "delivery_stalled";
 
 export interface Observed<T> {
   value: T;
@@ -424,6 +425,7 @@ export interface DeliveryTelemetryEvent {
     | "typed"
     | "submitted"
     | "queued"
+    | "steer_pending"
     | "queued_followup"
     | "rescued"
     | "failed"
@@ -581,6 +583,16 @@ export interface CloseForensicsEvent {
   client_context: CloseForensicsClientContext;
 }
 
+/** An Esc-only attempt on an observed Codex setup overlay; no screen content. */
+export interface AccountSecurityBannerEvent {
+  ts: string;
+  event_type: "account_security_banner";
+  agent_id: string | null;
+  surface: string;
+  variant: "advanced_account_security" | "daybreak" | "security" | "hooks_review";
+  outcome: "dismissed" | "failed";
+}
+
 export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
@@ -589,7 +601,8 @@ export type EventLogEntry =
   | AgentCliExitEvent
   | AgentHaltEscalationEvent
   | CloseTelemetryEvent
-  | CloseForensicsEvent;
+  | CloseForensicsEvent
+  | AccountSecurityBannerEvent;
 
 export interface WaitResult {
   matched: boolean;

@@ -11,6 +11,7 @@ import { replaceTaskSuffix } from "../naming.js";
 import { currentCliFallbackCount, withTransportRetryTracking } from "../transport-retry-context.js";
 import { AgentEngine } from "../agent-engine.js";
 import { bootContractPointer, coordinationContractPath } from "../coordination-paths.js";
+import { dismissAccountSecurityBanner } from "./account-security.js";
 import {
   INTERACTIVE_AGENT_STATES,
   isLiveDeliverable,
@@ -26,9 +27,11 @@ import type {
 import {
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
+  isCodexDismissibleOverlay,
   isPickerOrMenuScreen,
   parseScreen,
   codexScreenHasActiveTurn,
+  hasVisibleAgentProgress,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -55,6 +58,7 @@ import {
   normalizeTerminalText,
   inferComposerCli,
   extractComposerInputRegion,
+  composerPickerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
   screenContainsCompleteSubmittedText,
@@ -64,8 +68,11 @@ import {
   cursorSubmittedResponseEvidenceSignatures,
   screenShowsFreshCursorResponseAfterSubmittedInput,
   screenShowsQueuedAgentInput,
-  countVisibleExactQueuedRows,
+  assignVisibleOwnedQueuedInputs,
+  countVisibleOwnedQueuedInputs,
+  visibleCodexQueuedText,
   countVisibleQueuedSubmitMatches,
+  codexPendingDeliveryKind,
   countVisibleCodexQueuedInputs,
   codexScreenShowsSubmit,
   composerRegionMatchesPayload,
@@ -595,6 +602,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           cliFallbackCountBeforeDispatch,
         );
       } catch (error) {
+        if (error instanceof DeliverySafetyGateError) throw error;
         if (currentCliFallbackCount() !== cliFallbackCountBeforeDispatch) {
           attemptedRpcMethod = null;
         }
@@ -813,7 +821,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       if (empty) {
         const entries = token.texts ?? [token.text];
         const retained = entries.map((entry, index) => ({ entry, deliveryId: token.deliveryIds?.[index] ?? "" }))
-          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || screenShowsQueuedAgentInput(text, entry, { exact: true }));
+          .filter(({ entry }) => !screenTranscriptContainsText(text, entry) || countVisibleOwnedQueuedInputs(text, [entry]) > 0);
         const last = retained.at(-1);
         if (!last) { typedDraftOwners.delete(key); continue; }
         token.texts = retained.map(({ entry }) => entry);
@@ -821,7 +829,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         token.text = last.entry;
       }
       const unchanged = ownedComposerText(token, region, record?.cli, text) !== null;
-      const queued = (token.texts ?? [token.text]).some(entry => screenShowsQueuedAgentInput(text, entry, { exact: true }));
+      const queued = countVisibleOwnedQueuedInputs(text, token.texts ?? [token.text]) > 0;
       const renderingPrefix = !token.seen && region !== null && normalizeTerminalText(token.text).startsWith(region);
       if (!draftOwnerFingerprintMatches(token, surface, uuid) || (!unchanged && !empty && !queued && !renderingPrefix)) typedDraftOwners.delete(key);
       else if (unchanged) token.seen = true;
@@ -920,15 +928,44 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
   };
 
+  const ownsExactClaudeDraft = (opts: {
+    surface: string; workspace?: string; stableSurfaceIdentity?: string | null;
+    text: string; delivery_id?: string;
+  }, snapshot: { text: string; parsed: ParsedScreenResult } | null, requireIdle = true): boolean => {
+    if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
+        snapshot.parsed.control_state === "permission_prompt" ||
+        (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
+        isPickerOrMenuScreen(snapshot.text, "claude") || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+    // draft_pending takes precedence over activity in the screen parser. Clear
+    // only the current composer in a copied frame to inspect the turn status.
+    const rows = normalizeTerminalText(snapshot.text).split("\n");
+    let prompt = -1;
+    rows.forEach((row, index) => { if (/^[ \t]*[❯>](?:\s|$)/u.test(row)) prompt = index; });
+    if (requireIdle && prompt >= 0 && hasVisibleAgentProgress([...rows.slice(0, prompt), "❯ "].join("\n"), "claude")) return false;
+    const region = extractComposerInputRegion(snapshot.text, undefined, "claude", true);
+    if (region === null || !region.trim() || !composerRegionMatchesPayload(region, opts.text, "claude", snapshot.text)) return false;
+    return [...typedDraftOwners.values()].some(owner => {
+      const sameTarget = owner.uuid ? owner.uuid.toLowerCase() === opts.stableSurfaceIdentity?.toLowerCase()
+        : owner.ref === opts.surface && owner.workspace === (opts.workspace ?? null);
+      const entries = owner.texts ?? [owner.text];
+      const owned = opts.delivery_id ? entries.some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.delivery_id)
+        : Boolean(owner.caller) && owner.caller === resolveCurrentCallerAgent()?.agent_id && entries.includes(opts.text);
+      return sameTarget && owned && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+    });
+  };
+
+  class ClaudeDraftChanged extends Error {}
+
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
     workspace?: string;
     cli?: CliType;
     /** When set, also refuse a composer already holding someone else's text. */
     draftGuardText?: string;
+    readSnapshot?: () => Promise<{ text: string; parsed: ParsedScreenResult } | null>;
   }): Promise<{ text: string; parsed: ParsedScreenResult } | null> => {
     const { surface, workspace, cli } = opts;
-    const snapshot = await readParsedSurface(surface, workspace, {
+    const snapshot = opts.readSnapshot ? await opts.readSnapshot() : await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
     });
     if (!snapshot) {
@@ -1039,10 +1076,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
-      if (
-        snapshot &&
-        screenShowsCompletePendingInput(snapshot.text, opts.text)
-      ) {
+      const pickerRegion = snapshot ? composerPickerInputRegion(snapshot.text) : null;
+      if (snapshot && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
+          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)))) {
         return {
           screenText: snapshot.text,
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
@@ -1081,13 +1117,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     require_working_status?: boolean;
     require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
+    delivery_id?: string;
+    stableSurfaceIdentity?: string | null;
     submit_key?: "return" | "tab";
+    codex_busy_mode?: "steer" | "queue";
     timeout_ms?: number;
     cursor_response_baseline: readonly string[] | null;
     pre_type_screen?: string | null;
     pre_return_screen?: string | null;
     pre_return_metrics?: RawSubmitEvidenceMetrics | null;
     beforeMutation?: () => Promise<void>;
+    beforeRead?: () => Promise<void>;
     rpcMethods: Set<DeliveryRpcMethod>;
   }): Promise<{
     submit_verified: boolean | null;
@@ -1096,7 +1136,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     retry_count: number;
     queue_verified?: boolean;
     delivery:
-      "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify";
+      "submitted" | "queued" | "steer_pending" | "queued_followup" | "rescued" | "pending_verify";
   }> => {
     if (!opts.verify_submit) {
       // null means submit verification was not attempted, usually because the
@@ -1117,6 +1157,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const noSubmitEvidenceResult =
       opts.source_event === "spawn_agent" ? null : false;
     const startedAt = Date.now();
+    const pollForSubmit = () => delay(
+      opts.source_event === "spawn_agent"
+        ? Math.min(
+            SEND_INPUT_SUBMIT_VERIFY_POLL_MS,
+            Math.max(0, timeoutMs - (Date.now() - startedAt)),
+          )
+        : SEND_INPUT_SUBMIT_VERIFY_POLL_MS,
+    );
     let retried = false;
     let retryCount = 0;
     let lastCodexRelayKey = opts.submit_key ?? "return";
@@ -1144,7 +1192,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
     while (Date.now() - startedAt < timeoutMs) {
-      await opts.beforeMutation?.();
+      await (opts.beforeRead ?? opts.beforeMutation)?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
@@ -1155,7 +1203,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
       if (!snapshot.text.trim()) {
         sawBlankScreen = true;
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        await pollForSubmit();
         continue;
       }
       sawReadableScreen = true;
@@ -1246,7 +1294,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
-          delivery: "queued",
+          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? (opts.codex_busy_mode === "queue" ? "queued" : "steer_pending"),
         };
       }
       if (
@@ -1434,8 +1482,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.source_event === "boot_prompt") &&
         hasPendingSubmitEvidence &&
         (screenCli === "codex" ||
-          (screenCli === "claude" &&
-            (opts.source_event === "send_to" || !isSubmitVerifiedStatus(snapshot.parsed.status))));
+          (screenCli === "claude" && ownsExactClaudeDraft(opts, snapshot)));
       if (
         agentRetryEligiblePendingInput &&
         screenCli === "claude" &&
@@ -1477,10 +1524,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 ? CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS
                 : CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS,
             )
-          : opts.source_event === "spawn_agent" &&
-              !hasParsedAgentIdentity(snapshot.parsed)
-            ? 0
-            : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
+          : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
       // Pending input is ambiguous: the first Return may have been missed, or
       // it may have landed while a slow agent has not repainted the composer
@@ -1490,7 +1534,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         !retried &&
         retryEligiblePendingInput &&
         retryEligiblePendingSince !== null &&
-        Date.now() - retryEligiblePendingSince >= retryObserveMs
+        Date.now() - retryEligiblePendingSince >= retryObserveMs &&
+        (opts.source_event !== "spawn_agent" ||
+          Date.now() - startedAt + SEND_INPUT_RECOVERY_ENTER_DELAY_MS < timeoutMs)
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         const codexRelay = screenCli === "codex" &&
@@ -1498,16 +1544,28 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             opts.source_event === "dispatch_nudge" ||
             opts.source_event === "report_to_parent");
         const recoverySelection: { key: "tab" | "return" } = { key: "return" };
-        const recoveryRpcMethod = await sendKeyWithRetry(
-          opts.surface,
-          codexRelay ? async () => {
-            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
-            lastCodexRelayKey = recoverySelection.key;
-            return recoverySelection.key;
-          } : "return",
-          opts.workspace,
-          opts.beforeMutation,
-        );
+        let recoveryRpcMethod: DeliveryRpcMethod | null;
+        try {
+          recoveryRpcMethod = await sendKeyWithRetry(
+            opts.surface,
+            codexRelay ? async () => {
+              recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
+              lastCodexRelayKey = recoverySelection.key;
+              return recoverySelection.key;
+            } : "return",
+            opts.workspace,
+            screenCli === "claude" ? async () => {
+              await opts.beforeMutation?.();
+              const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              if (!ownsExactClaudeDraft(opts, latest)) throw new ClaudeDraftChanged();
+            } : opts.beforeMutation,
+            screenCli === "claude" ? 1 : SEND_INPUT_RETRY_ATTEMPTS,
+          );
+        } catch (error) {
+          if (!(error instanceof ClaudeDraftChanged)) throw error;
+          retryEligiblePendingSince = null;
+          continue;
+        }
         if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
@@ -1555,7 +1613,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         };
       }
 
-      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+      await pollForSubmit();
     }
     // A latched interrupt is terminal evidence that this verifier cannot
     // attribute the task turn. Never hand it to the marker-unaware background
@@ -1627,6 +1685,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   const currentCodexRelayKey = async (
     surface: string,
     workspace?: string,
+    busyMode: "steer" | "queue" = "steer",
   ): Promise<"tab" | "return"> => {
     const snapshot = await readParsedSurface(surface, workspace, {
       throwOnSurfaceGone: true,
@@ -1634,7 +1693,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot?.text.trim()) {
       throw new Error(`Cannot choose Codex relay key: unreadable surface ${surface}`);
     }
-    return codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
+    return busyMode === "queue" && codexScreenHasActiveTurn(snapshot.text) ? "tab" : "return";
   };
 
   /**
@@ -1650,6 +1709,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     baseline: { text: string; parsed: ParsedScreenResult } | null;
     owned_text?: string;
+    owned_queue?: boolean;
   }): Promise<{
     submit_verified: boolean | null;
     submit_verification_reason: SubmitKeyVerificationReason | null;
@@ -1661,7 +1721,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (
       opts.baseline?.parsed.control_state !== "permission_prompt" &&
       baselineComposerInput !== null &&
-      baselineComposerInput.trim() === ""
+      baselineComposerInput.trim() === "" && !opts.owned_queue
     ) {
       return {
         submit_verified: null,
@@ -1686,6 +1746,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         return { submit_verified: true, submit_verification_reason: null };
       }
       const composerInput = extractComposerInputRegion(snapshot.text);
+      if (opts.owned_queue && opts.owned_text && opts.baseline &&
+          countVisibleQueuedSubmitMatches(snapshot.text, opts.owned_text) < countVisibleQueuedSubmitMatches(opts.baseline.text, opts.owned_text) &&
+          codexScreenShowsSubmit(opts.baseline.text, snapshot.text, opts.owned_text)) {
+        return { submit_verified: true, submit_verification_reason: null };
+      }
       const transitionedFromIdleDraftToWorking =
         opts.baseline !== null &&
         baselineComposerInput !== null &&
@@ -1725,6 +1790,33 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     };
   };
 
+  const closeOwnedPicker = async (
+    snapshot: { text: string; parsed: ParsedScreenResult }, text: string, cli: CliType | null | undefined,
+    opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null; beforeMutation?: () => Promise<void> },
+    rpcMethods: Set<DeliveryRpcMethod>,
+  ) => {
+    const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+    const assertOwner = () => {
+      if (!owner || owner.caller !== resolveCurrentCallerAgent()?.agent_id || !bootTokenInstanceCurrent(owner) ||
+          !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity)) {
+        throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+      }
+    };
+    const region = composerPickerInputRegion(snapshot.text, cli ?? undefined);
+    assertOwner();
+    if (snapshot.parsed.control_state === "permission_prompt" || region === null ||
+        !composerRegionMatchesPayload(region, text, cli, snapshot.text)) throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+    const method = await sendKeyWithRetry(opts.surface, "escape", opts.workspace, async () => { await opts.beforeMutation?.(); assertOwner(); }, 1);
+    if (method) rpcMethods.add(method);
+    await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+    await opts.beforeMutation?.(); assertOwner();
+    const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+    if (!closed || isPickerOrMenuScreen(closed.text, cli ?? undefined)) throw new DeliverySafetyGateError("composer_picker_not_closed", closed?.parsed ?? snapshot.parsed);
+    const closedRegion = extractComposerInputRegion(closed.text, text, cli ?? undefined, true);
+    if (closedRegion === null || !composerRegionMatchesPayload(closedRegion, text, cli, closed.text)) throw new DeliverySafetyGateError("draft_ownership_unverified", closed.parsed);
+    return closed;
+  };
+
   const executeDeliveryEngine = async (opts: {
     surface: string;
     workspace?: string;
@@ -1735,6 +1827,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     chunk_size: number;
     chunk_delay_ms: number;
     press_enter: boolean;
+    codex_busy_mode?: "steer" | "queue";
     retry_owned_draft?: boolean;
     rename_to_task?: string;
     onChunkDelivered?: (sentChunks: number) => void;
@@ -1747,6 +1840,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
+    /** Internal remaining readiness budget, sampled after Return. */
+    submit_verify_remaining_budget_ms?: () => number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
     timings?: DeliveryPhaseTimings;
@@ -1762,7 +1857,44 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let textDispatched = false;
     let submitDispatched = false;
     try {
-      await opts.beforeMutation?.();
+      const assertBinding = opts.beforeMutation;
+      let securityDismissed = false;
+      let securityCapable = true;
+      let inputSafetyObserved = false;
+      const readSafeInput = async () => {
+        await assertBinding?.();
+        const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!snapshot) return null;
+        const hadBanner = isCodexDismissibleOverlay(snapshot.text);
+        securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
+          (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
+        const safe = await dismissAccountSecurityBanner(snapshot, {
+          escape: async () => {
+            const method = await sendKeyWithRetry(opts.surface, "escape", opts.workspace, assertBinding, 1);
+            if (method) rpcMethods.add(method);
+          },
+          read: async () => {
+            await assertBinding?.();
+            const closed = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+            if (!closed) throw new DeliverySafetyGateError("hooks_review_not_dismissed", snapshot.parsed);
+            return closed;
+          },
+        }, { agent_id: resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.agent_id ?? null,
+          surface: opts.surface, eventLog: stateMgr.getEventLog() });
+        securityDismissed ||= hadBanner;
+        inputSafetyObserved = true;
+        return safe;
+      };
+      // Every input mutation, including a retry or launcher Return, rechecks
+      // Hooks review. Account-security notices do not own composer input.
+      opts = { ...opts, beforeMutation: async () => {
+        await assertBinding?.();
+        // The existing pre-type/key baseline is already a safe observation.
+        // Consume it once; subsequent input batches need a fresh overlay check.
+        if (!inputSafetyObserved && securityCapable) await readSafeInput();
+        inputSafetyObserved = false;
+      } };
+      await assertBinding?.();
       if (opts.key !== undefined) {
       if (opts.chunks.length > 0 || opts.press_enter) {
         throw new Error(
@@ -1774,48 +1906,34 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const targetCli = targetAgent?.cli;
       const submitAttempted = isSubmitKey(key);
       const ownerKey = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
-      const submitBaseline = submitAttempted && !opts.engineSubmitProof
-        ? await readParsedSurface(opts.surface, opts.workspace) : null;
+      let submitBaseline = submitAttempted && !opts.engineSubmitProof
+        ? await readSafeInput() : null;
+      if (key === "escape") await readSafeInput();
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
       const caller = resolveCurrentCallerAgent()?.agent_id;
       const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
-      const ownedQueueRows = submitBaseline ? [...new Set(ownedEntries)].reduce((count, text) => {
-        const visible = countVisibleExactQueuedRows(submitBaseline.text, text) ?? 0;
-        return count + (visible <= ownedEntries.filter(entry => entry === text).length ? visible : 0);
-      }, 0) : 0;
-      if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
-        throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed);
+      const ownedQueue = submitBaseline ? assignVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : [];
+      const ownedQueueRows = ownedQueue.length;
+      if (callerSubmit && submitBaseline && composerPickerInputRegion(submitBaseline.text, targetCli) !== null) {
+        const region = composerPickerInputRegion(submitBaseline.text, targetCli);
+        const ownText = ownerCurrent && owner && region !== null ? ownedComposerText(owner, region, targetCli, submitBaseline.text) : null;
+        if (!ownText) throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline.parsed);
+        submitBaseline = await closeOwnedPicker(submitBaseline, ownText, targetCli, opts, rpcMethods);
       }
-      const eligibleQueuedReceipts = callerSubmit && targetAgent && submitBaseline &&
-        targetCli === "codex"
-        ? context.lifecycleSweepEngine?.listDeliveryReceipts().filter((receipt) =>
-            receipt.agent_id === targetAgent.agent_id &&
-            receipt.delivery_state === "queued" &&
-            receipt.composer_accepted === true &&
-            receipt.press_enter && ownedEntries.includes(receipt.text)
-          ) ?? []
-        : [];
-      const ownedQueuedReceipt = submitBaseline
-        ? eligibleQueuedReceipts.find((receipt) => {
-            const visibleCount = countVisibleExactQueuedRows(
-              submitBaseline.text,
-              receipt.text,
-            );
-            const ownedCount = eligibleQueuedReceipts.filter(
-              (candidate) => candidate.text === receipt.text,
-            ).length;
-            return visibleCount !== null && visibleCount > 0 && visibleCount <= ownedCount &&
-              screenShowsQueuedAgentInput(submitBaseline.text, receipt.text, { exact: true });
-          })
-        : undefined;
+      if (callerSubmit && submitBaseline && queueRows > ownedQueueRows) {
+        throw new DeliverySafetyGateError("blocked_by_foreign_queue", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text));
+      }
+      // Ownership is bound to the caller/surface/session, including pending_verify
+      // deliveries; the public receipt need not already have reached queued.
+      const ownedQueuedText = ownedQueue[0]?.text;
       if (callerSubmit && (!submitBaseline || !submitBaseline.text.trim() ||
           ((targetCli || inferComposerCli(submitBaseline.text)) &&
             submitBaseline.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(submitBaseline.text) &&
             extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true) === null &&
-            !ownedQueuedReceipt))) {
+            !ownedQueuedText))) {
         typedDraftOwners.delete(ownerKey);
         throw new DeliverySafetyGateError(submitBaseline?.text.trim() ? "composer_unrecognized" : "draft_ownership_unverified", submitBaseline?.parsed ?? parseScreen(""));
       }
@@ -1827,19 +1945,22 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           !isPickerOrMenuScreen(submitBaseline.text)) {
         const currentRegion = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const ownedText = ownerCurrent && owner && currentRegion !== null
-          ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? ""
-          : (ownedQueuedReceipt?.text ?? "");
+          ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? (ownedQueuedText ?? "")
+          : (ownedQueuedText ?? "");
         ownedSubmitText = ownedText;
+        if (targetCli === "claude" && ownedText && screenTranscriptContainsText(submitBaseline.text, ownedText)) {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
+        }
         if (ownerCurrent && owner?.bootAgentId && owner.bootInstanceId) {
           ownedBoot = { agentId: owner.bootAgentId, instanceId: owner.bootInstanceId };
         }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
-        if ((!ownedQueuedReceipt || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
+        if ((!ownedQueuedText || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
-        if (!ownedQueuedReceipt && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
+        if (!ownedQueuedText && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
       }
@@ -1849,15 +1970,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // #879: re-check the bound boot instance at the last pre-mutation hook,
       // like the pointer path's assertOwnedPointerBeforeReturn. A newer boot
       // installed after the ownership check must not receive this Return.
-      const beforeKeyMutation = ownedBoot
+      const beforeKeyMutation = (ownedBoot || (targetCli === "claude" && ownedSubmitText))
         ? async () => {
             await opts.beforeMutation?.();
-            if (stateMgr.readState(ownedBoot!.agentId)?.boot_instance_id !== ownedBoot!.instanceId) {
+            if (targetCli === "claude" && ownedSubmitText) {
+              const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              const current = typedDraftOwners.get(ownerKey);
+              const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
+              if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
+                  region === null || !composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) ||
+                  screenTranscriptContainsText(latest.text, ownedSubmitText)) {
+                throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline?.parsed ?? parseScreen(""));
+              }
+            }
+            if (ownedBoot && stateMgr.readState(ownedBoot.agentId)?.boot_instance_id !== ownedBoot.instanceId) {
               throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
             }
           }
         : opts.beforeMutation;
-      const keyRpcMethod = await timeDeliveryPhase(opts.timings, "type", () =>
+      const keyRpcMethod = key === "escape" && securityDismissed ? null : await timeDeliveryPhase(opts.timings, "type", () =>
         sendKeyWithRetry(
           opts.surface,
           key,
@@ -1876,9 +2007,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 workspace: opts.workspace,
                 baseline: submitBaseline,
                 owned_text: ownedSubmitText,
+                owned_queue: Boolean(ownedQueuedText),
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      if (ownedQueuedText && submitBaseline && !codexScreenHasActiveTurn(submitBaseline.text) && verification.submit_verified !== true) {
+        throw new DeliverySafetyGateError("queued_stalled_idle", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text), buildPublicDeliveryReceipt({
+          delivery_state: "pending_verify", typed: false, submit_attempted: true,
+          submit_dispatched: true, submit_verified: null, retry_count: 0,
+          rpc_methods: [...rpcMethods], timings_ms: opts.timings,
+        }));
+      }
       if (verification.submit_verified === true) {
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
@@ -2056,6 +2195,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           pre_return_screen: pending.text,
           pre_return_metrics: parseSubmitEvidenceMetrics(pending.text, pending.parsed),
           beforeMutation: opts.beforeMutation,
+          beforeRead: async () => { await assertBinding?.(); },
           rpcMethods,
         });
         if (verification.submit_verified !== true) {
@@ -2081,10 +2221,22 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       ...(draftGuardedEvent && draftGuardText.trim().length > 0
         ? { draftGuardText }
         : {}),
+      readSnapshot: async () => {
+        const snapshot = await readSafeInput();
+        if (!snapshot || composerPickerInputRegion(snapshot.text, targetCli) === null) return snapshot;
+        const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        const region = composerPickerInputRegion(snapshot.text, targetCli);
+        if (!owner || owner.caller !== resolveCurrentCallerAgent()?.agent_id ||
+            !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) || !bootTokenInstanceCurrent(owner) ||
+            region === null || ownedComposerText(owner, region, targetCli, snapshot.text) !== draftGuardText) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+        }
+        return closeOwnedPicker(snapshot, draftGuardText, targetCli, opts, rpcMethods);
+      },
     });
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
-    if (!opts.delivery_id && caller && (beforeDraft === "" || (opts.source_event === "boot_prompt" && pendingBootAgent))) {
+    if (!opts.delivery_id && (beforeDraft === "" || (opts.source_event === "boot_prompt" && pendingBootAgent))) {
       opts = { ...opts, delivery_id: randomUUID() };
     }
     if (deliverySafetySnapshot?.text.trim()) {
@@ -2138,8 +2290,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(previousOwner) &&
       ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot.text) === draftGuardText;
-    if (opts.retry_owned_draft && !ownedRetry) {
+    if (opts.retry_owned_draft && (!ownedRetry || (targetCli === "claude" && deliverySafetySnapshot && screenTranscriptContainsText(deliverySafetySnapshot.text, draftGuardText)))) {
       throw new DeliverySafetyGateError("draft_ownership_unverified", deliverySafetySnapshot?.parsed ?? parseScreen(""));
+    }
+    if (opts.retry_owned_draft && targetCli === "claude") {
+      const beforeRetryMutation = opts.beforeMutation;
+      opts = { ...opts, beforeMutation: async () => {
+        await beforeRetryMutation?.();
+        const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!ownsExactClaudeDraft({ ...opts, text: draftGuardText }, latest, false)) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? parseScreen(""));
+        }
+      } };
     }
     const deliveryBatches = ownedRetry ? [] : buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
@@ -2176,10 +2338,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       0,
     );
     const submittedText = opts.chunks.join("");
-    if (textDispatched && caller && beforeDraft === "") {
-      const entries = previousOwner?.caller === caller ? previousOwner.texts ?? [previousOwner.text] : [];
+    if (textDispatched && beforeDraft === "" && opts.delivery_id) {
+      const entries = previousOwner && previousOwner.caller === (caller ?? null) ? previousOwner.texts ?? [previousOwner.text] : [];
       const boot = previousOwner?.text === submittedText ? previousOwner : undefined;
-      rememberDraftOwner(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
+      rememberDraftOwner(ownerKey, { caller: caller ?? null, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,
         deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""],
@@ -2195,14 +2357,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let deliveryOutcome:
       | "submitted"
       | "queued"
+      | "steer_pending"
       | "queued_followup"
       | "rescued"
       | "pending_verify" = "submitted";
 
     if (opts.press_enter) {
       let cursorResponseBaseline: readonly string[] | null = null;
-      const preReturnBootEvidence =
-        (requireObservedPayloadBeforeEnter ? verifySubmit : observeCodexPayloadBeforeEnter)
+      let preReturnBootEvidence =
+        (requireObservedPayloadBeforeEnter ? verifySubmit : observeCodexPayloadBeforeEnter ||
+          (targetCli === "claude" && submittedText.trimStart().startsWith("/")))
           ? await waitForCompletePayloadInComposer({
               surface: opts.surface,
               workspace: opts.workspace,
@@ -2212,9 +2376,22 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                   SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
                 BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
               ),
-              beforeRead: opts.beforeMutation,
+              beforeRead: assertBinding,
             })
           : null;
+      // #999(e): Return/Tab inserts a completion while these menus are open.
+      // Only the caller's complete, current payload permits closing one.
+      await assertBinding?.();
+      const pickerCapableCli = targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "");
+      const pickerSnapshot = opts.source_event !== "spawn_agent" && ["codex", "claude", "cursor"].includes(pickerCapableCli ?? "")
+        ? await readSafeInput() : null;
+      const pickerCli = targetCli ?? (pickerSnapshot ? inferComposerCli(pickerSnapshot.text) : null);
+      if (pickerSnapshot && composerPickerInputRegion(pickerSnapshot.text, pickerCli ?? undefined) !== null) {
+        const closed = await closeOwnedPicker(pickerSnapshot, submittedText, pickerCli, opts, rpcMethods);
+        preReturnBootEvidence = { screenText: closed.text, metrics: parseSubmitEvidenceMetrics(closed.text, closed.parsed) };
+      } else if (pickerSnapshot && isPickerOrMenuScreen(pickerSnapshot.text, pickerCli ?? undefined)) {
+        throw new DeliverySafetyGateError("draft_ownership_unverified", pickerSnapshot.parsed);
+      }
       if (
         requireObservedPayloadBeforeEnter &&
         verifySubmit &&
@@ -2255,7 +2432,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           const submitRpcMethod = await sendKeyWithRetry(
             opts.surface,
             codexRelay ? async () => {
-              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace);
+              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
               return submitSelection.key;
             } : "return",
             opts.workspace,
@@ -2287,8 +2464,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               source_agent: opts.source_agent,
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+              delivery_id: opts.delivery_id,
+              stableSurfaceIdentity: opts.stableSurfaceIdentity,
               submit_key: submitSelection.key,
-              timeout_ms: opts.submit_verify_timeout_ms,
+              codex_busy_mode: opts.codex_busy_mode,
+              timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
+                ? opts.submit_verify_timeout_ms
+                : Math.min(
+                    opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                    opts.submit_verify_remaining_budget_ms(),
+                  ),
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,
               pre_return_screen: requireObservedPayloadBeforeEnter
@@ -2301,6 +2486,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 requireObservedPayloadBeforeEnter,
               require_working_status: opts.source_event === "boot_prompt",
               beforeMutation: opts.beforeMutation,
+              beforeRead: async () => { await assertBinding?.(); },
               rpcMethods,
             }),
         );
@@ -2311,7 +2497,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           verification.submit_verification_reason === "input_still_pending";
         retry_count = verification.retry_count;
         deliveryOutcome = verification.delivery;
-        queueVerified = verification.delivery === "queued" || verification.queue_verified === true;
+        queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
         if (
           deliveryOutcome === "pending_verify" ||
           deliveryOutcome === "queued_followup"
@@ -2345,8 +2531,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               delivery_id: opts.delivery_id,
               delivery_state: !opts.press_enter
                 ? ("typed" as const)
-                : deliveryOutcome === "queued"
-                  ? ("queued" as const)
+                : (deliveryOutcome === "queued" || deliveryOutcome === "steer_pending")
+                  ? (deliveryOutcome as "queued" | "steer_pending")
                   : deliveryOutcome === "queued_followup"
                     ? ("queued_followup" as const)
                     : deliveryOutcome === "pending_verify"
@@ -2388,8 +2574,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const receipt = buildPublicDeliveryReceipt({
       delivery_state: !opts.press_enter
         ? "typed"
-        : deliveryOutcome === "queued"
-          ? "queued"
+        : (deliveryOutcome === "queued" || deliveryOutcome === "steer_pending")
+          ? deliveryOutcome
           : deliveryOutcome === "queued_followup"
             ? "queued_followup"
             : deliveryOutcome === "pending_verify"
@@ -2403,7 +2589,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                     : undefined,
       delivery_id: opts.delivery_id,
       typed: textDispatched,
-      queued_behind_turn: queueVerified,
+      queued_behind_turn: deliveryOutcome === "queued" && queueVerified,
       queue_verified: queueVerified,
       submit_verification_reason,
       submit_attempted: Boolean(opts.press_enter),
@@ -2424,6 +2610,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (
       submit_verified === false &&
       deliveryOutcome !== "queued" &&
+      deliveryOutcome !== "steer_pending" &&
       deliveryOutcome !== "queued_followup" &&
       deliveryOutcome !== "rescued" &&
       deliveryOutcome !== "pending_verify"
@@ -2529,11 +2716,26 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       try {
         target = opts.resolveRoute ? await opts.resolveRoute() : target;
         lastSurface = target.surface;
-        const screen = await client.readScreen(target.surface, {
+        let screen = await client.readScreen(target.surface, {
           workspace: target.workspace,
           lines: 80,
           scrollback: false,
         });
+        if (isCodexDismissibleOverlay(screen.text)) {
+          screen = await withSurfaceWrite(target.surface, async () => {
+            const assertRoute = async () => {
+              await opts.assertStableSurfaceIdentity?.();
+              const current = opts.resolveRoute ? await opts.resolveRoute() : target;
+              if (current.surface !== target.surface || current.workspace !== target.workspace) throw new Error("Security-banner boot route changed");
+            };
+            const read = async () => { await assertRoute(); return client.readScreen(target.surface, { workspace: target.workspace, lines: 80, scrollback: false }); };
+            return dismissAccountSecurityBanner(await read(), {
+              escape: async () => { await sendKeyWithRetry(target.surface, "escape", target.workspace, assertRoute, 1); },
+              read,
+            }, { agent_id: resolveLatestSurfaceAgentRecord(stateMgr, target.surface, opts.stableSurfaceIdentity)?.agent_id ?? null,
+              surface: target.surface, eventLog: stateMgr.getEventLog() });
+          }, { stableSurfaceIdentity: opts.stableSurfaceIdentity });
+        }
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
@@ -2729,6 +2931,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           error instanceof BootPromptTimeoutError ||
           error instanceof LauncherReadinessError ||
           error instanceof BootPromptUpdateMenuBlockedError
+          || error instanceof DeliverySafetyGateError
         ) {
           throw error;
         }
@@ -2960,10 +3163,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    deadline_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS;
-    let deadline = Date.now() + timeoutMs;
+    let deadline = opts.deadline_ms ?? Date.now() + timeoutMs;
+    let firstRead = true;
+    let lastReadUnavailable = false;
     let lastText = "";
     let updateStartedAt: number | null = null;
     let updateElapsedMs = 0;
@@ -2971,13 +3177,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let updateShellRelaunches = 0;
     const updateMaxMs = bootPromptUpdateMaxMs();
 
-    while (Date.now() < deadline || updateStartedAt !== null) {
+    while (firstRead || Date.now() < deadline || updateStartedAt !== null) {
+      firstRead = false;
       try {
         const screen = await client.readScreen(opts.surface, {
           workspace: opts.workspace,
           lines: 80,
           scrollback: false,
         });
+        lastReadUnavailable = false;
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
@@ -3068,6 +3276,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           throw new SurfaceGoneError(opts.surface, error);
         }
         lastText = error instanceof Error ? error.message : String(error);
+        lastReadUnavailable = true;
       }
 
       const remaining = deadline - Date.now();
@@ -3077,6 +3286,21 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
     }
 
+    // Keep the timeout verdict. One diagnostic refresh after a transient read
+    // failure preserves useful failure frames without retrying input or waiting
+    // for readiness again.
+    if (lastReadUnavailable) {
+      await delay(LAUNCH_SHELL_READY_POLL_MS);
+      try {
+        lastText = (await client.readScreen(opts.surface, {
+          workspace: opts.workspace, lines: 80, scrollback: false,
+        })).text;
+      } catch (error) {
+        if (isSurfaceGoneReadFailure(error, opts.surface)) {
+          throw new SurfaceGoneError(opts.surface, error);
+        }
+      }
+    }
     throw new BootPromptTimeoutError(
       `Timed out after ${timeoutMs}ms waiting for agent launch readiness on ${opts.surface}`,
       tailLines(lastText, 10),
@@ -3134,6 +3358,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     await withSurfaceWrite(
       opts.surface,
       async () => {
+        // Readiness starts after Return; typing has its own delivery phase.
+        let launchDeadline: number | undefined;
+        const remainingLaunchBudget = () => {
+          launchDeadline ??= Date.now() +
+            (opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS);
+          return Math.max(0, launchDeadline - Date.now());
+        };
         const readLauncherScreen = () =>
           client.readScreen(opts.surface, {
             workspace: opts.workspace,
@@ -3223,9 +3454,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             press_enter: true,
             source_event: "spawn_agent",
             verify_submit: verifySubmit,
+            // Observe stale shell echoes before recovering a genuinely lost
+            // Return, then leave time to dispatch and verify that recovery.
             submit_verify_timeout_ms: verifySubmit
-              ? SEND_INPUT_RECOVERY_ENTER_DELAY_MS
+              ? Math.min(
+                  SEND_INPUT_SAFE_RETRY_OBSERVE_MS +
+                    SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
+                    SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS,
+                  opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS,
+                )
               : undefined,
+            submit_verify_remaining_budget_ms: verifySubmit ? remainingLaunchBudget : undefined,
             beforeMutation: opts.assertSurfaceBindingCurrent,
           });
         const recoverCorruptedLauncherLine = async (): Promise<void> => {
@@ -3302,6 +3541,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               surface: opts.surface,
               workspace: opts.workspace,
               timeout_ms: opts.timeout_ms,
+              deadline_ms: launchDeadline,
               onUpdateShellRelaunch: relaunchOriginalCommand,
             });
           } catch (readinessError) {
@@ -3325,6 +3565,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 surface: opts.surface,
                 workspace: opts.workspace,
                 timeout_ms: opts.timeout_ms,
+              deadline_ms: launchDeadline,
                 onUpdateShellRelaunch: relaunchOriginalCommand,
               });
               return;
@@ -3663,6 +3904,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const deliveredChars = chunks
         .slice(0, sentChunks)
         .reduce((sum, chunk) => sum + chunk.length, 0);
+      if (error instanceof DeliverySafetyGateError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       throw new BootPromptDeliveryError(
         `Boot prompt delivery failed after ${deliveredChars} chars: ${message}`,
@@ -3750,6 +3992,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           chunk_size: record.chunk_size,
           chunk_delay_ms: record.chunk_delay_ms,
           press_enter: record.press_enter,
+          codex_busy_mode: record.codex_busy_mode,
           rename_to_task: record.rename_to_task,
           stableSurfaceIdentity: record.stableSurfaceIdentity,
           source_event: lifecycle?.source_event ?? sourceEvent,
@@ -3769,6 +4012,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         if (lifecycle) {
           if (
             delivery.delivery === "queued" ||
+            delivery.delivery === "steer_pending" ||
             delivery.delivery === "queued_followup"
           ) {
             lifecycle.engine.acceptComposerQueue({
@@ -3877,6 +4121,40 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }, 0);
   };
 
+  const retryPendingClaudeDraft = async (opts: {
+    surface: string; workspace?: string; stableSurfaceIdentity?: string | null;
+    receipt: { delivery_id: string; text: string; retry_count: number; rpc_methods?: DeliveryRpcMethod[]; submit_dispatched?: boolean };
+    beforeMutation: () => Promise<void>;
+  }): Promise<boolean> => {
+    if (opts.receipt.retry_count >= 1) return false;
+    const draft = { ...opts, text: opts.receipt.text, delivery_id: opts.receipt.delivery_id };
+    const observer = context.surfaceObserverId;
+    await opts.beforeMutation();
+    const baseline = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+    if (!ownsExactClaudeDraft(draft, baseline)) return false;
+    await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+    let method: DeliveryRpcMethod | null;
+    try {
+      method = await sendKeyWithRetry(opts.surface, "return", opts.workspace, async () => {
+        await opts.beforeMutation();
+        const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!ownsExactClaudeDraft(draft, latest)) throw new ClaudeDraftChanged();
+        // Spend the one retry before dispatch: an ambiguous acknowledgement
+        // must not cause another Return on a later verification sweep.
+        opts.receipt.retry_count += 1;
+        opts.receipt.submit_dispatched = true;
+      }, 1);
+    } catch (error) {
+      if (error instanceof ClaudeDraftChanged) return false;
+      recordSurfaceWriteFailure(opts.surface, error, opts.stableSurfaceIdentity, observer);
+      throw error;
+    }
+    recordSurfaceWriteSuccess(opts.surface, opts.stableSurfaceIdentity, observer);
+    if (method) opts.receipt.rpc_methods = [...new Set([...(opts.receipt.rpc_methods ?? []), method])];
+    const verified = await verifySubmitKeyOutcome({ surface: opts.surface, workspace: opts.workspace, baseline, owned_text: opts.receipt.text, owned_queue: false });
+    return verified.submit_verified === true;
+  };
+
   /**
    * #793: does the current caller hold a live ownership token for this draft?
    * Spawn calls this after it has captured the session and stamped the boot
@@ -3902,6 +4180,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   return {
     callerOwnsTypedDraft,
+    retryPendingClaudeDraft,
     settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,

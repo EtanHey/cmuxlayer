@@ -2,7 +2,9 @@
 
 `bun run bench:daemon:check` builds cmuxlayer, runs the production-shaped 8-client x 12-round daemon replay, and compares it with `benchmarks/daemon-baseline.json`. CI runs this command on every pull request and every push to `main`. `bun run pre-pr` uses the same requests with three rounds and retains the local 250 ms `read_screen`, 2,000 ms first-send, and 4,000 ms CLI gates so regressions are visible before push.
 
-The committed baseline was measured by GitHub Actions on `ubuntu-latest` in workflow run `32928658291` and imported by attested refresh run `32929454011`. The checker derives every runner ceiling at check time from its committed measurement x `1.25`; the JSON has no separately editable `ceilings` block. First-send and CLI also have 10,000 ms far sanity caps. Actual time inside the first-send surface lock is compared separately from lock-acquisition wait.
+The committed baseline records GitHub Actions `ubuntu-latest` workflow run [`37512215757`](https://github.com/EtanHey/cmuxlayer/actions/runs/37512215757) as its source; that run used the `pull_request` event. The checker derives every runner ceiling at check time from its committed measurement x `1.25`; the JSON has no separately editable `ceilings` block. First-send and CLI also have 10,000 ms far sanity caps. Actual time inside the first-send surface lock is compared separately from lock-acquisition wait.
+
+**PR-class vs dispatch-class runners.** Observed current pull-request runs measure about 15–20% slower on send rows than push/dispatch runs. Calibrate the baseline to the current PR-class measurements by importing a pull-request perf artifact through `baseline_source_run_id`, as described under [Refresh after a legitimate speedup](#refresh-after-a-legitimate-speedup). The lead reviews the runner drift and increase guardrails before committing the attested JSON; a calibration PR only collects the sample. The §12 pristine-sprint target remains tightening measured ceilings from that calibrated floor.
 
 The replay records both request byte counts and SHA-256 identities of canonical `{name, arguments}` JSON. The checker rejects request drift even when the serialized length is unchanged. It also validates a refresh content hash over the baseline: editing measurements or replay data without a refresh makes the consistency assertion fail before the benchmark can pass.
 
@@ -47,6 +49,35 @@ tightened is this side effect, not a regression. Do not rerun for it: the next
 green `main` run adds to the history. `list_agents` is unaffected, because its
 spread term already dominates.
 
+## One marginal re-sample
+
+`MARGINAL_RESAMPLE_RATIO = 1.05` allows one fresh sample of an operation when a
+sampled p50, p95, lock-hold, or CLI-alias row fails by at most 5% over its existing ceiling.
+The fresh value must meet that same ceiling; the regression ratio remains
+**1.25**. The `cli_send_ms` row is an alias of the sampled warm-surface p50,
+so it shares that operation's fresh sample and is evaluated against its own
+unchanged ceiling. Passing rows, larger misses, and exact request checks get
+no retry. Multiple marginal metrics of one operation share
+one fresh sample; a second miss still fails. A sampler error retains the
+original measurements and records the failed retry reason in the report and
+artifact; it cannot turn the gate green. Existing paired controls, first-send
+cold/steady splitting, history-degraded rejection, margin rules, transport and
+canonical-workload checks still apply.
+
+Why: #852 records ten near-identical hosted runs ranging from 66–81 ms; the
+81.38 ms warm-surface run missed its 81.27 ms ceiling by 0.11 ms. This bounds
+an in-job variance check without raising the budget or rerunning hosted jobs.
+The existing clients and operation samplers are reused. Lifecycle rows retain
+the required spawn/send/close fixture, but only the selected operation's values
+can change its marginal verdict. Other rows keep their first measurements.
+
+The PR comment and job summary retain both measurements, for example
+`81.38 ms → re-sample 74.1 ms`, with `PASS (marginal)` or `FAIL (marginal)`.
+This is explicitly informational visibility, not an exemption from the gate.
+`result.json` retains the fresh samples in `marginal_resamples` and evaluated
+rows in `perf_budget.marginal_resamples`; green-main history keeps the original
+measurements so repeated marginal drift remains visible.
+
 ## Refresh after a legitimate speedup
 
 Dispatch the `CI` workflow on the commit whose performance should become the new floor:
@@ -60,9 +91,11 @@ The workflow-dispatch job collects three canonical 8-client x 12-round samples o
 If a later `ubuntu-latest` runner is demonstrably slower than the runner that produced the committed baseline, first run the normal pull-request CI at the calibration commit. Then dispatch the same commit and import that exact perf artifact:
 
 ```bash
-gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id>
+gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id> -f baseline_rebase_rows=send_to_surface_warm.p50_ms,cli_send_ms -f baseline_increase_reason='<reviewed runner drift>'
 ```
 
-This explicit runner rebase accepts only a `CI` pull-request run from the dispatched commit or an ancestor separated solely by the baseline workflow, checker, refresh script, baseline JSON, documentation, or tests. Runtime-source changes are refused. It verifies the canonical replay identity and retains the larger of each committed and imported measurement, so unrelated metrics cannot silently tighten. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+This explicit runner rebase accepts only a `CI` pull-request run from the dispatched commit or an ancestor separated solely by the baseline workflow, checker, refresh script, baseline JSON, documentation, or tests. Runtime-source changes are refused. It verifies the canonical replay identity. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+
+Runner rebase requires an explicit, non-empty `baseline_rebase_rows` list, passed as `CMUXLAYER_BENCH_REBASE_ROWS` only to the rebase step. Names are `<operation>.p50_ms`, `<operation>.p95_ms`, `<operation>.lock_hold_ms`, or `cli_send_ms`; unknown names and empty entries fail before any baseline write. Only listed metrics retain `max(committed, imported)`; every unlisted measurement keeps its committed value exactly, including values that would otherwise fall. The attested `source.rebase_rows` records the normalized list. Selective rebase requires a canonical committed baseline and cannot perform a legacy migration. For the current calibration, only `send_to_surface_warm.p50_ms,cli_send_ms` is approved; the lead owns the dispatch, increase review, and JSON commit.
 
 Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

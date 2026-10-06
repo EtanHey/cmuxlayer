@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -221,6 +221,126 @@ const result = {
   },
 };
 
+describe("selective runner rebase", () => {
+  // Baseline updates must not turn the positive raise control into a no-op.
+  const rebaseBaseline = attest({ ...baseline, measurements: {
+    ...baseline.measurements, cli_send_ms: baseline.measurements.send_to_surface_warm.p50_ms,
+  } });
+  function refresh(rows: string | undefined, surfaceP50 = 250, legacy = false) {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-selective-rebase-"));
+    const baselineFile = join(root, "benchmarks", "daemon-baseline.json");
+    const committed = JSON.parse(JSON.stringify(rebaseBaseline));
+    if (legacy) {
+      delete committed.measurements.control_health;
+      committed.refresh_attestation.content_sha256 = baselineContentSha256(committed);
+    }
+    const before = JSON.stringify(committed, null, 2) + "\n";
+    const env = Object.fromEntries(Object.entries(process.env).filter(
+      ([key]) => !key.startsWith("GIT_") && !key.startsWith("CMUXLAYER_BENCH_") &&
+        !key.startsWith("GITHUB_"),
+    ));
+    try {
+      mkdirSync(join(root, "scripts"));
+      mkdirSync(join(root, "benchmarks"));
+      for (const script of ["refresh-daemon-baseline.mjs", "check-daemon-benchmark.mjs"]) {
+        copyFileSync(join(repoRoot, "scripts", script), join(root, "scripts", script));
+      }
+      writeFileSync(baselineFile, before);
+      const candidate = structuredClone(result);
+      candidate.replay = rebaseBaseline.replay;
+      candidate.latency.send_to_surface_warm.p50_ms = surfaceP50;
+      // Some unlisted metrics rise, others fall. Neither direction may rebase.
+      candidate.latency.daemon_path.read_screen.p50_ms = 1;
+      const imported = join(root, "imported.json");
+      writeFileSync(imported, JSON.stringify(candidate));
+      const git = (args: string[]) => {
+        const run = spawnSync("git", args, { cwd: root, env, encoding: "utf8" });
+        expect(run.status, run.stderr).toBe(0);
+        return run.stdout.trim();
+      };
+      git(["init", "-q"]);
+      git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-qm", "fixture"]);
+      const run = spawnSync("node", [join(root, "scripts", "refresh-daemon-baseline.mjs"),
+        "--reason", "reviewed selective runner calibration"], {
+        cwd: root, encoding: "utf8", timeout: 10_000,
+        env: { ...env, GITHUB_ACTIONS: "true", GITHUB_EVENT_NAME: "workflow_dispatch",
+          GITHUB_SHA: git(["rev-parse", "HEAD"]), GITHUB_RUN_ID: "999",
+          CMUXLAYER_BENCH_RUNNER_CLASS: "github-actions-ubuntu-latest",
+          CMUXLAYER_BENCH_IMPORT_RESULT_PATH: imported,
+          CMUXLAYER_BENCH_SOURCE_RUN_ID: "123", CMUXLAYER_BENCH_SOURCE_SHA: "a".repeat(40),
+          ...(rows === undefined ? {} : { CMUXLAYER_BENCH_REBASE_ROWS: rows }),
+        },
+      });
+      const after = readFileSync(baselineFile, "utf8");
+      return { run, before, after, baseline: JSON.parse(after) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("raises only the listed p50 and CLI alias, preserving every unlisted measurement", () => {
+    const refreshed = refresh(" send_to_surface_warm.p50_ms, cli_send_ms,send_to_surface_warm.p50_ms ");
+    expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
+    const expected = structuredClone(rebaseBaseline.measurements);
+    expected.send_to_surface_warm.p50_ms = 250;
+    expected.cli_send_ms = 250;
+    expect(JSON.stringify(refreshed.baseline.measurements)).toBe(JSON.stringify(expected));
+    expect(refreshed.baseline.source.rebase_rows).toEqual([
+      "send_to_surface_warm.p50_ms", "cli_send_ms",
+    ]);
+    expect(() => validateBaseline(refreshed.baseline)).not.toThrow();
+    refreshed.baseline.source.rebase_rows.push("list_agents.p50_ms");
+    expect(() => validateBaseline(refreshed.baseline)).toThrow(/baseline consistency assertion failed/);
+  });
+
+  it("never tightens listed metrics when the imported sample is faster", () => {
+    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 40);
+    expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
+    expect(JSON.stringify(refreshed.baseline.measurements)).toBe(
+      JSON.stringify(rebaseBaseline.measurements),
+    );
+  });
+
+  it.each([undefined, "", " ", ",", "send_to_surface_warm.p50_ms,"])(
+    "refuses an absent or empty row list (%s) without writing the baseline", (rows) => {
+      const refreshed = refresh(rows);
+      expect(refreshed.run.status).not.toBe(0);
+      expect(refreshed.run.stderr).toContain("non-empty rebase row list");
+      expect(refreshed.after).toBe(refreshed.before);
+    },
+  );
+
+  it("refuses an unknown metric without writing the baseline", () => {
+    const refreshed = refresh("send_to_surface_warm.p500_ms,cli_send_ms");
+    expect(refreshed.run.status).not.toBe(0);
+    expect(refreshed.run.stderr).toContain("unknown rebase row");
+    expect(refreshed.after).toBe(refreshed.before);
+  });
+
+  it("refuses legacy migration rather than adding unlisted measurements", () => {
+    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 250, true);
+    expect(refreshed.run.status).not.toBe(0);
+    expect(refreshed.run.stderr).toContain("canonical committed baseline");
+    expect(refreshed.after).toBe(refreshed.before);
+  });
+});
+
+function budgetCandidate() {
+  const candidate = structuredClone(result);
+  return {
+    ...candidate,
+    marginal_resamples: undefined as Record<string, unknown> | undefined,
+    latency: {
+      ...candidate.latency,
+      first_send_after_spawn: {
+        ...candidate.latency.first_send_after_spawn,
+        sampled: undefined as typeof result.latency.send_to_surface_warm | undefined,
+      },
+    },
+  };
+}
+
 /**
  * The warm-agent tail row samples 192 per run (#791). A hosted 96-sample warm
  * artifact becomes one 192-sample run by replaying it as a second, later pass:
@@ -258,6 +378,179 @@ function withRawPercentiles<T extends WarmPass>(warm: T): T & { p50_ms: number; 
 }
 
 describe("daemon performance budget", () => {
+  it.each([
+    ["marginal pass", 276, 270, true, 1],
+    ["marginal repeat fail", 276, 276, false, 1],
+    ["large fail", 290, 270, false, 0],
+    ["pass", 270, 290, true, 0],
+    ["inclusive margin", 288.75, 275, true, 1],
+  ])("re-samples once: %s", async (_name, initial, retry, passed, calls) => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p95_ms = initial;
+    let count = 0;
+    const samples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (operation: string) => {
+      count++;
+      expect(operation).toBe("send_to_surface_warm");
+      return { ...candidate.latency.send_to_surface_warm, p95_ms: retry,
+        request_bytes: baseline.replay.bytes[operation],
+        request_sha256: baseline.replay.request_sha256[operation], sample_count: 96 };
+    });
+    candidate.marginal_resamples = samples;
+    const comparison = compareBenchmark(baseline, candidate);
+    const row = comparison.rows.find((entry) => entry.operation === "send_to_surface_warm" && entry.metric === "p95_ms");
+    expect(count).toBe(calls);
+    expect(comparison.passed).toBe(passed);
+    expect(row.ceiling).toBe(275);
+    if (calls) {
+      expect(row.marginal_resample.initial).toBe(initial);
+      expect(row.marginal_resample.current).toBe(retry);
+      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(`${initial} ms → re-sample ${retry} ms`);
+      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(passed ? "PASS (marginal)" : "FAIL (marginal)");
+      expect(await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { throw new Error("second retry"); })).toEqual(samples);
+    }
+  });
+
+  it("keeps contract failures and passing sibling metrics authoritative", async () => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+      ...candidate.latency.send_to_surface_warm, p50_ms: 999, p95_ms: 270,
+      request_bytes: 999, request_sha256: "wrong", sample_count: 95, transport: "cli",
+    }));
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.rows.find((entry) => entry.operation === "send_to_surface_warm" && entry.metric === "p50_ms").current).toBe(210);
+    expect(comparison.failures.join(" ")).toMatch(/marginal re-sample/);
+    expect(checkerModule.MARGINAL_RESAMPLE_RATIO).toBe(1.05);
+    expect(() => validateBaseline({ ...baseline, regression_ratio: 1.26 })).toThrow(/1.25/);
+  });
+
+  it.each([[74, true], [81.4, false]])("re-samples the #852 p50 and CLI alias together: %s", async (freshP50, passed) => {
+    const sameCeilingBaseline = attest({
+      ...baseline,
+      measurements: { ...baseline.measurements,
+        send_to_surface_warm: { p50_ms: 65.016, p95_ms: 70, lock_hold_ms: 20 },
+        cli_send_ms: 65.016,
+      },
+    });
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm = { ...candidate.latency.send_to_surface_warm,
+      p50_ms: 81.38, p95_ms: 82 };
+    const initial = compareBenchmark(sameCeilingBaseline, candidate);
+    const aliases = (comparison: ReturnType<typeof compareBenchmark>) => comparison.rows.filter((entry) =>
+      entry.operation === "send_to_surface_warm" && ["p50_ms", "cli_send_ms"].includes(entry.metric));
+    expect(aliases(initial).map((entry) => [entry.current, entry.ceiling, entry.passed])).toEqual([
+      [81.38, 81.27, false], [81.38, 81.27, false],
+    ]);
+    let calls = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(sameCeilingBaseline, candidate, {}, (operation: string) => {
+      calls++;
+      expect(operation).toBe("send_to_surface_warm");
+      return { ...candidate.latency.send_to_surface_warm, p50_ms: freshP50,
+        sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64) };
+    });
+    const comparison = compareBenchmark(sameCeilingBaseline, candidate);
+    expect(calls).toBe(1);
+    expect(comparison.passed).toBe(passed);
+    for (const entry of aliases(comparison)) {
+      expect(entry.passed).toBe(passed);
+      expect(entry.ceiling).toBe(81.27);
+      expect(entry.marginal_resample).toMatchObject({ initial: 81.38, current: freshP50 });
+    }
+  });
+
+  it.each(checkerModule.CANONICAL_OPERATIONS)("routes a fresh sample to %s only", async (operation: string) => {
+    const candidate = budgetCandidate();
+    const before = compareBenchmark(baseline, candidate);
+    const ceiling = before.rows.find((entry) => entry.operation === operation && entry.metric === "p95_ms").ceiling;
+    const measurements: Record<string, { p50_ms: number; p95_ms: number; lock_hold_ms?: number; transport: string }> = {
+      ...candidate.latency.daemon_path,
+      send_to_surface_warm: candidate.latency.send_to_surface_warm,
+      send_to_agent_warm: candidate.latency.send_to_agent_warm,
+      spawn_close_during_sweep: candidate.latency.spawn_close_during_sweep,
+      first_send_after_spawn: { p50_ms: 950, p95_ms: 950, lock_hold_ms: 21, transport: "socket" },
+    };
+    const measurement = measurements[operation];
+    const initial = { ...measurement, p95_ms: ceiling * 1.001 };
+    if (operation === "first_send_after_spawn") candidate.latency.first_send_after_spawn.sampled = initial;
+    else candidate.latency = { ...candidate.latency, [operation]: initial,
+      daemon_path: { ...candidate.latency.daemon_path, [operation]: initial } };
+    const fresh = { ...initial, p95_ms: ceiling, sample_count: checkerModule.canonicalSamplesPerRun(operation),
+      request_bytes: baseline.replay.bytes[operation], request_sha256: baseline.replay.request_sha256[operation] };
+    const samplerCalls: string[] = [];
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (selected: string) => {
+      samplerCalls.push(selected);
+      return fresh;
+    });
+    expect(samplerCalls).toEqual([operation]);
+    const after = compareBenchmark(baseline, candidate);
+    expect(after.passed).toBe(true);
+    expect(after.rows.find((entry) => entry.operation === operation && entry.metric === "p95_ms").marginal_resample.current).toBe(ceiling);
+    expect(after.rows.filter((entry) => entry.operation !== operation)).toEqual(before.rows.filter((entry) => entry.operation !== operation));
+  });
+
+  it("shares one sample across marginal metrics, preserving a large sibling miss", async () => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p50_ms = 251;
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    let count = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
+      count++;
+      return { ...candidate.latency.send_to_surface_warm, p50_ms: 240, p95_ms: 270,
+        request_bytes: 180, request_sha256: "4".repeat(64), sample_count: 96 };
+    });
+    expect(count).toBe(1);
+    expect(compareBenchmark(baseline, candidate).passed).toBe(true);
+    candidate.latency.send_to_surface_warm.p50_ms = 300;
+    expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
+  it.each([
+    { sample_count: 95 }, { request_bytes: 999 }, { request_sha256: "wrong" }, { transport: "cli" },
+  ])("rejects a re-sample with invalid workload proof %j", async (invalid) => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+      ...candidate.latency.send_to_surface_warm, p95_ms: 270,
+      sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64), ...invalid,
+    }));
+    expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
+  it("keeps an original intrinsic RED authoritative after a passing marginal retry", async () => {
+    const candidate = budgetCandidate();
+    candidate.verdict = "RED";
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+      ...candidate.latency.send_to_surface_warm, p95_ms: 270,
+      sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64),
+    }));
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.failures).toContain("benchmark intrinsic gates returned RED");
+  });
+
+  it.each(["throw", "reject"])("retains the original report when a sampler fails: %s", async (mode) => {
+    const candidate = budgetCandidate();
+    candidate.latency.send_to_surface_warm.p95_ms = 276;
+    let calls = 0;
+    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
+      calls++;
+      const error = new Error("synthetic resample failure");
+      if (mode === "throw") throw error;
+      return Promise.reject(error);
+    });
+    expect(calls).toBe(1);
+    expect(candidate.marginal_resamples.send_to_surface_warm).toMatchObject({ sampling_error: "synthetic resample failure" });
+    const comparison = compareBenchmark(baseline, candidate);
+    expect(comparison.passed).toBe(false);
+    expect(comparison.failures.join(" ")).toContain("synthetic resample failure");
+    expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain("276 ms → re-sample missing");
+    expect(resultWithComparison(candidate, comparison).latency.send_to_surface_warm.p95_ms).toBe(276);
+    await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { calls++; throw new Error("second attempt"); });
+    expect(calls).toBe(1);
+  });
+
   it("requires an explicit reason for any committed-row increase", () => {
     expect(() => requireBaselineIncreaseReason([[101, 100]], "")).toThrow(
       /without --reason/,
@@ -1437,7 +1730,7 @@ describe("daemon performance budget", () => {
       );
     }
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(33380548570);
+    expect(committed.source.workflow_run_id).toBe(37512215757);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
@@ -1611,6 +1904,12 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("perf-baseline-refresh:");
     expect(workflow).toContain("baseline_source_run_id:");
+    expect(workflow).toContain("baseline_rebase_rows:");
+    expect(workflow).toContain("CMUXLAYER_BENCH_REBASE_ROWS: ${{ inputs.baseline_rebase_rows }}");
+    const ordinaryRefresh = workflow.split("- name: Produce canonical CI-runner baseline")[1]
+      .split("- name: Produce rebased CI-runner baseline")[0];
+    expect(ordinaryRefresh).toContain("if: inputs.baseline_source_run_id == ''");
+    expect(ordinaryRefresh).not.toContain("CMUXLAYER_BENCH_REBASE_ROWS");
     expect(workflow).toContain(
       'git merge-base --is-ancestor "$source_sha" HEAD',
     );
@@ -1666,7 +1965,7 @@ describe("daemon performance budget", () => {
     );
     expect(source).toContain("CMUXLAYER_BENCH_IMPORT_RESULT_PATH");
     expect(source).toContain("runnerRebase");
-    expect(source).toContain("runnerRebase ? Math.max : Math.min");
+    expect(source).toContain("CMUXLAYER_BENCH_REBASE_ROWS");
     expect(source).toContain('--reason');
     expect(source).toContain("increase_reason");
   });

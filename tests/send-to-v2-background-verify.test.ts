@@ -709,7 +709,7 @@ describe("send_to v2 background verify", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     expect(engine.getDeliveryReceipt(queued.delivery_id)?.needs_attention).toBeFalsy();
@@ -780,13 +780,13 @@ describe("send_to v2 background verify", () => {
 
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     await vi.advanceTimersByTimeAsync(5_100);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     await vi.advanceTimersByTimeAsync(10_000);

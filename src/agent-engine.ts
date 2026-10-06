@@ -72,8 +72,11 @@ import {
 import {
   ANTIGRAVITY_BANNER_RE,
   cleanScreenText,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "./screen-parser.js";
+import { dismissAccountSecurityBanner } from "./delivery/account-security.js";
+import { DeliverySafetyGateError } from "./delivery/receipts.js";
 import {
   codexScreenShowsSubmit,
   extractComposerInputRegion,
@@ -1421,9 +1424,9 @@ export class AgentEngine {
       return { agent };
     }
     try {
-      const screen = await this.readAgentScreen(agent, {
+      const screen = await this.dismissBootSecurityBanner(agent, await this.readAgentScreen(agent, {
         lines: BOOT_SESSION_CAPTURE_LINES,
-      });
+      }));
       const evidence = this.readReadyEvidence(agent, screen.text);
       const parsed = parseScreen(screen.text);
       const activeForWait =
@@ -1519,7 +1522,8 @@ export class AgentEngine {
       waitForReadyPatternMatches.delete(agent.agent_id);
       waitForReadyPatternMatches.delete(transitionAgent.agent_id);
       return { agent: updated, source: "screen" };
-    } catch {
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError) return { agent: this.registry.get(agent.agent_id) ?? agent };
       return { agent };
     }
   }
@@ -2452,6 +2456,42 @@ export class AgentEngine {
     }
   }
 
+  private async dismissBootSecurityBanner(agent: AgentRecord, screen: CmuxReadScreenResult, ctx?: SweepAgentContext): Promise<CmuxReadScreenResult> {
+    if (agent.cli !== "codex" || agent.state !== "booting" || !isCodexDismissibleOverlay(screen.text)) return screen;
+    const route = await this.resolveAgentIoRoute(agent.agent_id);
+    const assertCurrent = async () => {
+      if (ctx && !this.assertSweepInputCurrent(ctx)) throw new Error("Security-banner boot observation changed");
+      await this.resolveUnchangedAgentIoRoute(agent.agent_id, route, "security-banner dismissal");
+    };
+    if (!this.client.withSurfaceWrite) throw new Error("Security-banner dismissal requires a shared surface-write transaction");
+    try {
+      return await this.client.withSurfaceWrite(route.surface_id, async sendKey => {
+        const read = async () => {
+          await assertCurrent();
+          const observed = await this.client.readScreen(
+            this.client.supportsStableSurfaceReads && route.surface_uuid ? route.surface_uuid : route.surface_id,
+            { workspace: route.workspace_id ?? undefined, lines: BOOT_SESSION_CAPTURE_LINES },
+          );
+          await assertCurrent();
+          return observed;
+        };
+        // The triggering screen can predate a rebind or another delivery.
+        // Only fresh evidence under the shared UUID lock authorizes Esc.
+        return dismissAccountSecurityBanner(await read(), {
+          escape: async () => { await assertCurrent(); await sendKey("escape"); },
+          read,
+        }, { agent_id: agent.agent_id, surface: route.surface_id, eventLog: this.stateMgr.getEventLog() });
+      }, { workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError) {
+        await assertCurrent();
+        const failed = this.stateMgr.transition(agent.agent_id, "error", { error: error.message });
+        this.registry.set(agent.agent_id, failed);
+      }
+      throw error;
+    }
+  }
+
   private async maybeMarkBootReady(
     agent: AgentRecord,
     ctx: SweepAgentContext,
@@ -2466,7 +2506,8 @@ export class AgentEngine {
     }
 
     try {
-      const screen = await this.readSweepScreen(agent, ctx);
+      const screen = await this.dismissBootSecurityBanner(agent, await this.readSweepScreen(agent, ctx), ctx);
+      ctx.screen = Promise.resolve(screen);
       if (!this.assertSweepInputCurrent(ctx)) return agent;
       const parsed = parseScreen(screen.text);
       const parsedEffort =
@@ -2607,7 +2648,8 @@ export class AgentEngine {
       this.registry.set(agent.agent_id, updated);
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;
-    } catch {
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError && error.error_code === "hooks_review_not_dismissed") return this.registry.get(agent.agent_id) ?? agent;
       if (agent.boot_prompt_pending && this.isBootPromptPendingStale(agent) &&
           this.assertSweepInputCurrent(ctx)) {
         try {
@@ -2754,6 +2796,7 @@ export class AgentEngine {
       get promptMotionScreenSignatures() { return engine.promptMotionScreenSignatures; },
       get registry() { return engine.registry; },
       get stateMgr() { return engine.stateMgr; },
+      listDeliveryReceipts: () => engine.listDeliveryReceipts(),
       get sweepBackgroundProcessSnapshot() { return engine.sweepBackgroundProcessSnapshot; },
       set sweepBackgroundProcessSnapshot(value) { engine.sweepBackgroundProcessSnapshot = value; },
       appendHaltEscalationEvent: (...args) => engine.appendHaltEscalationEvent(...args),
