@@ -1357,13 +1357,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // Codex can scroll the committed row away before the first read. Accept
       // a fresh turn or a stable cleared composer, while retaining the paste
       // burst, pending draft, queue and interrupt guards used by normal sends.
+      const bootComposerHasResidue = Boolean(composerInput?.trim());
       const bootTurnStarted = opts.source_event === "boot_prompt" &&
-        bootFrameAdvanced && !hasPendingSubmitEvidence &&
+        bootFrameAdvanced && !hasPendingSubmitEvidence && !bootComposerHasResidue &&
         isSubmitVerifiedStatus(snapshot.parsed.status) &&
         !isSubmitVerifiedStatus(parseScreen(opts.pre_return_screen ?? "").status);
       const bootComposerCleared = opts.source_event === "boot_prompt" &&
         bootFrameIsMonotonic && composerInput !== null &&
-        composerInput.trim() === "" && !hasPendingSubmitEvidence &&
+        !bootComposerHasResidue && !hasPendingSubmitEvidence &&
         !bootConsumptionRefuted && !sawNewInterrupt &&
         screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
       stableBootClearedPolls = bootComposerCleared ? stableBootClearedPolls + 1 : 0;
@@ -3546,6 +3547,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   const deliverBootPrompt = async (opts: {
     surface: string;
+    delivery_id?: string;
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     cli?: CliType;
@@ -3701,7 +3703,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "boot_prompt",
-            delivery_id: randomUUID(),
+            delivery_id: opts.delivery_id ?? randomUUID(),
             // #793: key the boot draft's owner token by the stable UUID, the
             // same key a UUID-routed send_to key-Return looks it up by.
             stableSurfaceIdentity: opts.stableSurfaceIdentity,

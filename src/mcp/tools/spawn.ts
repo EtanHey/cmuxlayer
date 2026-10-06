@@ -1123,6 +1123,8 @@ export function registerSpawnAgentTool(
 
         let bootPromptDelivery:
           Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+        const bootDeliveryId = randomUUID();
+        let bootDeliveryText: string | null = null;
         let launcherSurfaceClosed = false;
         try {
           {
@@ -1132,6 +1134,7 @@ export function registerSpawnAgentTool(
             );
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
+              delivery_id: bootDeliveryId,
               workspace: deliveryWorkspace,
               stableSurfaceIdentity: spawnedBinding?.surface_uuid,
               resolveRoute: spawnedBinding?.surface_uuid
@@ -1152,6 +1155,7 @@ export function registerSpawnAgentTool(
               injected_prompt: injectedBootPrompt,
               timeout_ms: args.boot_prompt_timeout_ms,
               onPreTypeScreen: (screenText, deliveryText) => {
+                bootDeliveryText = deliveryText;
                 try {
                   const updated = stateMgr.updateRecord(result.agent_id, {
                     boot_pre_type_screen: screenText,
@@ -1188,7 +1192,7 @@ export function registerSpawnAgentTool(
               const boot = engine.getAgentState(result.agent_id);
               engine.acceptPendingVerify({
                 delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
-                text: boot?.boot_delivery_text ?? bootPromptDelivery.prompt_text ?? "",
+                text: bootDeliveryText ?? boot?.boot_delivery_text ?? bootPromptDelivery.prompt_text ?? "",
                 press_enter: true, source_event: "boot_prompt",
                 typed: bootPromptDelivery.typed, submit_dispatched: bootPromptDelivery.submit_dispatched,
                 retry_count: bootPromptDelivery.retry_count, rpc_methods: bootPromptDelivery.rpc_methods,
@@ -1389,7 +1393,7 @@ export function registerSpawnAgentTool(
             const bootPromptReceipt = e.submit_dispatched
               ? { ...buildPublicDeliveryReceipt({
                   delivery_state: "pending_verify",
-                  delivery_id: e.submit_verification_error?.receipt.delivery_id ?? randomUUID(),
+                  delivery_id: e.submit_verification_error?.receipt.delivery_id ?? bootDeliveryId,
                   typed: e.typed || e.delivered_chars > 0, submit_attempted: true,
                   submit_dispatched: true, submit_verified: null,
                   submit_verification_reason: e.submit_verification_error?.reason,
@@ -1417,7 +1421,7 @@ export function registerSpawnAgentTool(
             if (e.submit_dispatched && bootPromptReceipt.delivery_id) {
               const boot = engine.getAgentState(result.agent_id);
               engine.acceptPendingVerify({ delivery_id: bootPromptReceipt.delivery_id,
-                agent_id: result.agent_id, text: boot?.boot_delivery_text ?? "",
+                agent_id: result.agent_id, text: bootDeliveryText ?? boot?.boot_delivery_text ?? "",
                 press_enter: true, source_event: "boot_prompt", typed: true, submit_dispatched: true,
                 retry_count: bootPromptReceipt.retry_count, rpc_methods: e.rpc_methods,
                 boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined });
