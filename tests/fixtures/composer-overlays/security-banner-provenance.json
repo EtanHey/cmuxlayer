@@ -1,0 +1,26 @@
+[
+  {
+    "file": "codex-daybreak-real.txt",
+    "captured_at": "2026-10-06",
+    "surface": "surface:732",
+    "harness": "Codex 0.160.0",
+    "observed_model": "GPT-6-Luna low",
+    "snapshot_hash": "144722674f4b1a99beab4dd390b36b5ef578b06b9ac7201040db923c144cbe6c",
+    "fixture_sha256": "03aad0a3a136d825c69b2915bd3538390833f606e548cefa13a418b2f74fd037",
+    "sanitization": "~/Gits/cmuxlayer replaced with ~/scratch; right-edge padding stripped, blank rows and left indentation retained",
+    "submitted": false,
+    "scratch_closed": true
+  },
+  {
+    "file": "codex-daybreak-real-draft.txt",
+    "captured_at": "2026-10-06",
+    "surface": "surface:732",
+    "harness": "Codex 0.160.0",
+    "observed_model": "GPT-6-Luna low",
+    "snapshot_hash": "b479a006548593458fb5f546e2d866ff00502c36f3b517f05404543e477eca0c",
+    "fixture_sha256": "d2c2b4f6502c546ca4d1f1146c49940e4d55e0a57ee7cf5f68dfaf4e2b7aadd7",
+    "sanitization": "~/Gits/cmuxlayer replaced with ~/scratch; right-edge padding stripped, blank rows and left indentation retained",
+    "submitted": false,
+    "scratch_closed": true
+  }
+]
