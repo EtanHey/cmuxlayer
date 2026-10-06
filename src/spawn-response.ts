@@ -95,9 +95,13 @@ export function shapeSpawnResponse(
   const health = leanHealth(full.health);
   const healthWarnings = Array.isArray(health?.issues) && health.issues.length > 0
     ? health.issues : (health?.issue_codes ?? []);
+  const reportedWarnings = Array.isArray(full.warnings)
+    ? full.warnings.filter((value): value is string =>
+        typeof value === "string" && value.length > 0)
+    : [];
   const warnings = [
-    full.warning,
-    ...(Array.isArray(full.warnings) ? full.warnings : []),
+    full.warning === reportedWarnings.join(" | ") ? undefined : full.warning,
+    ...reportedWarnings,
     full.duplicate_spawn_warning,
     full.next_action,
     ...(Array.isArray(healthWarnings) ? healthWarnings : []),

@@ -265,12 +265,15 @@ describe("spawn response shaping", () => {
     expect(shapeSpawnResponse(compact)).toEqual(compact);
   });
 
-  it("deduplicates warning sources without adding diagnostic fields", () => {
-    const result = buildSpawnToolReturn({ ...base, warning: "duplicate",
-      warnings: ["duplicate", "model coerced"], duplicate_spawn_warning: "duplicate" });
-    expect(result.structuredContent.warning).toBe("duplicate | model coerced");
-    expect(Object.keys(result.structuredContent)).toHaveLength(6);
-  });
+  it.each(["duplicate", "duplicate | model coerced"])(
+    "deduplicates warning sources including the resume aggregate %s",
+    (warning) => {
+      const result = buildSpawnToolReturn({ ...base, warning,
+        warnings: ["duplicate", "model coerced"], duplicate_spawn_warning: "duplicate" });
+      expect(result.structuredContent.warning).toBe("duplicate | model coerced");
+      expect(Object.keys(result.structuredContent)).toHaveLength(6);
+    },
+  );
 
   it("uses the same lean payload for text and structured content", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
