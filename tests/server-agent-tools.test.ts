@@ -5366,10 +5366,119 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   });
 
-  it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
+  it.each([600, 2400])("spawn_agent does not insert a leading newline when the CLI paints after %ims", async (paintMs) => {
+    vi.useFakeTimers();
+    try {
+      const capture = JSON.parse(readFileSync(new URL(
+        "./fixtures/spawn/codex-0.160.1-launcher-leading-newline.json", import.meta.url,
+      ), "utf8"));
+      expect(capture.frames.boot_draft).toContain(`›\n  ${capture.prompt}`);
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let launchedAt: number | null = null;
+      let launcherReturns = 0;
+      let draft = "";
+      let submitted = "";
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") || args.includes("set-buffer")) {
+          if (text.includes("voicelayerCodex -s")) command = text;
+          else if (text === capture.prompt) draft += text;
+          else return baseExec(cmd, args);
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          if (draft.includes(capture.prompt)) { submitted = draft; draft = ""; }
+          else {
+            launcherReturns += 1;
+            if (launchedAt === null) launchedAt = Date.now();
+            else draft += "\n"; // A queued second launcher Return reaches Codex.
+          }
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          // The accepted first Return has not repainted the terminal yet. The
+          // capture's shell echo is indistinguishable from an unsubmitted line.
+          const text = launchedAt === null || Date.now() - launchedAt < paintMs
+            ? capture.frames.shell_echo.replace(/cd .*$/, command)
+            : submitted
+              ? `OpenAI Codex\n› ${submitted}\nWorking (1s • esc to interrupt)\n› \nGPT-6-Luna low · /tmp/synthetic`
+              : `OpenAI Codex\n› ${draft}\nGPT-6-Luna low · /tmp/synthetic`;
+          return { stdout: JSON.stringify({ surface: "surface:new", text, lines: 80, scrollback_used: false }), stderr: "" };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: capture.prompt, boot_prompt_timeout_ms: 4_000,
+      }, {} as any);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = parseToolResult(await pending);
+      expect(launcherReturns).toBe(1);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(submitted).toBe(capture.prompt);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spawn_agent bounds launch readiness by the remaining budget after a slow screen read", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let returnedAt = 0;
+      let completedAt = 0;
+      let slowReadDone = false;
+      let launcherReturns = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if ((args.includes("send") || args.includes("set-buffer")) &&
+            text.includes("voicelayerCodex -s")) {
+          command = text;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          launcherReturns += 1;
+          returnedAt ||= Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          if (returnedAt && !slowReadDone) {
+            slowReadDone = true;
+            await new Promise((resolve) => setTimeout(resolve, 750));
+          }
+          return {
+            stdout: JSON.stringify({ surface: "surface:new", text: `$ ${command}`,
+              lines: 80, scrollback_used: false }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: "remaining launch budget",
+        boot_prompt_timeout_ms: 1_000,
+      }, {} as any).then((result: unknown) => { completedAt = Date.now(); return result; });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(parseToolResult(await pending).ok).toBe(false);
+      const verification = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+        .trim().split("\n").map((line) => JSON.parse(line))
+        .find((entry) => entry.event_type === "spawn_agent" && entry.press_enter === true);
+      expect(verification).toMatchObject({ submit_verified: false, retry_count: 0 });
+      expect(Date.parse(verification.ts) - returnedAt).toBeGreaterThanOrEqual(750);
+      expect(Date.parse(verification.ts) - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(completedAt - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(launcherReturns).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spawn_agent recovers a lost launcher Return after observing the pending shell", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launcherReturnCount = 0;
+    const launcherReturnTimes: number[] = [];
     let promptDelivered = false;
     let lastSentText = "";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -5435,6 +5544,7 @@ describe("agent lifecycle tool handlers", () => {
       if (args.includes("send-key")) {
         if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
+          launcherReturnTimes.push(Date.now());
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
@@ -5494,6 +5604,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace_id).toBe("workspace:voice");
     expect(launcherReturnCount).toBe(2);
+    expect(launcherReturnTimes[1] - launcherReturnTimes[0]).toBeGreaterThanOrEqual(2500);
     expect(promptDelivered).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
@@ -5555,11 +5666,11 @@ describe("agent lifecycle tool handlers", () => {
           repo: "voicelayer",
           model: "codex",
           cli: "codex", effort: "medium",
-          boot_prompt_timeout_ms: 20,
+          boot_prompt_timeout_ms: 4_000,
         },
         {} as any,
       );
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       const parsed = parseToolResult(await resultPromise);
 
       expect(parsed.ok).toBe(false);
@@ -5569,7 +5680,7 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.last_10_lines).toContain(
         "bash-5.2$ voicelayerCodex -s --worker -E medium",
       );
-      expect(launcherReturns).toBeGreaterThanOrEqual(1);
+      expect(launcherReturns).toBe(2);
     } finally {
       vi.useRealTimers();
     }
@@ -7166,7 +7277,7 @@ describe("agent lifecycle tool handlers", () => {
         cli: "codex", effort: "medium",
         prompt: "",
         boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 20,
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );
