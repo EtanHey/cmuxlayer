@@ -741,6 +741,7 @@ describe("lean spawn tool responses", () => {
     const description = registered._registeredTools?.spawn_agent?.inputSchema
       ?.shape?.report_path?.description ?? "";
 
+    expect(description).toMatch(/verbose:true-only fields; the default warning contains any required relay instruction/);
     expect(description).toMatch(
       /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*send_to.*press_enter:true.*contract_path is absent.*inline mode.*could not be written.*relay report_path and done_marker/,
     );
@@ -2844,7 +2845,8 @@ describe("agent lifecycle tool handlers", () => {
       }),
     );
     const exec = makeLifecycleExec();
-    const server = createLifecycleServer(exec);
+    const server = createTrackedServer({ exec, stateDir: TEST_DIR,
+      inboxBaseDir: TEST_DIR, disableSpawnPreflight: true });
     await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
@@ -2854,8 +2856,10 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
     expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
       surface_id: "surface:new", state: "started", delivered: false });
+    expect(parsed.warning).toMatch(/refreshed_not_redelivered.*lost context/);
+    expect(parsed.warning).toContain(`Read and follow ${coordinationContractPath(agentId, { baseDir: TEST_DIR })}`);
     expect(Object.keys(parsed).sort()).toEqual(
-      ["ok", "agent_id", "surface_id", "state", "delivered"].sort());
+      ["ok", "agent_id", "surface_id", "state", "delivered", "warning"].sort());
     expect(JSON.parse(result.content[0].text)).toEqual(parsed);
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });

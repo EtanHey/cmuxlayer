@@ -39,6 +39,7 @@ can change after respawns, moves, reconnects, or stale terminal cleanup; an
 outcome, such as `started` or `boot_unsubmitted`; `delivered` is true only when
 the boot prompt was verified delivered. A raw terminal has `agent_id:null`
 and `delivered:false`. Follow any recovery warning on the existing pane.
+If the coordination contract was not delivered, `warning` carries its note and the exact contract pointer to relay, or the issued report path and done marker when no contract file exists. On resume, relay only if the restored session lost its contract context.
 
 Request `verbose:true` on the spawn call to include `contract_path`,
 `report_path`, `done_marker`, coordination notes, transport, worktree, and

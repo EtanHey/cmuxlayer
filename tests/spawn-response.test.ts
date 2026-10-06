@@ -18,6 +18,15 @@ const base = {
 };
 
 describe("spawn response shaping", () => {
+  it("preserves pending_verify wait_for delivery guidance in the lean warning", () => {
+    const result = buildSpawnToolReturn({ ...base, spawn_state: "pending_verify",
+      delivery_id: "delivery-synthetic", next_action: 'wait_for({delivery_id:"delivery-synthetic"})' });
+    expect(result.structuredContent.state).toBe("pending_verify");
+    expect(result.structuredContent.warning).toContain('wait_for({delivery_id:"delivery-synthetic"})');
+    expect(Object.keys(result.structuredContent)).toHaveLength(6);
+    expect(JSON.parse(result.content[0]!.text)).toEqual(result.structuredContent);
+  });
+
   it("keeps failures intact without verbose", () => {
     const failure = { ok: false, error: "launch failed", retry_count: 2,
       contract_path: "/tmp/contract.md", transport: { stderr: "synthetic" } };

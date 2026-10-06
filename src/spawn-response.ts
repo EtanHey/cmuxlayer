@@ -18,6 +18,15 @@ function record(value: unknown): JsonObject | null {
     : null;
 }
 
+function coordinationWarning(full: JsonObject): string | undefined {
+  if (full.coordination_footer_delivered !== false) return undefined;
+  const relay = typeof full.contract_path === "string" && full.contract_path.length > 0
+    ? `Relay with send_to(${JSON.stringify({ agent_id: full.agent_id,
+        text: `Read and follow ${full.contract_path}`, press_enter: true })}) as directed by the note.`
+    : `The LEAD must relay report_path=${JSON.stringify(full.report_path)} and done_marker=${JSON.stringify(full.done_marker)} to this worker.`;
+  return [full.coordination_footer_note, relay].filter(Boolean).join(" ");
+}
+
 function bootUnsubmittedNextAction(
   surface: unknown,
   receipt: unknown,
@@ -104,6 +113,7 @@ export function shapeSpawnResponse(
     ...reportedWarnings,
     full.duplicate_spawn_warning,
     full.next_action,
+    coordinationWarning(full),
     ...(Array.isArray(healthWarnings) ? healthWarnings : []),
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   const warning = [...new Set(warnings)].join(" | ");
