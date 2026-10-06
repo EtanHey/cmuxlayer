@@ -31,15 +31,17 @@ workspace remain private per run on both hosts. Do this on the dedicated host th
 runner does not copy credentials, configure accounts, or use personal shell
 startup files. The optional auth HOME persists harness sessions, but daemon
 state, inboxes, workspace cwd, and sockets remain per-run scratch resources.
-The isolated runner uses native Codex/Claude CLIs through the installed
-cmuxlayer's registry-optional raw launch path, with an empty private launcher
-registry. Existing repoGolem state remains an operator prerequisite to
-inventory; personal launcher hooks are not sourced into private shells.
+The M1 gate uses the target's real repoGolem registry and dispatcher for
+Codex/Claude spawns, with `--repo cmuxlayer` as the default. It verifies each
+seat's recorded launcher mode and expected registry launcher. NIGHTLY uses
+native CLIs through the registry-optional raw path with an empty private
+launcher registry. Both paths restore private daemon routing after shell
+startup.
 
 After the lead coordinates the M1 and confirms 0.4.101 installed:
 
 ```bash
-node scripts/soak-live.mjs --agent-id M1_SOAK_ID --target m1-gate --gate-host M1_HOSTNAME --app "/Applications/cmux.app" --dmg /path/to/pinned-cmux-0.64.22.dmg --cases a,b,c,d,e,f,g,h
+node scripts/soak-live.mjs --agent-id M1_SOAK_ID --target m1-gate --repo cmuxlayer --gate-host M1_HOSTNAME --app "/Applications/cmux.app" --dmg /path/to/pinned-cmux-0.64.22.dmg --cases a,b,c,d,e,f,g,h
 ```
 
 `M1_HOSTNAME` must be the lead-designated dedicated host's exact `hostname`.
