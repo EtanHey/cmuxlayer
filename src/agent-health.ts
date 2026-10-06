@@ -464,7 +464,7 @@ export function evaluateAgentHealth(
   const screenActive =
     input.screen_status === "working" || input.screen_status === "thinking";
   const harnessApiErrors = (input.screen_errors ?? []).filter((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   if (harnessApiErrors.length > 0) {
     addIssue(

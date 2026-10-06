@@ -10,6 +10,7 @@ import {
   antigravityComposerDraft,
   composerPickerBounds,
   isAntigravityScreen,
+  isCodexDismissibleOverlay,
   isPickerOrMenuScreen,
   parseScreen,
 } from "../screen-parser.js";
@@ -805,6 +806,7 @@ export function composerHoldsForeignDraft(
   options?: { cli?: CliType; exact?: boolean },
 ): boolean {
   const cli = options?.cli ?? inferComposerCli(screenText);
+  if (isCodexDismissibleOverlay(screenText)) return false;
   // A selected permission option resembles a non-empty Claude composer line.
   // Let the menu classifier own it, including the exact Return guard.
   if (

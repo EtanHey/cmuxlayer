@@ -847,7 +847,8 @@ export function registerListAgentsTool(
       const filter = {
         repo: args.repo,
         model: args.model,
-        blocked_on_prompt: args.blocked_on_prompt,
+        // Apply prompt filtering after the live screen enriches each row.
+        blocked_on_prompt: undefined,
       };
       const requestedState = args.state;
       const cacheKey = JSON.stringify({
@@ -1071,9 +1072,9 @@ export function registerListAgentsTool(
                       agent.submit_verified === false
                     ? "failed" as const
                     : null;
-              const screenObservation = trustedScreenObservation
+              const screenObservation = trustedScreenObservation && liveDiscovery
                 ? {
-                    observed_at_ms: liveDiscovery!.observed_at_ms,
+                    observed_at_ms: liveDiscovery.observed_at_ms,
                     status: trustedScreenObservation.parsed_status,
                     agent_type:
                       trustedScreenObservation.cli === "kiro"
@@ -1110,6 +1111,11 @@ export function registerListAgentsTool(
                           }
                         : {}),
                   }),
+                  ...(liveDiscovery &&
+                      (trustedScreenObservation?.control_state === "interactive_overlay" ||
+                       trustedScreenObservation?.control_state === "permission_prompt")
+                    ? { blocked_on_prompt: { value: true, source: "screen" as const, observed_at_ms: liveDiscovery.observed_at_ms } }
+                    : {}),
                   cli: agent.cli,
                   role,
                   ...(placementMismatch
@@ -1173,11 +1179,14 @@ export function registerListAgentsTool(
         const skippedAgents = rows.flatMap((row) =>
           row.skipped ? [row.skipped] : [],
         );
+        const promptFilteredAgents = args.blocked_on_prompt === undefined
+          ? enrichedAgents
+          : enrichedAgents.filter(agent => agent.blocked_on_prompt.value === args.blocked_on_prompt);
         const agents = requestedState
-          ? enrichedAgents.filter(
+          ? promptFilteredAgents.filter(
               (agent) => agent.state.value === requestedState,
             )
-          : enrichedAgents;
+          : promptFilteredAgents;
         const entry: ListAgentsCacheEntry = {
           topology_signature: topologySignature,
           derived_at: Date.now(),

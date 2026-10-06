@@ -10093,14 +10093,14 @@ Session ID: ${sessionId}`,
       }
     });
 
-    it.each(["spawn", "resume"])("#999(e) %s boot dismisses account security before readiness", async origin => {
+    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("#999(e) %s boot dismisses %s account security before readiness", async (origin, variant) => {
       const id = `security-${origin}`;
       stateMgr.writeState(makeRecord({ agent_id: id, state: "booting", surface_id: "surface:42", cli: "codex",
         ...(origin === "resume" ? { boot_resumed_at: new Date().toISOString() } : {}) }));
       liveSurfaces = [makeSurface("surface:42")];
       let banner = true;
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
-        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? "boot" : "dismissed"}.txt`, import.meta.url), "utf8"), lines: 35, scrollback_used: false,
+        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? variant : "dismissed"}.txt`, import.meta.url), "utf8"), lines: 35, scrollback_used: false,
       }));
       (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(async (_surface, key) => { if (key === "escape") banner = false; });
       await engine.getRegistry().reconstitute();
@@ -10108,6 +10108,7 @@ Session ID: ${sessionId}`,
       expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
       expect(mockClient.sendKey.mock.calls[0][1]).toBe("escape");
       expect(engine.getAgentState(id)?.state).toBe("ready");
+      expect(stateMgr.getEventLog().readEntries()).toContainEqual(expect.objectContaining({ event_type: "account_security_banner", agent_id: id, surface: "surface:42", outcome: "dismissed" }));
     });
 
     it("#999(e) a wedged security banner fails boot explicitly after one Esc", async () => {
@@ -11682,6 +11683,34 @@ Session ID: ${sessionId}`,
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
         "Reading stale-work.ts",
       );
+    });
+
+    it.each([
+      ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
+    ])("silent-stall %s wakes the parent despite prior done evidence", async (kind, screen, tag) => {
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+        haltNow: () => Date.parse("2026-10-05T08:00:00Z"), haltAwaitingInputDwellMs: 0,
+      });
+      const parent = makeRecord({ agent_id: "stall-parent", surface_id: "surface:stall-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stall-child", surface_id: "surface:stall-child", state: "working", cli: "codex", role: "worker", parent_agent_id: parent.agent_id, spawn_depth: 1, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      mockClient.readScreen.mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      vi.spyOn(engine, "hasCurrentRecordedOutputDoneEvidence").mockReturnValue(true);
+      await engine["maybeEscalateLiveHalt"](child, screen);
+      await engine["maybeEscalateLiveHalt"](engine.getAgentState(child.agent_id) ?? child, screen);
+      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
+      if (kind === "security" || kind === "hooks") {
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
+      } else expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
     it("wakes the parent immediately when a child transitions into a harness API error", async () => {

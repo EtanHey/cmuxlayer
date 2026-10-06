@@ -825,6 +825,7 @@ export function antigravityScreenIsReady(text: string): boolean {
 }
 
 function detectAgentType(text: string): ParsedScreenAgentType {
+  if (isCodexDismissibleOverlay(text)) return "codex";
   // Transcript content above the last composer can quote another harness's
   // footer or spinner. Only footers below that composer establish live chrome;
   // boot banners remain useful before the composer is drawn.
@@ -1586,6 +1587,7 @@ function hasPickerNavigationBlock(text: string): boolean {
 export function isBlockingPromptChooserScreen(text: string): boolean {
   const normalized = normalizeText(text);
   return (
+    isCodexDismissibleOverlay(normalized) ||
     hasApprovalPromptBlock(normalized) ||
     analyzeActiveChooser(normalized) !== null ||
     hasInteractivePromptBlock(normalized) ||
@@ -1645,6 +1647,8 @@ export function hasVisibleAgentProgress(
 ): boolean {
   const normalized = normalizeText(text);
   if (
+    isCodexDismissibleOverlay(normalized) ||
+    isCodexModelAtCapacity(normalized) ||
     CONTEXT_LIMIT_BANNER_RE.test(normalized) ||
     hasApprovalPromptBlock(normalized)
   ) {
@@ -1732,6 +1736,7 @@ export function classifyPromptDisposition(
   cli?: CliType,
 ): PromptDisposition {
   const normalized = normalizeText(text);
+  if (isCodexDismissibleOverlay(normalized)) return { kind: "escalate", prompt_type: "human_or_unknown_chooser" };
   const agentType = detectAgentType(normalized);
   const chooser = analyzeActiveChooser(normalized);
   if (hasApprovalPromptBlock(normalized, chooser)) {
@@ -1802,21 +1807,77 @@ export function composerPickerBounds(text: string, cli?: CliType): { start: numb
   return null;
 }
 
-/** The live Codex setup overlay is dangerous even when an input box is below it. */
-export function isCodexAccountSecurityBanner(text: string): boolean {
-  // This setup banner is a bottom overlay; historical scrollback cannot authorize Esc.
-  const lines = normalizeText(text).split("\n").slice(-40);
-  const reverseFooter = [...lines].reverse().findIndex(line => /^\s*Press a number to choose\s*·\s*esc to dismiss\s*·\s*type to continue\s*$/iu.test(line));
-  if (reverseFooter < 0) return false;
+/** Classify only the bottom setup overlay, never an earlier transcript quote. */
+export function codexDismissibleOverlayVariant(text: string): "advanced_account_security" | "daybreak" | "security" | "hooks_review" | null {
+  if (!/Press a number to choose|Hooks need review/iu.test(text)) return null;
+  const lines = normalizeText(text).trimEnd().split("\n").slice(-40);
+  const reverseFooter = [...lines].reverse().findIndex(line => /^\s*(?:Press a number to choose\s*·\s*esc to dismiss\s*·\s*type to continue|enter confirm\s*·\s*esc skip)\s*$/iu.test(line));
+  if (reverseFooter < 0) return null;
   const footer = lines.length - 1 - reverseFooter;
-  return /Set up Advanced Account Security with a hardware security key/iu.test(lines.slice(Math.max(0, footer - 8), footer).join(" ").replace(/\s+/gu, " ")) &&
-    lines.slice(Math.max(0, footer - 5), footer).some(line => /^\s*›\s*1\. Set up security\s*$/u.test(line)) &&
-    lines.slice(footer + 1).some(line => /^\s*›(?:\s|$)/u.test(line));
+  const hooks = /enter confirm\s*·\s*esc skip/iu.test(lines[footer]);
+  const body = lines.slice(Math.max(0, footer - (hooks ? 12 : 8)), footer);
+  if (!body.some(line => (hooks ? /^\s*›\s*[123]\.\s+\S/u : /^\s*›\s*1\.\s+\S/u).test(line))) return null;
+  // An overlay may be the last thing drawn: no composer is required. If a
+  // composer follows, retain wrapped drafts, but reject later transcript rows.
+  const tail = lines.slice(footer + 1).filter(line => line.trim());
+  let composerSeen = false;
+  let chromeSeen = false;
+  for (const line of tail) {
+    if (/^\s*›(?:\s|$)/u.test(line)) {
+      if (composerSeen || chromeSeen) return null;
+      composerSeen = true;
+    } else if (codexIdleChromeLine(line)) {
+      chromeSeen = true;
+    } else if (!composerSeen || chromeSeen || !/^(?: {2}|\t)/u.test(line) ||
+        /^\s*[•■⏺]/u.test(line) || CODEX_WORKING_RE.test(line)) return null;
+  }
+  if (hooks) {
+    const option = (number: number, wording: string) => body.some(line => new RegExp(`^\\s*(?:›\\s*)?${number}\\.\\s+${wording}\\s*$`, "iu").test(line));
+    return body.some(line => /^\s*Hooks need review(?::.*)?\s*$/iu.test(line)) &&
+      option(1, "Review(?: hooks)?") && option(2, "Trust all(?: and continue)?") &&
+      option(3, "Continue without trusting(?: \\(hooks won't run\\))?") ? "hooks_review" : null;
+  }
+  const wording = body.join(" ");
+  if (/Advanced Account Security/iu.test(wording)) return "advanced_account_security";
+  if (/\bDaybreak\b/iu.test(wording)) return "daybreak";
+  return /\bsecurity\b/iu.test(wording) ? "security" : null;
+}
+
+export function codexAccountSecurityBannerVariant(text: string): "advanced_account_security" | "daybreak" | "security" | null {
+  const variant = codexDismissibleOverlayVariant(text);
+  return variant === "hooks_review" ? null : variant;
+}
+
+export function isCodexDismissibleOverlay(text: string): boolean {
+  return codexDismissibleOverlayVariant(text) !== null;
+}
+
+export function isCodexAccountSecurityBanner(text: string): boolean {
+  return codexAccountSecurityBannerVariant(text) !== null;
+}
+
+function codexIdleChromeLine(line: string): boolean {
+  return CODEX_CHROME_FOOTER_RE.test(line) || /^\s*\?\s*for shortcuts\b/iu.test(line) || /^\s*─+\s*$/u.test(line);
+}
+
+/** Capacity belongs to the latest message above an idle Codex composer. */
+function isCodexModelAtCapacity(text: string): boolean {
+  if (!text.includes("■ Selected model is at capacity. Please try a different model.")) return false;
+  if (detectAgentType(text) !== "codex") return false;
+  const lines = text.split("\n");
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (isReadyComposerLine(lines[index]) && /^\s*›/u.test(lines[index])) { composer = index; break; }
+  }
+  if (composer < 0 || lines.slice(composer + 1).some(line => line.trim() && !codexIdleChromeLine(line))) return false;
+  return /^\s*■ Selected model is at capacity\. Please try a different model\.\s*$/u.test(
+    [...lines.slice(0, composer)].reverse().find(line => line.trim()) ?? "",
+  );
 }
 
 export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   const normalized = normalizeText(text);
-  if (composerPickerBounds(normalized, cli) || isCodexAccountSecurityBanner(normalized) || analyzeActiveChooser(normalized)) return true;
+  if (composerPickerBounds(normalized, cli) || isCodexDismissibleOverlay(normalized) || analyzeActiveChooser(normalized)) return true;
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -1831,6 +1892,7 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
+  if (isCodexModelAtCapacity(text)) errors.push("model_at_capacity");
 
   const rawLines = text.split("\n");
   const lines = rawLines.map((line) => line.trim());
@@ -1916,6 +1978,7 @@ function inferControlState(
   agentType: ParsedScreenAgentType,
   text: string,
 ): ParsedScreenResult["control_state"] {
+  if (isCodexDismissibleOverlay(text)) return "interactive_overlay";
   if (hasOsShellPrompt(text)) {
     return "shell";
   }
@@ -2267,6 +2330,8 @@ function inferStatus(
     .map((line) => line.trim())
     .filter(Boolean);
   const joined = lines.join("\n");
+
+  if (isCodexDismissibleOverlay(text) || errors.includes("model_at_capacity")) return "frozen";
 
   if (doneSignal) {
     if (doneSignal.startsWith("CLAUDE_COUNTER:")) {

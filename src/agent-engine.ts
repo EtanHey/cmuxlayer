@@ -72,7 +72,7 @@ import {
 import {
   ANTIGRAVITY_BANNER_RE,
   cleanScreenText,
-  isCodexAccountSecurityBanner,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "./screen-parser.js";
 import { dismissAccountSecurityBanner } from "./delivery/account-security.js";
@@ -2457,7 +2457,7 @@ export class AgentEngine {
   }
 
   private async dismissBootSecurityBanner(agent: AgentRecord, screen: CmuxReadScreenResult, ctx?: SweepAgentContext): Promise<CmuxReadScreenResult> {
-    if (agent.cli !== "codex" || agent.state !== "booting" || !isCodexAccountSecurityBanner(screen.text)) return screen;
+    if (agent.cli !== "codex" || agent.state !== "booting" || !isCodexDismissibleOverlay(screen.text)) return screen;
     const route = await this.resolveAgentIoRoute(agent.agent_id);
     const assertCurrent = async () => {
       if (ctx && !this.assertSweepInputCurrent(ctx)) throw new Error("Security-banner boot observation changed");
@@ -2480,7 +2480,7 @@ export class AgentEngine {
         return dismissAccountSecurityBanner(await read(), {
           escape: async () => { await assertCurrent(); await sendKey("escape"); },
           read,
-        });
+        }, { agent_id: agent.agent_id, surface: route.surface_id, eventLog: this.stateMgr.getEventLog() });
       }, { workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
     } catch (error) {
       if (error instanceof DeliverySafetyGateError) {
@@ -2649,7 +2649,7 @@ export class AgentEngine {
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;
     } catch (error) {
-      if (error instanceof DeliverySafetyGateError && error.error_code === "account_security_banner_not_dismissed") return this.registry.get(agent.agent_id) ?? agent;
+      if (error instanceof DeliverySafetyGateError && (error.error_code === "account_security_banner_not_dismissed" || error.error_code === "hooks_review_not_dismissed")) return this.registry.get(agent.agent_id) ?? agent;
       if (agent.boot_prompt_pending && this.isBootPromptPendingStale(agent) &&
           this.assertSweepInputCurrent(ctx)) {
         try {
