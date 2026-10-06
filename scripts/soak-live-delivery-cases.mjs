@@ -86,13 +86,21 @@ export async function runDeliveryCases({ cases, seat, owner, foreign, send, read
   const runIdleCase = async (id, text) => {
     if (id === "c") {
       await draft(id, text, foreign);
-      const refused = await message(id, `Reply exactly SOAK_REFUSED_${now()}.`,
-        { expectedCode: "blocked_by_foreign_draft" });
-      requireCase(refused.receipt.error_code === "blocked_by_foreign_draft" &&
-        refused.receipt.typed === false, "foreign_draft_not_refused", id);
-      const state = await read(text, refused.receipt.delivery_id);
-      requireCase(state.inComposer && (state.needsAttention || state.draftAttention), "foreign_draft_unsurfaced", id);
-      await key(id, "ctrl+u", { caller: foreign, control: true });
+      try {
+        const refused = await message(id, `Reply exactly SOAK_REFUSED_${now()}.`,
+          { expectedCode: "blocked_by_foreign_draft" });
+        requireCase(refused.receipt.error_code === "blocked_by_foreign_draft" &&
+          refused.receipt.typed === false, "foreign_draft_not_refused", id);
+        const state = await read(text, refused.receipt.delivery_id);
+        requireCase(state.inComposer && (state.needsAttention || state.draftAttention), "foreign_draft_unsurfaced", id);
+      } finally {
+        // This caller staged the harmless echo prompt. Submit through its owned
+        // route and observe acceptance; Ctrl-U is cursor-position dependent.
+        const cleared = await key(id, "Return", { caller: foreign, text });
+        requireCase(cleared.receipt.ok === true && cleared.receipt.submit_verified === true &&
+          cleared.evidence.submitted && !cleared.evidence.inComposer, "foreign_draft_cleanup_failed", id);
+        await settle(seat, text, `case:${id}:cleanup`);
+      }
     } else {
       for (const variant of id === "d" ? ["Enter", "enter", "Return", "RETURN"] : ["Return"]) {
         const ownedText = `${text} ${variant}`;

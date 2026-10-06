@@ -70,3 +70,27 @@ it.each([
   expect(() => deliveryCaseCaller({ agentId: "scratch", surface: "surface:7" }, state))
     .toThrow("case_caller_route_unavailable");
 });
+
+it.each([true, false])("case c clears its foreign draft through the drafting caller even when attention=%s", async (attention) => {
+  const sends: Array<{ text: string; caller?: string }> = [], violations: string[] = [];
+  let hasDraft = false, clock = 0, settled = false;
+  await runDeliveryCases({ cases: ["c"], seat: {},
+    owner: { agentId: "owner", surface: "uuid-1" }, foreign: { agentId: "foreign", surface: "uuid-2" },
+    opts: { timeoutMs: 1000 }, now: () => clock,
+    sleep: async (ms: number) => { clock += ms; },
+    read: async () => ({ readable: true, inComposer: hasDraft, hasDraft, draftAttention: attention }),
+    send: async (_seat: unknown, args: { text: string; press_enter?: boolean }, _cycle: string, policy: { caller?: { agentId: string } }) => {
+      sends.push({ text: args.text, caller: policy.caller?.agentId });
+      if (args.press_enter === false) { hasDraft = true; return { receipt: { ok: true }, evidence: { inComposer: true } }; }
+      if (args.text === "Return" && policy.caller?.agentId === "foreign") {
+        hasDraft = false;
+        return { receipt: { ok: true, submit_verified: true }, evidence: { submitted: true } };
+      }
+      return { receipt: { ok: false, typed: false, error_code: "blocked_by_foreign_draft" }, evidence: { inComposer: true } };
+    },
+    settle: async () => { settled = true; }, check: (_name: string, failures: string[]) => violations.push(...failures), log: () => {} });
+  expect(sends.at(-1)).toEqual({ text: "Return", caller: "foreign" });
+  expect(hasDraft).toBe(false);
+  expect(settled).toBe(true);
+  expect(violations).toEqual(attention ? [] : ["foreign_draft_unsurfaced", "delivery_case_failed"]);
+});

@@ -4,9 +4,10 @@ function assertRange(value, minimum, maximum, message) {
 
 export function options(argv) {
   const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
-    agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "cmuxlayer",
-    claudeModel: null, codexModel: "gpt-6-sol", codexEffort: "low", pool: 0, freshEvery: 0, cases: [], queueDeadlineMs: 90_000, longTurnMinutes: 2 };
-  const fields = { "--cycles": "cycles", "--concurrency": "concurrency",
+    app: "/Applications/cmux NIGHTLY.app", target: "nightly", gateHost: "", dmg: "", privateHome: "", dryRun: false,
+    agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer",
+    claudeModel: "haiku", codexModel: "gpt-6-luna", codexEffort: "low", pool: 2, freshEvery: 0, cases: [], queueDeadlineMs: 90_000, longTurnMinutes: 2 };
+  const fields = { "--private-home": "privateHome", "--app": "app", "--target": "target", "--gate-host": "gateHost", "--dmg": "dmg", "--dry-run": "dryRun", "--cycles": "cycles", "--concurrency": "concurrency",
     "--timeout-ms": "timeoutMs", "--duration-minutes": "durationMinutes",
     "--agent-id": "agentId", "--lead-agent-id": "leadAgentId", "--entry": "entry",
     "--claude-model": "claudeModel", "--codex-model": "codexModel",
@@ -18,6 +19,9 @@ export function options(argv) {
     opts[field] = ["cycles", "concurrency", "timeoutMs", "durationMinutes", "pool", "freshEvery", "queueDeadlineMs", "longTurnMinutes"].includes(field)
       ? Number(argv[i + 1]) : argv[i + 1];
   }
+  if (!["nightly", "m1-gate"].includes(opts.target)) throw new Error("target must be nightly or m1-gate");
+  if (![false, "true", "false"].includes(opts.dryRun)) throw new Error("dry-run must be true or false");
+  opts.dryRun = opts.dryRun === "true";
   if (!/^[A-Za-z0-9_-]+$/u.test(opts.agentId)) throw new Error("--agent-id is required");
   assertRange(opts.cycles, 1, 40, "cycles must be 1..40");
   assertRange(opts.concurrency, 1, 2, "concurrency must be 1..2");
@@ -35,6 +39,16 @@ export function options(argv) {
   }
   assertRange(opts.queueDeadlineMs, 1000, 300000, "queue-deadline-ms must be 1000..300000");
   assertRange(opts.longTurnMinutes, 1, 15, "long-turn-minutes must be 1..15");
+  if (opts.codexModel !== "gpt-6-luna" || opts.codexEffort !== "low" || opts.claudeModel !== "haiku") {
+    throw new Error("soak seats require gpt-6-luna low and haiku");
+  }
+  if (opts.pool > 2) throw new Error("soak pool must be at most 2");
+  if (opts.leadAgentId) throw new Error("soak cannot read a production lead inbox");
+  if (opts.target === "m1-gate" && !opts.dryRun &&
+    (opts.cycles !== 40 || opts.durationMinutes < 60 || !"abcdefg".split("").every(id => opts.cases.includes(id)))) {
+    throw new Error("M1 release gate requires 40 cycles, at least 60 minutes, and cases a-g");
+  }
+  if (!opts.dryRun && !opts.privateHome) throw new Error("real soak requires an authenticated --private-home");
   return opts;
 }
 

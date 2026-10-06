@@ -55,8 +55,8 @@ describe("delivery stop rule", () => {
     expect(evidence).toMatchObject({ submitted: false, queued: true, elapsedMs: 1000 });
   });
   it("selects cases without changing the duration floor and rejects typos", () => {
-    expect(options(["--agent-id", "scratch", "--cases", "a,f"])).toMatchObject({ cases: ["a", "f"], durationMinutes: 60 });
-    expect(() => options(["--agent-id", "scratch", "--cases", "x"])).toThrow(/cases/u);
+    expect(options(["--agent-id", "scratch", "--private-home", "/private-soak-home", "--cases", "a,f"])).toMatchObject({ cases: ["a", "f"], durationMinutes: 60 });
+    expect(() => options(["--agent-id", "scratch", "--private-home", "/private-soak-home", "--cases", "x"])).toThrow(/cases/u);
   });
 });
 
@@ -80,7 +80,7 @@ describe("long relay queue correlation", () => {
       .toMatchObject({ inComposer: true, submitted: false, queued: false });
   });
   it("selects the new h case", () => {
-    expect(options(["--agent-id", "scratch", "--cases", "h"]).cases).toEqual(["h"]);
+    expect(options(["--agent-id", "scratch", "--private-home", "/private-soak-home", "--cases", "h"]).cases).toEqual(["h"]);
   });
 });
 

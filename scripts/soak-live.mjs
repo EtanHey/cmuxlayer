@@ -3,7 +3,8 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -13,9 +14,9 @@ import {
 import { deliveryCaseCaller, runDeliveryCases } from "./soak-live-delivery-cases.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { pollDelivery, runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
+import { startSoakRuntime } from "./soak-runtime.mjs";
 import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
 
-const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const object = (value) => value && typeof value === "object" ? value : {};
 const boundedScreenContent = (value) => typeof value === "string"
@@ -46,14 +47,34 @@ function serverRssKb(pid) {
 
 async function main() {
   const opts = options(process.argv.slice(2));
-  const root = join(homedir(), ".cmux", "agents", opts.agentId, "soak");
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..", "docs.local", "soak", opts.agentId);
+  const runtime = await startSoakRuntime(opts, root);
+  const WORKSPACE = runtime.workspace;
+  if (opts.dryRun) {
+    const probeClient = new Client({ name: "cmuxlayer-soak-dry-run", version: "1" });
+    try {
+      await probeClient.connect(new StdioClientTransport({ command: opts.entry, args: [], env: runtime.env, stderr: "inherit" }));
+      runtime.receipt.server_info = probeClient.getServerVersion();
+      const health = payload(await probeClient.callTool({ name: "control_health", arguments: { detail: "full" } }, undefined, { timeout: 20_000 }));
+      runtime.receipt.control_health = health;
+      if (health.ok !== true || health.health?.current_process?.pid !== runtime.receipt.daemon.pid ||
+        health.socket_path !== runtime.env.CMUX_SOCKET_PATH) throw new Error("installed private control identity mismatch");
+    } catch (error) { runtime.receipt.error = String(error); }
+    finally {
+      await probeClient.close().catch(() => {});
+      const lifecycle = await runtime.close();
+      process.stdout.write(`${lifecycle.status === "PASS" ? "SOAK_DRY_RUN_PASS" : "SOAK_DRY_RUN_FAIL"} ${runtime.receiptPath}\n`);
+      if (lifecycle.status !== "PASS") process.exitCode = 1;
+    }
+    return;
+  }
   mkdirSync(root, { recursive: true });
   const runId = new Date().toISOString().replace(/[:.]/gu, "-");
   const eventsPath = join(root, `${runId}.jsonl`);
   const summaryPath = join(root, `${runId}.summary.json`);
   const summary = { run_id: runId, started_at: new Date().toISOString(),
     mcp_entry: opts.entry, candidate_head: process.env.CMUXLAYER_SOAK_CANDIDATE_HEAD || null,
-    workspace: WORKSPACE, cycles_requested: opts.cycles, duration_floor_minutes: opts.durationMinutes,
+    workspace: WORKSPACE, target: opts.target, release_gate: opts.target === "m1-gate", lifecycle_receipt: runtime.receiptPath, cycles_requested: opts.cycles, duration_floor_minutes: opts.durationMinutes,
     concurrency: opts.concurrency, cycles_completed: 0, cli_counts: { claude: 0, codex: 0 },
     models: { claude: opts.claudeModel ?? "launcher-default", codex: opts.codexModel },
     codex_effort: opts.codexEffort,
@@ -65,7 +86,7 @@ async function main() {
   const unverifiedSends = new Map();
   const poolSeats = Array(opts.pool).fill(null);
   const blockedPoolSlots = new Set();
-  const stateDir = process.env.CMUXLAYER_STATE_DIR || join(homedir(), ".local", "state", "cmux-agents");
+  const stateDir = runtime.env.CMUXLAYER_STATE_DIR;
   const leadInbox = opts.leadAgentId
     ? join(homedir(), ".cmux", "agents", opts.leadAgentId, "inbox.jsonl") : null;
   let inboxOffset = 0;
@@ -86,7 +107,7 @@ async function main() {
   const client = new Client({ name: "cmuxlayer-soak-live", version: "1" });
   // This is an external stdio client, not a child turn of the worker running it.
   // An inherited pane identity would add two ancestors and hit the depth gate.
-  const serverEnv = Object.fromEntries(Object.entries(process.env).filter(([, v]) => typeof v === "string"));
+  const serverEnv = Object.fromEntries(Object.entries(runtime.env).filter(([, v]) => typeof v === "string"));
   delete serverEnv.CMUX_SURFACE_ID;
   delete serverEnv.CMUX_WORKSPACE_ID;
   delete serverEnv.CMUX_TAB_ID;
@@ -316,7 +337,7 @@ async function main() {
     return close?.surface_closed === true;
   };
   const spawnSeat = async (cycle, cli, marker) => {
-    const spawn = await call("spawn_agent", { repo: "cmuxlayer", workspace: WORKSPACE,
+    const spawn = await call("spawn_agent", { repo: "soak", cwd: runtime.cwd, worktree: false, workspace: WORKSPACE,
       cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
         : opts.claudeModel ? { model: opts.claudeModel } : {}),
       role: "worker", authority: "worker", placement: "right", force_new: true,
@@ -474,6 +495,8 @@ async function main() {
   try {
     await client.connect(transport);
     connected = true;
+    summary.server_info = client.getServerVersion();
+    if (opts.target === "m1-gate" && summary.server_info?.version !== "0.4.101") throw new Error("installed stdio release version mismatch");
     startPid = transport.pid;
     rssStartKb = serverRssKb(startPid);
     log({ kind: "start", options: opts });
@@ -484,15 +507,21 @@ async function main() {
     startedAtMs = healthClock.startedAtMs;
     if (opts.cases.length) {
       const seat = await spawnSeat("delivery-cases", "codex", `SOAK_CASES_READY_${runId}`);
+      let callerSeat;
       try {
         if (!seat.valid) throw new Error("delivery case spawn failed");
+        const ownerMarker = `SOAK_OWNER_READY_${runId}`;
+        callerSeat = await spawnSeat("delivery-owner", "claude", ownerMarker);
+        if (!callerSeat.valid) throw new Error("delivery owner spawn failed");
+        const ownerWait = await call("wait_for", { agent_id: callerSeat.agentId, target_state: "idle", timeout_ms: opts.timeoutMs }, "delivery-owner");
+        if (!await readReply("delivery-owner", callerSeat.agentId, callerSeat.surface, ownerMarker, ownerWait)) throw new Error("delivery owner reply missing");
         const waited = await call("wait_for", { agent_id: seat.agentId,
           target_state: "idle", timeout_ms: opts.timeoutMs }, "delivery-cases");
         if (!await readReply("delivery-cases", seat.agentId, seat.surface, `SOAK_CASES_READY_${runId}`, waited)) {
           throw new Error("delivery case boot reply missing");
         }
-        const callerState = JSON.parse(readFileSync(join(stateDir, opts.agentId, "state.json"), "utf8"));
-        const owner = deliveryCaseCaller({ agentId: opts.agentId, surface: callerState.surface_id }, callerState, WORKSPACE);
+        const callerState = JSON.parse(readFileSync(join(stateDir, callerSeat.agentId, "state.json"), "utf8"));
+        const owner = deliveryCaseCaller(callerSeat, callerState, WORKSPACE);
         const targetState = JSON.parse(readFileSync(join(stateDir, seat.agentId, "state.json"), "utf8"));
         const foreign = deliveryCaseCaller(seat, targetState, WORKSPACE);
         seat.surfaceUuid = foreign.surface;
@@ -513,7 +542,10 @@ async function main() {
           read: (text, deliveryId) => readDelivery(seat, text, deliveryId), settle: settleDelivery,
           opts, now: Date.now, sleep, check, log });
       } catch (error) { check("delivery_case", ["delivery_case_setup_failed"], { error: String(error) }); }
-      finally { await closeSeat("delivery-cases", seat); }
+      finally {
+        try { await closeSeat("delivery-cases", seat); }
+        finally { await closeSeat("delivery-owner", callerSeat); }
+      }
     }
     for (let slot = 0; slot < opts.pool; slot += 1) {
       try { poolSeats[slot] = await bootPoolSeat(slot, `pool:${slot}`); }
@@ -557,6 +589,9 @@ async function main() {
     summary.pool.blocked_slots = blockedPoolSlots.size;
     summary.tools = Object.fromEntries(Object.entries(summary.tools).map(([name, values]) =>
       [name, { calls: values.length, p50_ms: percentile(values, 50), p95_ms: percentile(values, 95) }]));
+    const lifecycle = await runtime.close();
+    for (const code of lifecycle.violations) check("app_isolation", [code], {});
+    if (lifecycle.status !== "PASS" && !lifecycle.violations.length) check("app_isolation", ["app_lifecycle_failed"], {});
     summary.ok = summary.violations.length === 0 && summary.cycles_completed >= opts.cycles;
     writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
     process.stdout.write(`${summary.ok ? "SOAK_PASS" : "SOAK_FAIL"} ${summaryPath} ${eventsPath}\n`);

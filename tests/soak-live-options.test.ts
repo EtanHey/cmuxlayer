@@ -2,24 +2,39 @@ import { describe, expect, it } from "vitest";
 import { options, cycleAssignment, isPoolSeatDead } from "../scripts/soak-live-options.mjs";
 
 describe("soak runner options", () => {
-  const base = ["--agent-id", "scratch"];
+  const base = ["--agent-id", "scratch", "--private-home", "/private-soak-home"];
 
-  it("keeps the original fresh-seat defaults", () => {
-    expect(options(base)).toMatchObject({ pool: 0, freshEvery: 0,
-      claudeModel: null, codexModel: "gpt-6-sol", codexEffort: "low" });
+  it("keeps the duration gate with a small cheap pool", () => {
+    expect(options(base)).toMatchObject({ pool: 2, freshEvery: 5, cycles: 40, durationMinutes: 60,
+      claudeModel: "haiku", codexModel: "gpt-6-luna", codexEffort: "low" });
   });
 
   it("accepts low-drain model and pool settings", () => {
     expect(options([...base, "--claude-model", "haiku", "--codex-model", "gpt-6-luna",
-      "--codex-effort", "low", "--pool", "4"])).toMatchObject({
+      "--codex-effort", "low", "--pool", "2"])).toMatchObject({
       claudeModel: "haiku", codexModel: "gpt-6-luna", codexEffort: "low",
-      pool: 4, freshEvery: 5,
+      pool: 2, freshEvery: 5,
     });
+  });
+
+  it("rejects expensive models, oversized pools, and production inbox reads", () => {
+    for (const args of [["--codex-model", "gpt-6-sol"], ["--codex-effort", "high"],
+      ["--claude-model", "opus"], ["--pool", "4"], ["--lead-agent-id", "production-lead"]]) {
+      expect(() => options([...base, ...args])).toThrow(/soak/);
+    }
+  });
+
+  it("refuses reduced-duration or incomplete M1 release gates", () => {
+    expect(() => options([...base, "--target", "m1-gate", "--cases", "a,b,c"])).toThrow(/release gate/);
+    expect(() => options([...base, "--target", "m1-gate", "--cases", "a,b,c,d,e,f,g", "--duration-minutes", "0"])).toThrow(/release gate/);
+    expect(options([...base, "--target", "m1-gate", "--cases", "a,b,c,d,e,f,g,h"])).toMatchObject({ cycles: 40, durationMinutes: 60 });
+    expect(options(["--agent-id", "scratch", "--dry-run", "true"])).toMatchObject({ dryRun: true });
+    expect(() => options(["--agent-id", "scratch"])).toThrow(/private-home/);
   });
 
   it("rejects a pool smaller than concurrency and unusable fresh intervals", () => {
     expect(() => options([...base, "--pool", "1"])).toThrow(/pool/);
-    expect(() => options([...base, "--pool", "4", "--fresh-every", "0"])).toThrow(/fresh-every/);
+    expect(() => options([...base, "--pool", "2", "--fresh-every", "0"])).toThrow(/fresh-every/);
   });
 });
 
