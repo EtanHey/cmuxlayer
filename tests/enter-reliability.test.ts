@@ -787,9 +787,128 @@ describe("enter reliability", () => {
     10_000,
   );
 
+  // Captured Claude geometry; transport outcomes below are simulated.
+  const deadlockDraft = readFileSync(new URL("./fixtures/a3-claude/soak_pending_boot_830.txt", import.meta.url), "utf8");
+  const deadlockReady = readFileSync(new URL("./fixtures/a3-claude/ready.txt", import.meta.url), "utf8");
+  const deadlockText = "Reply exactly SOAK_OK_29 then stop. ; cmuxlayer contract for capture-agent: Read and follow /home/capture-user/.cmux/agents/capture-agent/contract.md";
+  const deadlockTranscript = deadlockDraft.slice(deadlockDraft.indexOf("❯"), deadlockDraft.lastIndexOf("\n  ⎇"));
+
+  it.each(["exact", "foreign", "busy", "transcript", "empty", "collapsed"])("#1021 synchronous retry requires the whole idle composer (%s)", async shape => {
+    const client = new FakeClaudeSurfaceClient();
+    client.preReturnScreenText = deadlockReady;
+    client.postReturnPendingScreenText = shape === "foreign" ? deadlockDraft.replace("contract.md", "contract.md HUMAN_WORDS") :
+      shape === "busy" ? deadlockDraft.replace("\n❯", "\n✻ Working\n❯") :
+      shape === "transcript" ? deadlockDraft.replace("\n❯", `\n${deadlockTranscript}\n❯`) :
+      shape === "empty" ? deadlockReady :
+      shape === "collapsed" ? deadlockReady.replace("❯ ", "❯ [Pasted text #1 +2 lines]") : deadlockDraft;
+    client.postReturnScreenText = deadlockReady.replace("\n\n", `\n${deadlockText}\n`);
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const resultPromise = runWithCallerContext({ surfaceId: target.surface_id }, () => server._registeredTools.send_to.handler({ agent_id: target.agent_id, text: deadlockText }, {}));
+    await vi.advanceTimersByTimeAsync(6_000);
+    const result = parseResult(await resultPromise);
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(shape === "exact" ? 2 : 1);
+    if (shape === "exact") expect(result.submit_verified).toBe(true);
+  });
+
+  it.each(["key", "agent", "targeting"])("#1021 recovers a real wrapped Claude pending draft via %s", async mode => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 100;
+    client.preReturnScreenText = deadlockReady;
+    client.postReturnPendingScreenText = deadlockDraft.replace("\n❯", "\n✻ Working\n❯");
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const asCaller = <T>(fn: () => T) => runWithCallerContext({ surfaceId: target.surface_id }, fn);
+    const firstPromise = asCaller(() => server._registeredTools.send_to.handler({ agent_id: target.agent_id, text: deadlockText }, {}));
+    await vi.advanceTimersByTimeAsync(6_000);
+    const first = parseResult(await firstPromise);
+    expect(first.delivery_state).toBe("pending_verify");
+    client.postReturnPendingScreenText = deadlockDraft;
+    client.requiredReturns = client.sendKeyCalls.filter(key => key === "return").length + 1;
+    client.postReturnScreenText = deadlockReady.replace("\n\n", `\n${deadlockText}\n`);
+    const retryPromise = asCaller(() => server._registeredTools.send_to.handler(
+      mode === "key" ? { mode, surface: target.surface_id, text: "return" } :
+      mode === "targeting" ? { mode: "agent", targeting: { agent_ids: [target.agent_id] }, text: deadlockText } :
+      { mode, agent_id: target.agent_id, text: deadlockText }, {}));
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = parseResult(await retryPromise);
+    const recovered = mode === "targeting" ? result.receipts[0] : result;
+    expect(recovered, JSON.stringify(result)).toMatchObject({ submit_verified: true });
+    expect(client.sendCalls).toEqual([deadlockText]);
+    if (mode !== "key") expect(recovered.delivery_id).toBe(first.delivery_id);
+  });
+
+  it.each(["owned", "anonymous", "exhausted", "foreign", "empty", "transcript", "session", "collapsed"])("#1021 pending sweep retries only its exact idle Claude draft (%s)", async shape => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 100;
+    client.preReturnScreenText = deadlockReady;
+    client.postReturnPendingScreenText = deadlockDraft.replace("\n❯", "\n✻ Working\n❯");
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const asCaller = <T>(fn: () => T) => runWithCallerContext(shape === "anonymous" ? undefined : { surfaceId: target.surface_id }, fn);
+    const firstPromise = asCaller(() => server._registeredTools.send_to.handler({ agent_id: target.agent_id, text: deadlockText }, {}));
+    await vi.advanceTimersByTimeAsync(6_000);
+    const first = parseResult(await firstPromise);
+    expect(first.delivery_state).toBe("pending_verify");
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(1);
+    // Initialization arms the sweep after createReliabilityServer's first
+    // dispose. Stop that sweep and allow its last read's cadence to expire.
+    const engine = engineForTests(server);
+    engine.dispose();
+    await vi.advanceTimersByTimeAsync(5_000);
+    client.postReturnPendingScreenText = shape === "foreign" ? deadlockDraft.replace("contract.md", "contract.md HUMAN_WORDS") :
+      shape === "empty" ? deadlockReady :
+      shape === "transcript" ? deadlockDraft.replace("\n❯", `\n${deadlockTranscript}\n❯`) :
+      shape === "collapsed" ? deadlockReady.replace("❯ ", "❯ [Pasted text #1 +2 lines]") : deadlockDraft;
+    if (shape === "session") {
+      const engine = engineForTests(server);
+      const changed = { ...target, cli_session_id: "restarted-session" };
+      engine.stateMgr.writeState(changed); engine.getRegistry().set(target.agent_id, changed);
+    }
+    client.requiredReturns = shape === "exhausted" ? 100 : 2;
+    client.postReturnScreenText = deadlockReady.replace("\n\n", `\n${deadlockText}\n`);
+    const sweep = engine.verifyPendingDeliveries();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await sweep;
+    const owned = ["owned", "anonymous", "exhausted"].includes(shape);
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(owned ? 2 : 1);
+    if (owned && shape !== "exhausted") expect(engine.getDeliveryReceipt(first.delivery_id)).toMatchObject({ submit_verified: true, terminal: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await engine.verifyPendingDeliveries();
+    expect(client.sendKeyCalls.filter(key => key === "return")).toHaveLength(owned ? 2 : 1);
+    expect(client.sendCalls).toEqual([deadlockText]);
+  });
+
+  it.each(["foreign", "empty", "transcript"])("#1021 key Return rechecks the last composer frame (%s)", async shape => {
+    const client = new FakeClaudeSurfaceClient();
+    client.requiredReturns = 100;
+    client.preReturnScreenText = deadlockReady;
+    client.postReturnPendingScreenText = deadlockDraft.replace("\n❯", "\n✻ Working\n❯");
+    const read = client.readScreen.bind(client);
+    let reads = 0;
+    let finalRead = false;
+    client.readScreen = (...args) => {
+      if (finalRead && ++reads >= 2) client.postReturnPendingScreenText = shape === "foreign" ? deadlockDraft.replace("contract.md", "contract.md HUMAN_WORDS") :
+        shape === "empty" ? deadlockReady : deadlockDraft.replace("\n❯", `\n${deadlockTranscript}\n❯`);
+      return read(...args);
+    };
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const asCaller = <T>(fn: () => T) => runWithCallerContext({ surfaceId: target.surface_id }, fn);
+    const first = asCaller(() => server._registeredTools.send_to.handler({ agent_id: target.agent_id, text: deadlockText }, {}));
+    await vi.advanceTimersByTimeAsync(6_000); await first;
+    client.postReturnPendingScreenText = deadlockDraft;
+    finalRead = true;
+    const before = client.sendKeyCalls.length;
+    const retry = asCaller(() => server._registeredTools.send_to.handler({ mode: "key", surface: target.surface_id, text: "return" }, {}));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(parseResult(await retry).submit_verified).not.toBe(true);
+    expect(client.sendKeyCalls).toHaveLength(before);
+  });
+
   it.each(["key", "agent"])("#636 D1 lets the original caller retry its exhausted owned Claude draft (%s)", async mode => {
     const client = new FakeClaudeSurfaceClient();
-    client.requiredReturns = 3;
+    client.requiredReturns = 2;
     client.preReturnScreenText = "Claude Code\n✻ Working\n❯";
     client.postReturnPendingScreenText = "Claude Code\n✻ Working\n❯ D1 caller-owned exhausted draft";
     server = createReliabilityServer(client);
@@ -813,7 +932,7 @@ describe("enter reliability", () => {
       ok: false,
       error_code: "submit_unverified",
       delivery_state: "pending_verify",
-      retry_count: 1,
+      retry_count: 0,
       typed: true,
       submit_verified: null,
     });
@@ -838,7 +957,7 @@ describe("enter reliability", () => {
       submit_verified: true,
     });
     expect(client.sendCalls).toEqual(["D1 caller-owned exhausted draft"]);
-    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(3);
+    expect(client.sendKeyCalls.filter((key) => key === "return")).toHaveLength(2);
     expect(
       __submitEvidenceTestHooks.screenShowsPendingInput(
         finalScreen,
