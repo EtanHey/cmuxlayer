@@ -12,6 +12,7 @@ import {
   cleanScreenText,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "../screen-parser.js";
 import type { ParsedScreenResult } from "../types.js";
@@ -96,13 +97,21 @@ export function haltDwellMs(this: HaltHost, type: AgentHaltType): number {
   }
 }
 
-export function haltUnblockAction(this: HaltHost, agent: AgentRecord, type: AgentHaltType): string {
+export function haltUnblockAction(
+  this: HaltHost,
+  agent: AgentRecord,
+  type: AgentHaltType,
+  screenText?: string,
+): string {
   switch (type) {
-    case "awaiting_input":
+    case "awaiting_input": {
+      const overlayKey = isCodexDismissibleOverlay(screenText ?? "") ? "escape" : "return";
+      const overlayHint = overlayKey === "escape" ? "overlay" : "prompt";
       return (
-        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the prompt, ` +
-        `send_to({mode: "key", surface: "${agent.surface_id}", text: "return"})`
+        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the ${overlayHint}, ` +
+        `send_to({mode: "key", surface: "${agent.surface_id}", text: "${overlayKey}"})`
       );
+    }
     case "idle_without_done":
       return `send_to({agent_id: "${agent.agent_id}", text: "Continue and report status."})`;
     case "wedged":
@@ -482,7 +491,7 @@ export async function maybeEscalateLiveHalt(
   ctx: SweepAgentContext = {},
 ): Promise<AgentRecord> {
   if (!this.assertSweepInputCurrent(ctx)) return agent;
-  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending"].includes(receipt.delivery_state));
+  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending", "queued_followup"].includes(receipt.delivery_state));
   const nowMs = this.haltNow();
   const nowIso = new Date(nowMs).toISOString();
   const parsed = parseScreen(screenText);
@@ -554,10 +563,12 @@ export async function maybeEscalateLiveHalt(
   agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
   if (agent.halt_escalation === false) return agent;
   const hasHarnessApiError = parsed.errors.some((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   if (
-    !staleDelivery && !hasHarnessApiError &&
+    !staleDelivery &&
+    !hasHarnessApiError &&
+    !isCodexDismissibleOverlay(screenText) &&
     parsed.paused !== true &&
     (parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -637,7 +648,7 @@ export async function maybeEscalateLiveHalt(
   }
   if (!haltType) return this.clearHaltEpisode(agent);
   const harnessApiError = parsed.errors.find((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   const haltObservableAction =
     haltType === "delivery_stalled"
@@ -756,7 +767,7 @@ export async function maybeEscalateLiveHalt(
     0,
     Math.floor((nowMs - startedAtMs) / 1_000),
   );
-  const unblockAction = this.haltUnblockAction(episode, haltType);
+  const unblockAction = this.haltUnblockAction(episode, haltType, screenText);
   try {
     dispatchOnce(
       ancestor.agent_id,

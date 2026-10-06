@@ -27,7 +27,7 @@ import type {
 import {
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
-  isCodexAccountSecurityBanner,
+  isCodexDismissibleOverlay,
   isPickerOrMenuScreen,
   parseScreen,
   codexScreenHasActiveTurn,
@@ -1255,7 +1255,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           submit_evidence: null,
           submit_verification_reason: null,
           retry_count: retryCount,
-          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? "queued",
+          delivery: codexPendingDeliveryKind(snapshot.text, opts.text, opts.pre_type_screen) ?? (opts.codex_busy_mode === "queue" ? "queued" : "steer_pending"),
         };
       }
       if (
@@ -1814,7 +1814,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
-        const hadBanner = isCodexAccountSecurityBanner(snapshot.text);
+        const hadBanner = isCodexDismissibleOverlay(snapshot.text);
         securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
           (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
         const safe = await dismissAccountSecurityBanner(snapshot, {
@@ -1828,7 +1828,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             if (!closed) throw new DeliverySafetyGateError("account_security_banner_not_dismissed", snapshot.parsed);
             return closed;
           },
-        });
+        }, { agent_id: resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.agent_id ?? null,
+          surface: opts.surface, eventLog: stateMgr.getEventLog() });
         securityDismissed ||= hadBanner;
         inputSafetyObserved = true;
         return safe;
@@ -2639,7 +2640,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           lines: 80,
           scrollback: false,
         });
-        if (isCodexAccountSecurityBanner(screen.text)) {
+        if (isCodexDismissibleOverlay(screen.text)) {
           screen = await withSurfaceWrite(target.surface, async () => {
             const assertRoute = async () => {
               await opts.assertStableSurfaceIdentity?.();
@@ -2650,7 +2651,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             return dismissAccountSecurityBanner(await read(), {
               escape: async () => { await sendKeyWithRetry(target.surface, "escape", target.workspace, assertRoute, 1); },
               read,
-            });
+            }, { agent_id: resolveLatestSurfaceAgentRecord(stateMgr, target.surface, opts.stableSurfaceIdentity)?.agent_id ?? null,
+              surface: target.surface, eventLog: stateMgr.getEventLog() });
           }, { stableSurfaceIdentity: opts.stableSurfaceIdentity });
         }
         lastText = screen.text;

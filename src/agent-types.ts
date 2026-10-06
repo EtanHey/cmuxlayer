@@ -583,6 +583,16 @@ export interface CloseForensicsEvent {
   client_context: CloseForensicsClientContext;
 }
 
+/** An Esc-only attempt on an observed Codex setup overlay; no screen content. */
+export interface AccountSecurityBannerEvent {
+  ts: string;
+  event_type: "account_security_banner";
+  agent_id: string | null;
+  surface: string;
+  variant: "advanced_account_security" | "daybreak" | "security" | "hooks_review";
+  outcome: "dismissed" | "failed";
+}
+
 export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
@@ -591,7 +601,8 @@ export type EventLogEntry =
   | AgentCliExitEvent
   | AgentHaltEscalationEvent
   | CloseTelemetryEvent
-  | CloseForensicsEvent;
+  | CloseForensicsEvent
+  | AccountSecurityBannerEvent;
 
 export interface WaitResult {
   matched: boolean;

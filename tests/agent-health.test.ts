@@ -60,6 +60,13 @@ describe("agent lifecycle health", () => {
     );
   });
 
+  it("surfaces Codex model capacity as blocking health", () => {
+    const health = evaluateAgentHealth(makeRecord(), { screen_status: "frozen", screen_agent_type: "codex", screen_control_state: "unknown", screen_errors: ["model_at_capacity"] });
+    expect(health.status).not.toBe("healthy");
+    expect(health.issue_codes).toContain("harness_api_error");
+    expect(health.issues.join(" ")).toContain("model_at_capacity");
+  });
+
   it("keeps a fresh agent healthy when it only has info-tier launch-time issues", () => {
     const createdAt = "2026-06-26T20:00:00.000Z";
     const health = evaluateAgentHealth(
