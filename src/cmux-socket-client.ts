@@ -35,6 +35,7 @@ import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
+import { appendDaemonLog, focusRpcLogFields } from "./daemon-log.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -188,9 +189,11 @@ export class CmuxSocketClient {
     if (typeof params.surface_id === "string") {
       assertCanonicalSurfaceRef(params.surface_id);
     }
+    const focusFields = focusRpcLogFields(method, params);
     return this.withConnectionRetry(
       async () => {
         await this.ensureAuthenticated();
+        if (focusFields) appendDaemonLog("focus_rpc", focusFields);
         return this.transport.call<T>(method, params, {
           polling: CMUX_POLLING_METHODS.has(method),
         });

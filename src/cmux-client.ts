@@ -28,6 +28,7 @@ import { CmuxSocketError } from "./cmux-socket-error.js";
 import { parseCmuxStatusFrame } from "./cmux-status-frame.js";
 import { isCmuxAccessControlDenied } from "./cmux-access-control.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
+import { appendDaemonLog, focusRpcLogFields } from "./daemon-log.js";
 
 const execFileAsync = promisify(execFile);
 /**
@@ -151,6 +152,12 @@ export class CmuxClient {
       const env = this.env;
       const bin = this.resolveBin(env);
       const cliArgs = ["--json", "--id-format", "both", ...args];
+      const focusFields = args[0] === "select-workspace"
+        ? focusRpcLogFields("workspace.select", { workspace_id: args[args.indexOf("--workspace") + 1] })
+        : args[0] === "rpc" && (args[1] === "surface.focus" || args[1] === "workspace.select")
+          ? focusRpcLogFields(args[1], JSON.parse(args[2]))
+          : null;
+      if (focusFields) appendDaemonLog("focus_rpc", focusFields);
       const { stdout } = this.exec
         ? await this.exec(
             bin,

@@ -160,6 +160,19 @@ function singleLine(text: string): string {
 export type LogFieldValue = string | number | boolean | null;
 export type LogFields = Readonly<Record<string, LogFieldValue>>;
 
+/** Capture before async dispatch so the originating code path survives awaits.
+ * Only relative code locations enter the log; never emit a raw stack/home path.
+ */
+export function focusRpcLogFields(method: string, params: Record<string, unknown>): LogFields | null {
+  if (!activeLog || (method !== "workspace.select" && method !== "surface.focus")) return null;
+  const caller = (new Error().stack ?? "").split("\n")
+    .map((line) => line.match(/(?:^|[/\\])((?:src|dist|tests)\/[^():\s]+:\d+:\d+)/)?.[1])
+    .find((location) => location && !/(?:^|\/)(?:daemon-log|cmux-client|cmux-socket-client|cmux-transport-self-heal|surface-topology)\.[cm]?[jt]s:/.test(location))
+    ?? "unknown";
+  const target = params[method === "workspace.select" ? "workspace_id" : "surface_id"];
+  return { method, target: typeof target === "string" ? target : null, caller };
+}
+
 const SAFE_FIELD_KEY = /^[a-z][a-z0-9_]{0,31}$/;
 
 /** A code-like value: one line, redacted, restricted charset, short. */

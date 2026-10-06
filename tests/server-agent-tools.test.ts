@@ -1600,6 +1600,16 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.error).toContain('effort is required for cli "codex"');
   });
 
+  it("terminal focus default preserves parsed legacy background creation", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ type: "terminal" }), {});
+    expect(result.structuredContent).toMatchObject({ ok: true, type: "terminal" });
+    const creation = exec.mock.calls.find(([, args]) => args.includes("new-split") || args.includes("new-surface"))![1];
+    expect(creation[creation.indexOf("--focus") + 1]).toBe("false");
+  });
+
   it("exempts terminal spawns even with Codex selected", async () => {
     const server = createLifecycleServer(makeLifecycleExec());
     const result = await (server as any)._registeredTools.spawn_agent.handler({ type: "terminal", cli: "codex" }, {});
@@ -2822,7 +2832,17 @@ describe("agent lifecycle tool handlers", () => {
     expect(exec.mock.calls.some(([, args]) => args.some((arg: string) => ["new-split", "new-surface", "send", "send-key"].includes(arg)))).toBe(false);
   });
 
-  it("spawn_agent resume_agent_id rebinds a captured session without minting a new public id", async () => {
+  it.each([
+    { metadata: "surface", focus: undefined, expected: false },
+    { metadata: "surface", focus: false, expected: false },
+    { metadata: "surface", focus: true, expected: true },
+    { metadata: "terminal", focus: undefined, expected: false },
+    { metadata: "terminal", focus: false, expected: false },
+    { metadata: "terminal", focus: true, expected: true },
+    { metadata: "legacy", focus: undefined, expected: true },
+    { metadata: "legacy", focus: false, expected: false },
+    { metadata: "legacy", focus: true, expected: true },
+  ])("spawn_agent resume focus=$focus metadata=$metadata reaches engine without changing public id", async ({ metadata, focus, expected }) => {
     const agentId = "cmuxlayerCodex-stable-resume";
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
@@ -2837,11 +2857,19 @@ describe("agent lifecycle tool handlers", () => {
       }),
     );
     const exec = makeLifecycleExec();
-    const server = createLifecycleServer(exec);
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
+    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [] });
+    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true }] });
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
-
-    const result = await spawn.handler({ resume_agent_id: agentId }, {} as any);
+    const engine = engineForTests(server);
+    const resume = vi.spyOn(engine, "resumeAgent");
+    expect(spawn.inputSchema.shape.focus.parse(focus)).toBe(focus);
+    const result = await spawn.handler({ resume_agent_id: agentId, focus }, {} as any);
+    expect(resume).toHaveBeenCalledWith(agentId, expect.objectContaining({ focus: expected }));
+    expect(exec.mock.calls.some(([, args]) => args.includes("surface.focus") && args.some((arg: string) => arg.includes("surface:new")))).toBe(expected);
+    if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
     const parsed = parseToolResult(result) as Record<string, unknown>;
 
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
