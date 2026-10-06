@@ -1177,7 +1177,8 @@ export function registerSpawnAgentTool(
             }
 
             await captureSpawnSessionBestEffort(result);
-            if (bootPromptDelivery.delivery_state === "pending_verify" && bootPromptDelivery.delivery_id) {
+            if (bootPromptDelivery.delivery_state === "pending_verify" &&
+                bootPromptDelivery.submit_dispatched === true && bootPromptDelivery.delivery_id) {
               const boot = engine.getAgentState(result.agent_id);
               engine.acceptPendingVerify({
                 delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
