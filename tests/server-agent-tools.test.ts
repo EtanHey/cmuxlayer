@@ -5366,7 +5366,7 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   });
 
-  it("spawn_agent does not insert a leading newline while the launcher shell echo is stale", async () => {
+  it.each([600, 2400])("spawn_agent does not insert a leading newline when the CLI paints after %ims", async (paintMs) => {
     vi.useFakeTimers();
     try {
       const capture = JSON.parse(readFileSync(new URL(
@@ -5399,7 +5399,7 @@ describe("agent lifecycle tool handlers", () => {
         if (command && args.includes("read-screen")) {
           // The accepted first Return has not repainted the terminal yet. The
           // capture's shell echo is indistinguishable from an unsubmitted line.
-          const text = launchedAt === null || Date.now() - launchedAt < 600
+          const text = launchedAt === null || Date.now() - launchedAt < paintMs
             ? capture.frames.shell_echo.replace(/cd .*$/, command)
             : submitted
               ? `OpenAI Codex\n› ${submitted}\nWorking (1s • esc to interrupt)\n› \nGPT-6-Luna low · /tmp/synthetic`
@@ -5411,7 +5411,7 @@ describe("agent lifecycle tool handlers", () => {
       const server = createLifecycleServer(exec);
       const pending = (server as any)._registeredTools.spawn_agent.handler({
         repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
-        mcp_profile: "sterile", prompt: capture.prompt, boot_prompt_timeout_ms: 2_000,
+        mcp_profile: "sterile", prompt: capture.prompt, boot_prompt_timeout_ms: 4_000,
       }, {} as any);
       await vi.advanceTimersByTimeAsync(10_000);
       const result = parseToolResult(await pending);
@@ -5421,10 +5421,11 @@ describe("agent lifecycle tool handlers", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("spawn_agent fails without a second Return when the launcher never starts", async () => {
+  it("spawn_agent recovers a lost launcher Return after observing the pending shell", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launcherReturnCount = 0;
+    const launcherReturnTimes: number[] = [];
     let promptDelivered = false;
     let lastSentText = "";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -5490,6 +5491,7 @@ describe("agent lifecycle tool handlers", () => {
       if (args.includes("send-key")) {
         if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
+          launcherReturnTimes.push(Date.now());
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
@@ -5546,11 +5548,11 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toContain("launcher command remained pending after Return");
+    expect(parsed.ok).toBe(true);
     expect(parsed.workspace_id).toBe("workspace:voice");
-    expect(launcherReturnCount).toBe(1);
-    expect(promptDelivered).toBe(false);
+    expect(launcherReturnCount).toBe(2);
+    expect(launcherReturnTimes[1] - launcherReturnTimes[0]).toBeGreaterThanOrEqual(2500);
+    expect(promptDelivered).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -5567,7 +5569,7 @@ describe("agent lifecycle tool handlers", () => {
           args.includes("set-buffer") &&
           String(args.at(-1) ?? "").includes("file prompt body"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   }, 10_000);
 
   it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
@@ -5615,7 +5617,7 @@ describe("agent lifecycle tool handlers", () => {
         },
         {} as any,
       );
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       const parsed = parseToolResult(await resultPromise);
 
       expect(parsed.ok).toBe(false);
@@ -5625,7 +5627,7 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed.last_10_lines).toContain(
         "bash-5.2$ voicelayerCodex -s --worker -E medium",
       );
-      expect(launcherReturns).toBeGreaterThanOrEqual(1);
+      expect(launcherReturns).toBe(2);
     } finally {
       vi.useRealTimers();
     }

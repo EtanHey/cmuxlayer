@@ -1486,10 +1486,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 ? CLAUDE_PENDING_COMPOSER_RETRY_OBSERVE_MS
                 : CODEX_PENDING_COMPOSER_RETRY_OBSERVE_MS,
             )
-          : opts.source_event === "spawn_agent" &&
-              !hasParsedAgentIdentity(snapshot.parsed)
-            ? 0
-            : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
+          : Math.min(timeoutMs, SEND_INPUT_SAFE_RETRY_OBSERVE_MS);
 
       // Pending input is ambiguous: the first Return may have been missed, or
       // it may have landed while a slow agent has not repainted the composer
@@ -1497,10 +1494,6 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // still definitively holds the original text.
       if (
         !retried &&
-        // An accepted launcher Return can leave a stale shell echo while the
-        // new CLI starts. A replay queues an empty composer line; readiness,
-        // rather than another Return, must resolve this ambiguous evidence.
-        opts.source_event !== "spawn_agent" &&
         retryEligiblePendingInput &&
         retryEligiblePendingSince !== null &&
         Date.now() - retryEligiblePendingSince >= retryObserveMs
@@ -3349,8 +3342,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             press_enter: true,
             source_event: "spawn_agent",
             verify_submit: verifySubmit,
+            // Observe stale shell echoes before recovering a genuinely lost
+            // Return, then leave time to dispatch and verify that recovery.
             submit_verify_timeout_ms: verifySubmit
-              ? SEND_INPUT_RECOVERY_ENTER_DELAY_MS
+              ? SEND_INPUT_SAFE_RETRY_OBSERVE_MS +
+                SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
+                SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS
               : undefined,
             beforeMutation: opts.assertSurfaceBindingCurrent,
           });
