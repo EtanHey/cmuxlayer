@@ -11,8 +11,7 @@ default). Every sampled commit gets a frozen-lockfile dependency installation
 must pass on the candidate. A baseline failure alone never makes a candidate pass.
 
 The banner pair is `7f26603f` → `64260ba3`. The boot pair is `14aa55b5` →
-**provisional #1019 head `f8f0e4ee`**; replace this pin with #1019's merge SHA when
-it lands and identify that change in the PR. Proof mode requires the specific
+**#1019 merge `fee6d9e5f29801e97fa64dabb8bfe0fc41aa5c94`**. Proof mode requires the specific
 banner refusal / contradictory boot receipt on the bug SHA, plus a passing fix.
 
 Rows use real captured text inside a real NIGHTLY PTY and a real dist daemon.

@@ -22,7 +22,7 @@ const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => 
 const productionHome = homedir();
 const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603f", fix: "64260ba3", specimen: "#1007 / composer-overlays/codex-boot.txt" },
-  { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5", fix: "f8f0e4ee", provisional_fix: "#1019 head; replace with merge SHA", specimen: "docs.local/lanes/spawn-p0/live-specimen-1.md" },
+  { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5", fix: "fee6d9e5f29801e97fa64dabb8bfe0fc41aa5c94", fix_source: "#1019 merge", specimen: "docs.local/lanes/spawn-p0/live-specimen-1.md" },
 ];
 let nightlyPid, appTarget, scratch, mcp, daemon, daemonCommand, productionBefore, sequence = 0, lockOwned = false;
 const runAgentIds = new Set();
