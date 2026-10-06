@@ -1126,6 +1126,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const noSubmitEvidenceResult =
       opts.source_event === "spawn_agent" ? null : false;
     const startedAt = Date.now();
+    const pollForSubmit = () => delay(
+      opts.source_event === "spawn_agent"
+        ? Math.min(
+            SEND_INPUT_SUBMIT_VERIFY_POLL_MS,
+            Math.max(0, timeoutMs - (Date.now() - startedAt)),
+          )
+        : SEND_INPUT_SUBMIT_VERIFY_POLL_MS,
+    );
     let retried = false;
     let retryCount = 0;
     let lastCodexRelayKey = opts.submit_key ?? "return";
@@ -1164,7 +1172,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
       if (!snapshot.text.trim()) {
         sawBlankScreen = true;
-        await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+        await pollForSubmit();
         continue;
       }
       sawReadableScreen = true;
@@ -1496,7 +1504,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         !retried &&
         retryEligiblePendingInput &&
         retryEligiblePendingSince !== null &&
-        Date.now() - retryEligiblePendingSince >= retryObserveMs
+        Date.now() - retryEligiblePendingSince >= retryObserveMs &&
+        (opts.source_event !== "spawn_agent" ||
+          Date.now() - startedAt + SEND_INPUT_RECOVERY_ENTER_DELAY_MS < timeoutMs)
       ) {
         await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
         const codexRelay = screenCli === "codex" &&
@@ -1561,7 +1571,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         };
       }
 
-      await delay(SEND_INPUT_SUBMIT_VERIFY_POLL_MS);
+      await pollForSubmit();
     }
     // A latched interrupt is terminal evidence that this verifier cannot
     // attribute the task turn. Never hand it to the marker-unaware background
@@ -1788,6 +1798,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
+    /** Internal remaining readiness budget, sampled after Return. */
+    submit_verify_remaining_budget_ms?: () => number;
     stableSurfaceIdentity?: string | null;
     beforeMutation?: () => Promise<void>;
     timings?: DeliveryPhaseTimings;
@@ -2389,7 +2401,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
               submit_key: submitSelection.key,
               codex_busy_mode: opts.codex_busy_mode,
-              timeout_ms: opts.submit_verify_timeout_ms,
+              timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
+                ? opts.submit_verify_timeout_ms
+                : Math.min(
+                    opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                    opts.submit_verify_remaining_budget_ms(),
+                  ),
               cursor_response_baseline: cursorResponseBaseline,
               pre_type_screen: deliverySafetySnapshot?.text,
               pre_return_screen: requireObservedPayloadBeforeEnter
@@ -3079,10 +3096,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     surface: string;
     workspace?: string;
     timeout_ms?: number;
+    deadline_ms?: number;
     onUpdateShellRelaunch?: () => Promise<void>;
   }): Promise<void> => {
     const timeoutMs = opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS;
-    let deadline = Date.now() + timeoutMs;
+    let deadline = opts.deadline_ms ?? Date.now() + timeoutMs;
+    let firstRead = true;
+    let lastReadUnavailable = false;
     let lastText = "";
     let updateStartedAt: number | null = null;
     let updateElapsedMs = 0;
@@ -3090,13 +3110,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let updateShellRelaunches = 0;
     const updateMaxMs = bootPromptUpdateMaxMs();
 
-    while (Date.now() < deadline || updateStartedAt !== null) {
+    while (firstRead || Date.now() < deadline || updateStartedAt !== null) {
+      firstRead = false;
       try {
         const screen = await client.readScreen(opts.surface, {
           workspace: opts.workspace,
           lines: 80,
           scrollback: false,
         });
+        lastReadUnavailable = false;
         lastText = screen.text;
         const parsed = parseScreen(screen.text);
         const now = Date.now();
@@ -3187,6 +3209,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           throw new SurfaceGoneError(opts.surface, error);
         }
         lastText = error instanceof Error ? error.message : String(error);
+        lastReadUnavailable = true;
       }
 
       const remaining = deadline - Date.now();
@@ -3196,6 +3219,21 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       await delay(Math.min(LAUNCH_SHELL_READY_POLL_MS, remaining));
     }
 
+    // Keep the timeout verdict. One diagnostic refresh after a transient read
+    // failure preserves useful failure frames without retrying input or waiting
+    // for readiness again.
+    if (lastReadUnavailable) {
+      await delay(LAUNCH_SHELL_READY_POLL_MS);
+      try {
+        lastText = (await client.readScreen(opts.surface, {
+          workspace: opts.workspace, lines: 80, scrollback: false,
+        })).text;
+      } catch (error) {
+        if (isSurfaceGoneReadFailure(error, opts.surface)) {
+          throw new SurfaceGoneError(opts.surface, error);
+        }
+      }
+    }
     throw new BootPromptTimeoutError(
       `Timed out after ${timeoutMs}ms waiting for agent launch readiness on ${opts.surface}`,
       tailLines(lastText, 10),
@@ -3253,6 +3291,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     await withSurfaceWrite(
       opts.surface,
       async () => {
+        // Readiness starts after Return; typing has its own delivery phase.
+        let launchDeadline: number | undefined;
+        const remainingLaunchBudget = () => {
+          launchDeadline ??= Date.now() +
+            (opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS);
+          return Math.max(0, launchDeadline - Date.now());
+        };
         const readLauncherScreen = () =>
           client.readScreen(opts.surface, {
             workspace: opts.workspace,
@@ -3345,10 +3390,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             // Observe stale shell echoes before recovering a genuinely lost
             // Return, then leave time to dispatch and verify that recovery.
             submit_verify_timeout_ms: verifySubmit
-              ? SEND_INPUT_SAFE_RETRY_OBSERVE_MS +
-                SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
-                SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS
+              ? Math.min(
+                  SEND_INPUT_SAFE_RETRY_OBSERVE_MS +
+                    SEND_INPUT_RECOVERY_ENTER_DELAY_MS +
+                    SEND_INPUT_POST_RETRY_VERIFY_GRACE_MS,
+                  opts.timeout_ms ?? LAUNCH_SUBMIT_READY_TIMEOUT_MS,
+                )
               : undefined,
+            submit_verify_remaining_budget_ms: verifySubmit ? remainingLaunchBudget : undefined,
             beforeMutation: opts.assertSurfaceBindingCurrent,
           });
         const recoverCorruptedLauncherLine = async (): Promise<void> => {
@@ -3425,6 +3474,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               surface: opts.surface,
               workspace: opts.workspace,
               timeout_ms: opts.timeout_ms,
+              deadline_ms: launchDeadline,
               onUpdateShellRelaunch: relaunchOriginalCommand,
             });
           } catch (readinessError) {
@@ -3448,6 +3498,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 surface: opts.surface,
                 workspace: opts.workspace,
                 timeout_ms: opts.timeout_ms,
+              deadline_ms: launchDeadline,
                 onUpdateShellRelaunch: relaunchOriginalCommand,
               });
               return;

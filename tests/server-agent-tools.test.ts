@@ -5421,6 +5421,59 @@ describe("agent lifecycle tool handlers", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("spawn_agent bounds launch readiness by the remaining budget after a slow screen read", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let returnedAt = 0;
+      let completedAt = 0;
+      let slowReadDone = false;
+      let launcherReturns = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if ((args.includes("send") || args.includes("set-buffer")) &&
+            text.includes("voicelayerCodex -s")) {
+          command = text;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          launcherReturns += 1;
+          returnedAt ||= Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          if (returnedAt && !slowReadDone) {
+            slowReadDone = true;
+            await new Promise((resolve) => setTimeout(resolve, 750));
+          }
+          return {
+            stdout: JSON.stringify({ surface: "surface:new", text: `$ ${command}`,
+              lines: 80, scrollback_used: false }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: "remaining launch budget",
+        boot_prompt_timeout_ms: 1_000,
+      }, {} as any).then((result: unknown) => { completedAt = Date.now(); return result; });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(parseToolResult(await pending).ok).toBe(false);
+      const verification = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+        .trim().split("\n").map((line) => JSON.parse(line))
+        .find((entry) => entry.event_type === "spawn_agent" && entry.press_enter === true);
+      expect(verification).toMatchObject({ submit_verified: false, retry_count: 0 });
+      expect(Date.parse(verification.ts) - returnedAt).toBeGreaterThanOrEqual(750);
+      expect(Date.parse(verification.ts) - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(completedAt - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(launcherReturns).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("spawn_agent recovers a lost launcher Return after observing the pending shell", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
