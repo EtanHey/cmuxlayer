@@ -1730,7 +1730,7 @@ describe("daemon performance budget", () => {
       );
     }
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(33380548570);
+    expect(committed.source.workflow_run_id).toBe(37512215757);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
