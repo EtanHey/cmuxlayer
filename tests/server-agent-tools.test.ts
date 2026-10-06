@@ -1613,7 +1613,9 @@ describe("lean spawn tool responses", () => {
     const server = createLifecycleServer(exec);
     const spawn = (server as any)._registeredTools.spawn_agent;
     const result = await spawn.handler(spawn.inputSchema.parse({ type: "terminal" }), {});
-    expect(result.structuredContent).toMatchObject({ ok: true, type: "terminal" });
+    expect(result.structuredContent).toMatchObject({
+      ok: true, agent_id: null, state: "started", delivered: false,
+    });
     const creation = exec.mock.calls.find(([, args]) => args.includes("new-split") || args.includes("new-surface"))![1];
     expect(creation[creation.indexOf("--focus") + 1]).toBe("false");
   });
