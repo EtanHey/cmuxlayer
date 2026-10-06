@@ -68,3 +68,10 @@ it("direct socket screens preserve UTF-8 split across packets and every blank/co
   try { expect((await rpc(path, "surface.read_text", { surface_id: "synthetic" })).text).toBe(text); }
   finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });
+
+it("M1 gate needs an observed matching repoGolem launch, never a registry-less raw fallback", async () => {
+  const { requireLauncherMode } = await import("../scripts/xmac/target.mjs");
+  expect(() => requireLauncherMode({ launch_mode: "raw", launcher_name: null }, "fixtureCodex")).toThrow("launcher gate mismatch");
+  expect(() => requireLauncherMode({ launch_mode: "launcher", launcher_name: "otherCodex" }, "fixtureCodex")).toThrow("launcher gate mismatch");
+  expect(() => requireLauncherMode({ launch_mode: "launcher", launcher_name: "fixtureCodex" }, "fixtureCodex")).not.toThrow();
+});

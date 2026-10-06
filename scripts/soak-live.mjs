@@ -14,6 +14,7 @@ import {
 import { deliveryCaseCaller, runDeliveryCases } from "./soak-live-delivery-cases.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
 import { pollDelivery, runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
+import { requireLauncherMode } from "./xmac/target.mjs";
 import { startSoakRuntime } from "./soak-runtime.mjs";
 import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
 
@@ -337,7 +338,7 @@ async function main() {
     return close?.surface_closed === true;
   };
   const spawnSeat = async (cycle, cli, marker) => {
-    const spawn = await call("spawn_agent", { repo: "soak", cwd: runtime.cwd, worktree: false, workspace: WORKSPACE,
+    const spawn = await call("spawn_agent", { repo: opts.target === "m1-gate" ? opts.repo : "soak", cwd: runtime.cwd, worktree: false, workspace: WORKSPACE,
       cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
         : opts.claudeModel ? { model: opts.claudeModel } : {}),
       role: "worker", authority: "worker", placement: "right", force_new: true,
@@ -347,6 +348,10 @@ async function main() {
     if (seat.agentId) {
       active.set(seat.agentId, { surface: seat.surface, surfaceUuid: seat.surfaceUuid });
       spawnedIds.add(seat.agentId);
+    }
+    if (opts.target === "m1-gate" && seat.agentId) {
+      try { requireLauncherMode(JSON.parse(readFileSync(join(stateDir, seat.agentId, "state.json"), "utf8")), runtime.receipt.expected_launchers[cli]); }
+      catch (error) { check("launcher_gate", ["launcher_mode_unverified"], { cycle, cli, error: String(error) }); }
     }
     check("spawn_receipt", checkReceipt(spawn.boot_prompt_receipt ?? {
       submit_verified: spawn.boot_prompt_submit_verified,

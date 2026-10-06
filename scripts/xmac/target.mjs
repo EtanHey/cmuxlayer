@@ -43,3 +43,7 @@ export function distDigest(root) {
   walk(""); if (!count) throw new Error("compiled reference dist is empty");
   return hash.digest("hex");
 }
+
+export function requireLauncherMode(record, expectedName) {
+  if (record?.launch_mode !== "launcher" || record.launcher_name !== expectedName) throw new Error("M1 launcher gate mismatch: raw or unverified launch");
+}

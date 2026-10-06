@@ -4,10 +4,10 @@ function assertRange(value, minimum, maximum, message) {
 
 export function options(argv) {
   const opts = { cycles: 40, concurrency: 2, timeoutMs: 90_000, durationMinutes: 60,
-    app: "/Applications/cmux NIGHTLY.app", target: "nightly", gateHost: "", dmg: "", privateHome: "", dryRun: false,
+    app: "/Applications/cmux NIGHTLY.app", target: "nightly", repo: "cmuxlayer", gateHost: "", dmg: "", privateHome: "", dryRun: false,
     agentId: process.env.GOLEM_SEAT || "", leadAgentId: "", entry: process.env.CMUXLAYER_SOAK_ENTRY || "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer",
     claudeModel: "haiku", codexModel: "gpt-6-luna", codexEffort: "low", pool: 2, freshEvery: 0, cases: [], queueDeadlineMs: 90_000, longTurnMinutes: 2 };
-  const fields = { "--private-home": "privateHome", "--app": "app", "--target": "target", "--gate-host": "gateHost", "--dmg": "dmg", "--dry-run": "dryRun", "--cycles": "cycles", "--concurrency": "concurrency",
+  const fields = { "--repo": "repo", "--private-home": "privateHome", "--app": "app", "--target": "target", "--gate-host": "gateHost", "--dmg": "dmg", "--dry-run": "dryRun", "--cycles": "cycles", "--concurrency": "concurrency",
     "--timeout-ms": "timeoutMs", "--duration-minutes": "durationMinutes",
     "--agent-id": "agentId", "--lead-agent-id": "leadAgentId", "--entry": "entry",
     "--claude-model": "claudeModel", "--codex-model": "codexModel",
