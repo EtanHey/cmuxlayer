@@ -93,16 +93,16 @@ it("distinguishes absent, live and abandoned sockets without deleting them", asy
 });
 
 it("M1 uses its real auth HOME while daemon state and inbox stay per-run private", () => {
-  const env = targetEnvironment({ HOME: "/Users/test-operator", PATH: "/bin", CODEX_HOME: "/unrelated/auth",
+  const env = targetEnvironment({ HOME: "/home/test-operator", PATH: "/bin", CODEX_HOME: "/unrelated/auth",
     CMUXLAYER_STATE_DIR: "/production/state", CMUXLAYER_INBOX_BASE_DIR: "/production/inbox" },
-    "/scratch", { target: "m1-gate", app: "/Applications/cmux.app" }, "/Users/test-operator");
-  expect(env).toMatchObject({ HOME: "/Users/test-operator", CODEX_HOME: "/Users/test-operator/.codex",
-    CLAUDE_CONFIG_DIR: "/Users/test-operator/.claude", CMUXLAYER_HARNESS_HOME: "/Users/test-operator",
+    "/scratch", { target: "m1-gate", app: "/Applications/cmux.app" }, "/home/test-operator");
+  expect(env).toMatchObject({ HOME: "/home/test-operator", CODEX_HOME: "/home/test-operator/.codex",
+    CLAUDE_CONFIG_DIR: "/home/test-operator/.claude", CMUXLAYER_HARNESS_HOME: "/home/test-operator",
     CMUXLAYER_DAEMON_SOCKET: "/scratch/d.sock", CMUXLAYER_STATE_DIR: "/scratch/state",
     CMUXLAYER_INBOX_BASE_DIR: "/scratch/inbox", CMUX_SOCKET_PATH: "/tmp/cmux-soak-stable.sock" });
 });
 it("NIGHTLY does not inherit the operator's real auth HOME", () => {
-  expect(targetEnvironment({ HOME: "/Users/test-operator", PATH: "/bin" }, "/scratch",
-    { target: "nightly", app: "/Applications/cmux NIGHTLY.app" }, "/Users/test-operator"))
+  expect(targetEnvironment({ HOME: "/home/test-operator", PATH: "/bin" }, "/scratch",
+    { target: "nightly", app: "/Applications/cmux NIGHTLY.app" }, "/home/test-operator"))
     .toMatchObject({ HOME: "/scratch/home", CMUXLAYER_STATE_DIR: "/scratch/state", CMUXLAYER_INBOX_BASE_DIR: "/scratch/inbox" });
 });
