@@ -67,6 +67,25 @@ if (
 ) {
   throw new Error("runner rebase requires verified CI source evidence");
 }
+const rebaseRows = runnerRebase
+  ? [...new Set((process.env.CMUXLAYER_BENCH_REBASE_ROWS ?? "").split(",").map((row) => row.trim()))]
+  : [];
+if (runnerRebase) {
+  if (rebaseRows.some((row) => row === "")) {
+    throw new Error("runner rebase requires a non-empty rebase row list");
+  }
+  const knownRows = new Set([
+    ...CANONICAL_OPERATIONS.flatMap((operation) =>
+      ["p50_ms", "p95_ms", "lock_hold_ms"].map((metric) => `${operation}.${metric}`)),
+    "cli_send_ms",
+  ]);
+  for (const row of rebaseRows) {
+    if (!knownRows.has(row)) throw new Error(`unknown rebase row: ${row}`);
+  }
+  if (migratingLegacyBaseline) {
+    throw new Error("selective runner rebase requires a canonical committed baseline");
+  }
+}
 const samples = runnerRebase
   ? [JSON.parse(await readFile(importedResultPath, "utf8"))]
   : [];
@@ -159,8 +178,8 @@ for (const sample of samples) {
 }
 
 const measured = maximumBenchmarkMeasurements(samples);
-const chooseMetric = runnerRebase ? Math.max : Math.min;
-const measurements = {
+const chooseMetric = Math.min;
+const measurements = runnerRebase ? structuredClone(existing.measurements) : {
   ...Object.fromEntries(
     CANONICAL_OPERATIONS.map((operation) => [
       operation,
@@ -183,6 +202,14 @@ const measurements = {
     ? measured.cli_send_ms
     : chooseMetric(existing.measurements.cli_send_ms, measured.cli_send_ms),
 };
+for (const row of rebaseRows) {
+  if (row === "cli_send_ms") {
+    measurements.cli_send_ms = Math.max(existing.measurements.cli_send_ms, measured.cli_send_ms);
+  } else {
+    const [operation, metric] = row.split(".");
+    measurements[operation][metric] = Math.max(existing.measurements[operation][metric], measured[operation][metric]);
+  }
+}
 if (
   !Number.isFinite(measurements.first_send_after_spawn.lock_hold_ms) ||
   measurements.first_send_after_spawn.lock_hold_ms >
@@ -220,6 +247,7 @@ const refreshed = {
     measured_at: new Date().toISOString(),
     runner_class: runnerClass,
     workflow_run_id: runnerRebase ? importedSourceRunId : workflowRunId,
+    ...(runnerRebase ? { rebase_rows: rebaseRows } : {}),
     ...(raisesCommittedBaseline ? { increase_reason: increaseReason } : {}),
   },
   sanity_caps_ms: { all_rows: 1_000, cli_send: 1_000 },

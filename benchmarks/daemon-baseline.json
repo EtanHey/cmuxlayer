@@ -1,11 +1,16 @@
 {
   "schema_version": 2,
   "source": {
-    "git_sha": "062d38af1c9296cd198f93d850f841729d9b49cc",
-    "measured_at": "2026-08-31T10:10:45.906Z",
+    "git_sha": "cd32f3e4a4d8977ac65d7235522f73b79fd0f340",
+    "measured_at": "2026-10-06T19:35:36.424Z",
     "runner_class": "github-actions-ubuntu-latest",
-    "workflow_run_id": 33380548570,
-    "increase_reason": "list_agents fresh scans hold the lifecycle mutation lock; replace the false zero with the exact-run conservative elapsed upper bound, and retain terminal-confirmed surface-send timing."
+    "workflow_run_id": 37512215757,
+    "rebase_rows": [
+      "send_to_surface_warm.p50_ms",
+      "send_to_surface_warm.p95_ms",
+      "cli_send_ms"
+    ],
+    "increase_reason": "PR-class runner drift on send_to_surface_warm (p50/cli 65.02->80.53, p95 71.2->86.53): PR runs measure p50 79.73-82.19 ms on unrelated code (incl. main code in calibration PR #1027 run 37512215757) vs 2026-08-31 PR run 33380548570. p95 included to keep p95>=p50 coherent (committed-baseline invariant). Local paired ABBA: no code regression. Selective rebase A'' approved by Etan via orc 2026-10-06; all rises <25%; every other row stays tight."
   },
   "regression_ratio": 1.25,
   "sanity_caps_ms": {
@@ -120,8 +125,8 @@
       "lock_hold_ms": 0
     },
     "send_to_surface_warm": {
-      "p50_ms": 65.02,
-      "p95_ms": 71.2,
+      "p50_ms": 80.53,
+      "p95_ms": 86.53,
       "lock_hold_ms": 178
     },
     "send_to_agent_warm": {
@@ -159,10 +164,10 @@
       "p95_ms": 59.03,
       "lock_hold_ms": 0
     },
-    "cli_send_ms": 65.02
+    "cli_send_ms": 80.53
   },
   "refresh_attestation": {
     "algorithm": "sha256",
-    "content_sha256": "1c47dafedcbb37c4eed94b1aec221e5cb6834735c0fbc20fb8ebdced5b04a11a"
+    "content_sha256": "2614ede0ff5906bcb0c430ee021f4689b0deb98e8e3c53eeda5b777828bad051"
   }
 }
