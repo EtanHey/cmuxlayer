@@ -1,11 +1,13 @@
 /**
- * Lead-pinned cross-Mac scenario context v1. All operations are async and act
+ * Lead-pinned cross-Mac scenario context v1.1. All operations are async and act
  * on the TARGET host, never on the controller's production socket or auth.
- * @typedef {{host:'m1'|'mbp', cmux:'prod-0.64.22'|'nightly', cmuxVersion:string, cmuxlayerSha:string}} Target
+ * @typedef {{host:'m1'|'mbp', cmux:'prod-0.64.22'|'nightly', cmuxVersion:string, cmuxlayerSha:string, codexWrapper:string|null}} Target
  * @typedef {{text:string, parsed:object|null, column:number|null, column_count:number|null}} Screen
  * @typedef {Object} ScenarioContext
  * @property {Target} target
  * @property {(name:string,args:object)=>Promise<object>} call Raw decoded MCP result; caller requests verbose when needed.
+ * @property {(opts:object)=>Promise<object>} spawnLeadSeat Private-MCP Haiku lead, authority lead, left; finally sweeps children and run surfaces.
+ * @property {(agentId:string,text:string)=>Promise<object>} leadSend Send a short action to a real lead; verdict needs screen/registry/topology.
  * @property {(opts:object)=>Promise<object>} spawn Verbose spawn_agent receipt; runner owns every spawned seat.
  * @property {(agentId:string,opts:object)=>Promise<object>} resume Verbose spawn_agent({resume_agent_id,...opts}) receipt.
  * @property {(agentId:string)=>Promise<object>} close close_surface({agent_id,scope:'agent',force:true}); runner still sweeps.
