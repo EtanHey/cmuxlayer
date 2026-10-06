@@ -47,6 +47,35 @@ tightened is this side effect, not a regression. Do not rerun for it: the next
 green `main` run adds to the history. `list_agents` is unaffected, because its
 spread term already dominates.
 
+## One marginal re-sample
+
+`MARGINAL_RESAMPLE_RATIO = 1.05` allows one fresh sample of an operation when a
+sampled p50, p95, lock-hold, or CLI-alias row fails by at most 5% over its existing ceiling.
+The fresh value must meet that same ceiling; the regression ratio remains
+**1.25**. The `cli_send_ms` row is an alias of the sampled warm-surface p50,
+so it shares that operation's fresh sample and is evaluated against its own
+unchanged ceiling. Passing rows, larger misses, and exact request checks get
+no retry. Multiple marginal metrics of one operation share
+one fresh sample; a second miss still fails. A sampler error retains the
+original measurements and records the failed retry reason in the report and
+artifact; it cannot turn the gate green. Existing paired controls, first-send
+cold/steady splitting, history-degraded rejection, margin rules, transport and
+canonical-workload checks still apply.
+
+Why: #852 records ten near-identical hosted runs ranging from 66–81 ms; the
+81.38 ms warm-surface run missed its 81.27 ms ceiling by 0.11 ms. This bounds
+an in-job variance check without raising the budget or rerunning hosted jobs.
+The existing clients and operation samplers are reused. Lifecycle rows retain
+the required spawn/send/close fixture, but only the selected operation's values
+can change its marginal verdict. Other rows keep their first measurements.
+
+The PR comment and job summary retain both measurements, for example
+`81.38 ms → re-sample 74.1 ms`, with `PASS (marginal)` or `FAIL (marginal)`.
+This is explicitly informational visibility, not an exemption from the gate.
+`result.json` retains the fresh samples in `marginal_resamples` and evaluated
+rows in `perf_budget.marginal_resamples`; green-main history keeps the original
+measurements so repeated marginal drift remains visible.
+
 ## Refresh after a legitimate speedup
 
 Dispatch the `CI` workflow on the commit whose performance should become the new floor:

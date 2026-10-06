@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
-import { TAIL_ROW_SAMPLE_MULTIPLIER } from "./check-daemon-benchmark.mjs";
+import { TAIL_ROW_SAMPLE_MULTIPLIER, sampleMarginalRows, readBenchmarkHistory } from "./check-daemon-benchmark.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distIndex = join(repoRoot, "dist", "index.js");
@@ -976,7 +976,7 @@ function summarizeFakeSocketRounds(events, phase) {
   }));
 }
 
-async function measureLatency(clients, phase, fakeSocketTrace) {
+async function measureLatency(clients, phase, fakeSocketTrace, operation) {
   const listSamples = [];
   const readSamples = [];
   const readDiagnostics = [];
@@ -1002,15 +1002,17 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
     await Promise.all(
       clients.map(async (client, clientIndex) => {
         let startedAt = nowMs();
-        const list = await client.callTool("list_surfaces", listArgs);
-        const listReceipt = toolData(list, "list_surfaces");
-        listSamples.push(nowMs() - startedAt);
-        listResult ??= list;
-        listTransports.push(operationTransport(listReceipt, "list_surfaces"));
-        for (const source of listReceipt.transport_fallbacks ?? []) {
-          listFallbackSources.add(source);
+        if (!operation || operation === "list_surfaces") {
+          const list = await client.callTool("list_surfaces", listArgs);
+          const listReceipt = toolData(list, "list_surfaces");
+          listSamples.push(nowMs() - startedAt);
+          listResult ??= list;
+          listTransports.push(operationTransport(listReceipt, "list_surfaces"));
+          for (const source of listReceipt.transport_fallbacks ?? []) {
+            listFallbackSources.add(source);
+          }
         }
-
+        if (operation === "list_surfaces") return;
         startedAt = nowMs();
         const startedAtUtc = new Date().toISOString();
         let mcpStages = null;
@@ -1055,6 +1057,7 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
 
   return {
     list_surfaces: {
+      sample_count: listSamples.length,
       request_bytes: requestBytes("list_surfaces", listArgs),
       request_sha256: requestSha256("list_surfaces", listArgs),
       p50_ms: round(percentile(listSamples, 50)),
@@ -1066,6 +1069,7 @@ async function measureLatency(clients, phase, fakeSocketTrace) {
       transport_fallbacks: [...listFallbackSources],
     },
     read_screen: {
+      sample_count: readSamples.length,
       request_bytes: requestBytes("read_screen", readArgs),
       request_sha256: requestSha256("read_screen", readArgs),
       p50_ms: round(percentile(readSamples, 50)),
@@ -1704,13 +1708,15 @@ async function measureSpawnLifecycleAcrossClients(
   clients,
   sweepHoldState,
   fakeCmuxSocketPath,
+  operation,
 ) {
   const samples = [];
   const pendingControls = [];
   // #791: send_to_agent_warm is a tail row sampled over twice the rounds. Every
   // other row below keeps exactly the canonical first rounds x clients samples.
   const lifecycleRounds = rounds * TAIL_ROW_SAMPLE_MULTIPLIER.send_to_agent_warm;
-  for (let roundIndex = 0; roundIndex < lifecycleRounds; roundIndex += 1) {
+  const samplingRounds = operation && operation !== "send_to_agent_warm" ? rounds : lifecycleRounds;
+  for (let roundIndex = 0; roundIndex < samplingRounds; roundIndex += 1) {
     for (const [clientIndex, client] of clients.entries()) {
       const sampleIndex = roundIndex * clients.length + clientIndex;
       samples.push(
@@ -2010,7 +2016,7 @@ async function main() {
         CMUXLAYER_DAEMON_SOCKET: daemonSocket,
       },
     );
-    const sendToSurface10Parallel = await measureParallelStress(
+    const sampleSendToSurface10Parallel = () => measureParallelStress(
       stressClients,
       "send_to",
       (index, roundIndex) => ({
@@ -2031,7 +2037,8 @@ async function main() {
         );
       },
     );
-    const readScreen10Parallel = await measureParallelStress(
+    const sendToSurface10Parallel = await sampleSendToSurface10Parallel();
+    const sampleReadScreen10Parallel = () => measureParallelStress(
       stressClients,
       "read_screen",
       (index) => ({
@@ -2090,6 +2097,7 @@ async function main() {
         },
       },
     );
+    const readScreen10Parallel = await sampleReadScreen10Parallel();
     const stressClientsSurvivedReplay = stressClients.every(
       (client) => client.alive,
     );
@@ -2302,6 +2310,37 @@ async function main() {
       daemon_cpu_pct: round(daemonStats.cpuPct, 2),
       gates,
     };
+
+    // Only the budget checker enables this path. Keep the existing clients and
+    // canonical fixtures alive; never replay the entire benchmark for a retry.
+    if (process.env.CMUXLAYER_BENCH_MARGINAL_BASELINE) {
+      const baseline = JSON.parse(await readFile(process.env.CMUXLAYER_BENCH_MARGINAL_BASELINE, "utf8"));
+      const history = await readBenchmarkHistory(process.env.CMUXLAYER_BENCH_HISTORY_PATH,
+        baseline.refresh_attestation.content_sha256);
+      result.marginal_resamples = await sampleMarginalRows(baseline, result, {
+        expectedRounds: rounds, history: history.runs,
+        historyDegraded: history.degraded, historyDegradedReason: history.reason,
+      }, async (operation) => {
+        if (["list_surfaces", "read_screen"].includes(operation)) {
+          return (await measureLatency(daemonClients, "marginal", fakeSocketTrace, operation))[operation];
+        }
+        if (operation === "list_agents") return measureLiveListAgentsAcrossClients(daemonClients);
+        if (operation === "control_health") return measureWarmToolAcrossClients(daemonClients, "control_health", {});
+        if (operation.endsWith("_10_parallel") && !stressClients.length) {
+          stressClients = await startClients("daemon-stress-marginal", PARALLEL_STRESS_COUNT,
+            { ...baseEnv, CMUXLAYER_DAEMON_SOCKET: daemonSocket });
+        }
+        if (operation === "send_to_surface_10_parallel") return sampleSendToSurface10Parallel();
+        if (operation === "read_screen_10_parallel") return sampleReadScreen10Parallel();
+        // The lifecycle setup is part of the attested workload: held cold send,
+        // sweep completion, warm send, then close. Retain only the selected row.
+        const lifecycle = await measureSpawnLifecycleAcrossClients(daemonClients,
+          sweepHoldState, missingCmuxSocket, operation);
+        return operation === "first_send_after_spawn" ? lifecycle.sampled : lifecycle[operation];
+      });
+    }
+    await Promise.all(stressClients.map((client) => client.close()));
+    stressClients = [];
 
     console.log(`cmuxlayer daemon benchmark: ${result.verdict}`);
     console.log(
