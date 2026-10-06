@@ -52,7 +52,7 @@ export function createContext({ driver, evidenceDir, parseScreen, sleep = ms => 
   const ctx = {
     target: driver.target, call, artifact,
     spawnLeadSeat: async (opts = {}) => {
-      const args = { ...cheapSpawn({ ...opts, cli: "claude", model: "haiku" }), role: "lead", authority: "lead", placement: "left", verbose: true };
+      const args = { ...cheapSpawn({ ...opts, cli: "claude", model: "haiku" }), role: "implementor", authority: "lead", placement: "left", verbose: true };
       const result = await driver.spawnLeadSeat(args);
       if (result?.structuredContent?.agent_id) owned.add(result.structuredContent.agent_id);
       const value = unwrap(result);

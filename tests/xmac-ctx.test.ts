@@ -86,7 +86,7 @@ it("v1.1 forces a private-MCP Haiku lead and sweeps children before owned seats"
   const f = fixture();
   try {
     await f.ctx.spawnLeadSeat({ model: "opus", placement: "right", authority: "worker" });
-    expect(f.driver.spawnLeadSeat).toHaveBeenCalledWith(expect.objectContaining({ model: "haiku", cli: "claude", role: "lead", authority: "lead", placement: "left", verbose: true }));
+    expect(f.driver.spawnLeadSeat).toHaveBeenCalledWith(expect.objectContaining({ model: "haiku", cli: "claude", role: "implementor", authority: "lead", placement: "left", verbose: true }));
     await f.ctx.leadSend("lead", "Spawn one cheap worker.");
     expect(f.driver.call).toHaveBeenLastCalledWith("send_to", expect.objectContaining({ agent_id: "lead", text: "Spawn one cheap worker." }));
     await f.ctx.dispose();

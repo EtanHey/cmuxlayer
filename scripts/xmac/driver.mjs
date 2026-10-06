@@ -35,7 +35,7 @@ export function connectProcess(child, timeoutMs = 120_000) {
 }
 export async function openDriver(opts, { spawnProcess = spawn } = {}) {
   opts = targetOptions(opts);
-  if (!opts.driverRoot?.startsWith("/") || !/^[a-f0-9]{40}$/.test(opts.sha)) throw new Error("absolute reviewed driver-root and exact SHA required");
+  if (!opts.driverRoot?.startsWith("/") || !/^[a-f0-9]{40}$/.test(opts.sha) || !/^[a-f0-9]{40}$/.test(opts.driverSha)) throw new Error("absolute reviewed driver-root and exact SHA required");
   const spec = targetCommand(opts, NODE, [`${opts.driverRoot}/scripts/xmac/bridge.mjs`]);
   const child = spawnProcess(spec.command, spec.args, { stdio: ["pipe", "pipe", "inherit"] });
   const transport = connectProcess(child);
@@ -62,8 +62,8 @@ export function prepareBuild(opts, sha, cwd) {
     const spec = targetCommand(opts, command, args);
     return execFileSync(spec.command, spec.args, { input, encoding: "utf8", timeout: 300_000, maxBuffer: 4 * 1024 * 1024 }).trim();
   };
-  const root = execTarget("/usr/bin/mktemp", ["-d", `/tmp/cmux-xmac-replay-${randomUUID()}-XXXXXXXX`]);
-  if (!/^\/private\/tmp\/cmux-xmac-replay-[A-Za-z0-9-]+$|^\/tmp\/cmux-xmac-replay-[A-Za-z0-9-]+$/.test(root)) throw new Error("unsafe target build prefix");
+  const root = execTarget(NODE, ["-e", "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');process.stdout.write(fs.mkdtempSync(path.join(os.tmpdir(),process.argv[1])))", `cmux-xmac-replay-${randomUUID()}-`]);
+  if (!/^\/[^\r\n]+\/cmux-xmac-replay-[A-Za-z0-9-]+$/.test(root)) throw new Error("unsafe target build prefix");
   execTarget("/usr/bin/tar", ["-x", "-C", root], archive);
   execTarget("/opt/homebrew/bin/bun", ["install", "--frozen-lockfile", "--ignore-scripts", "--cwd", root]);
   execTarget("/opt/homebrew/bin/bun", ["run", "--cwd", root, "build"]);
