@@ -5666,7 +5666,7 @@ describe("agent lifecycle tool handlers", () => {
           repo: "voicelayer",
           model: "codex",
           cli: "codex", effort: "medium",
-          boot_prompt_timeout_ms: 20,
+          boot_prompt_timeout_ms: 4_000,
         },
         {} as any,
       );
@@ -7277,7 +7277,7 @@ describe("agent lifecycle tool handlers", () => {
         cli: "codex", effort: "medium",
         prompt: "",
         boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 20,
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );
