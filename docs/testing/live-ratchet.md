@@ -28,13 +28,16 @@ registry, inbox, fleet and harness state. Existing NIGHTLY means FAIL (`NIGHTLY
 busy`); it is never adopted. Missing app/socket, build, or proof means exit 1 and
 FAIL. Every dist daemon receives a private `HOME=<privateRoot>/home`, retaining
 PATH and the runner's absolute Node/Bun executable. NIGHTLY also receives a
-private HOME for pane shell startup. Before and after every sample
-(including teardown), metadata guards compare size/mtime of production daemon
-logs, socket pointers, tickets and events, plus a hash of the agents listing.
-Any change fails the whole run, even on a historical bug baseline. File contents
-are never read. Concurrent production activity also fails the guard; metadata
-alone cannot attribute the writer. Production cmux PID/start time is recorded
-before and after. Teardown
+private HOME for pane shell startup. Before/after each sample and the full run,
+guards attribute new agents, changed socket pointers and appended production
+log/ticket bytes to the run UUID, sample tokens, agent IDs and scratch paths.
+Only appended ranges are scanned (at most 4 MiB per file); buffers are discarded
+and receipts contain paths/offsets, never production content. Unrelated writes
+pass. Missing/truncated/changed sources and inspection errors fail closed.
+Production `~/.cmuxterm/events.jsonl` is never inspected. Each sample requires a
+nonempty daemon log under its private HOME as a positive isolation control.
+Attributed writes or missing private writes fail the run, including on a bug
+baseline. Production cmux PID/start time is recorded before and after. Teardown
 verifies each recorded PID's executable, sends SIGTERM, waits up to 10 seconds,
 then verifies again before SIGKILL. No defaults edits, GUI driving or model calls.
 An exclusive runner lock and a unique launch argument identify this invocation's

@@ -1,31 +1,55 @@
-import { statSync, readdirSync, realpathSync } from "node:fs";
+import { statSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 
-// Metadata only: never read production log, ticket, event or mailbox contents.
+const pointers = [".local/state/cmux/last-socket-path", ".local/state/cmux/nightly-last-socket-path"];
+const missing = fn => { try { return fn(); } catch (error) { if (error.code !== "ENOENT") throw error; return null; } };
 export function productionSnapshot(home) {
-  const files = {}, visited = new Set();
-  function visit(relative, recursive = false) {
-    try {
-      const stat = statSync(join(home, relative), { bigint: true });
-      files[relative] = { size: String(stat.size), mtime_ns: String(stat.mtimeNs) };
-      if (recursive && stat.isDirectory()) {
-        const real = realpathSync(join(home, relative)); if (visited.has(real)) return; visited.add(real);
-        for (const name of readdirSync(join(home, relative)).sort()) visit(join(relative, name), true);
-      }
-    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  const files = {}, socket_pointers = {};
+  for (const [dir, select] of [[".local/state/cmuxlayer", () => true], [".cmuxlayer/tickets", () => true], [".local/state/cmux", name => /^cmuxlayer-daemon-.*\.log(?:\.\d+)?$/.test(name)]]) {
+    for (const name of missing(() => readdirSync(join(home, dir))) ?? []) {
+      if (!select(name)) continue;
+      const path = join(dir, name), stat = missing(() => statSync(join(home, path)));
+      if (stat?.isFile()) files[path] = { size: stat.size, ino: stat.ino, dev: stat.dev };
+    }
   }
-  for (const directory of [".local/state/cmuxlayer", ".cmuxlayer/tickets"]) visit(directory, true);
-  for (const file of [".local/state/cmux/last-socket-path", ".local/state/cmux/nightly-last-socket-path", ".cmuxterm/events.jsonl"]) visit(file);
-  let agents = null;
-  try { agents = readdirSync(join(home, ".cmux/agents")).sort(); }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
-  return { files, agents_count: agents?.length ?? null, agents_sha256: createHash("sha256").update(JSON.stringify(agents)).digest("hex") };
+  for (const path of pointers) socket_pointers[path] = missing(() => {
+    if (statSync(join(home, path)).size > 8192) throw new Error("socket pointer exceeds guard limit");
+    return readFileSync(join(home, path), "utf8");
+  });
+  return { home, files, socket_pointers, agents: missing(() => readdirSync(join(home, ".cmux/agents"))) ?? [] };
 }
 
-export function productionChanges(before, after) {
-  const paths = [...new Set([...Object.keys(before.files), ...Object.keys(after.files)])].sort();
-  const changed = paths.filter(path => JSON.stringify(before.files[path]) !== JSON.stringify(after.files[path]));
-  if (before.agents_count !== after.agents_count || before.agents_sha256 !== after.agents_sha256) changed.push(".cmux/agents listing");
-  return changed;
+// Read only appended bytes; retain no production content in a receipt.
+export function productionChanges(before, after, identifiers, agentIds, reads = []) {
+  const changed = [], needles = [...new Set(identifiers.filter(Boolean))].map(value => Buffer.from(value));
+  if (!needles.length) throw new Error("guard identifiers missing");
+  if (Object.values(before.files).some(old => !Object.values(after.files).some(current => old.dev === current.dev && old.ino === current.ino))) throw new Error("production append source disappeared");
+  for (const id of after.agents.filter(id => !before.agents.includes(id))) if (agentIds.includes(id) || id.startsWith("ratchet")) changed.push(`.cmux/agents/${id}`);
+  for (const path of pointers) if (before.socket_pointers[path] !== after.socket_pointers[path] && after.socket_pointers[path] && [...identifiers, "/tmp/cmux-nightly.sock"].filter(Boolean).some(id => after.socket_pointers[path].includes(id))) changed.push(path);
+  for (const [path, stat] of Object.entries(after.files)) {
+    const previous = Object.values(before.files).find(old => old.dev === stat.dev && old.ino === stat.ino);
+    const start = previous?.size ?? 0, end = stat.size;
+    if (end < start || end - start > 4 * 1024 * 1024) throw new Error("production append range truncated or exceeds guard limit");
+    if (end === start) continue;
+    const fd = openSync(join(after.home, path), "r"); let found = false, carry = Buffer.alloc(0);
+    try {
+      const current = fstatSync(fd);
+      if (current.ino !== stat.ino || current.dev !== stat.dev || current.size < end) throw new Error("production file changed during guard read");
+      const overlap = Math.max(...needles.map(needle => needle.length)) - 1;
+      for (let pos = start; pos < end;) {
+        const chunk = Buffer.alloc(Math.min(65536, end - pos)), count = readSync(fd, chunk, 0, chunk.length, pos);
+        if (!count) throw new Error("production append range disappeared");
+        pos += count; const bytes = Buffer.concat([carry, chunk.subarray(0, count)]);
+        found ||= needles.some(needle => bytes.includes(needle)); carry = overlap ? bytes.subarray(-overlap) : Buffer.alloc(0);
+      }
+    } finally { closeSync(fd); }
+    reads.push({ path, start, end }); if (found) changed.push(path);
+  }
+  return changed.sort();
+}
+
+export function privateWrites(home) {
+  const path = home && join(home, ".local/state/cmuxlayer/daemon.log");
+  const stat = path && missing(() => statSync(path));
+  return { status: stat?.isFile() && stat.size > 0 ? "PASS" : "FAIL", path, bytes: stat?.size ?? 0 };
 }

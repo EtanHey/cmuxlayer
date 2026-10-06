@@ -6,7 +6,7 @@ import { tmpdir, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { productionSnapshot, productionChanges } from "./ratchet-production-guard.mjs";
+import { productionSnapshot, productionChanges, privateWrites } from "./ratchet-production-guard.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const argv = process.argv.slice(2), option = (key, fallback) => argv.includes(key) ? argv[argv.indexOf(key) + 1] : fallback;
@@ -22,7 +22,8 @@ const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603f", fix: "64260ba3", specimen: "#1007 / composer-overlays/codex-boot.txt" },
   { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5", fix: "f8f0e4ee", provisional_fix: "#1019 head; replace with merge SHA", specimen: "docs.local/lanes/spawn-p0/live-specimen-1.md" },
 ];
-let nightlyPid, scratch, mcp, daemon, daemonCommand, sequence = 0, lockOwned = false;
+let nightlyPid, scratch, mcp, daemon, daemonCommand, productionBefore, sequence = 0, lockOwned = false;
+const runAgentIds = new Set();
 const launchToken = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
 const abort = new AbortController();
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => abort.abort());
@@ -97,7 +98,8 @@ async function sample(row, ref) {
   const sha = run("git", ["rev-parse", `${ref}^{commit}`], { cwd: root });
   const sampleId = `${row.fixture}-${sha.slice(0,8)}-${++sequence}`;
   const tree = join(scratch, `tree-${sampleId}`), events = join(scratch, `events-${sampleId}.json`);
-  let log = "", sampled, treeAdded = false;
+  const token = `RATCHET_${row.fixture}_${sha.slice(0,8)}_${launchToken}`;
+  let log = "", sampled, home, privateRoot, treeAdded = false;
   try {
     run("git", ["worktree", "add", "--detach", tree, sha], { cwd: root, stdio: ["ignore", "pipe", "pipe"] }); treeAdded = true;
     run("bun", ["install", "--frozen-lockfile", "--ignore-scripts"], { cwd: tree, stdio: ["ignore", "pipe", "pipe"] });
@@ -105,17 +107,16 @@ async function sample(row, ref) {
     const fixtureCommand = `${quote(process.execPath)} ${quote(join(root, "scripts/ratchet-fixture-tui.mjs"))} ${row.fixture} ${quote(events)}`;
     writeFileSync(join(scratch, "bin/ratchetCodex"), `#!/bin/sh\nexec ${fixtureCommand}\n`, { mode: 0o700 });
     writeFileSync(join(scratch, "launchers.zsh"), `repoGolem ratchet ${quote(join(scratch, "repo"))}\n`);
-    const privateRoot = join(scratch, `private-${sampleId}`); mkdirSync(privateRoot, { mode: 0o700 });
-    const home = join(privateRoot, "home"); mkdirSync(home, { mode: 0o700 });
+    privateRoot = join(scratch, `private-${sampleId}`); mkdirSync(privateRoot, { mode: 0o700 });
+    home = join(privateRoot, "home"); mkdirSync(home, { mode: 0o700 });
     writeFileSync(join(privateRoot, "fleet.json"), JSON.stringify({ coordinationDir: privateRoot, outbox: false, seatRegistryPath: join(privateRoot, "seats.yaml") }));
     mcp = join(privateRoot, "d.sock");
-    const env = { ...cleanEnv, HOME: home, CMUX_SOCKET_PATH: cmuxSocket, CMUX_BUNDLED_CLI_PATH: join(app, "Contents/Resources/bin/cmux"), PATH: `${join(app, "Contents/Resources/bin")}:${cleanEnv.PATH}`, CMUXLAYER_DAEMON_SOCKET: mcp, CMUXLAYER_STATE_DIR: join(privateRoot, "state"), CMUXLAYER_INBOX_BASE_DIR: join(privateRoot, "inbox"), CMUXLAYER_FLEET_CONFIG: join(privateRoot, "fleet.json"), CMUXLAYER_HARNESS_HOME: privateRoot, CODEX_HOME: join(privateRoot, "codex"), CMUXLAYER_CONFIG_FILE: join(privateRoot, "no-config"), CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(scratch, "launchers.zsh"), CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0" };
+    const env = { ...cleanEnv, HOME: home, CMUX_SOCKET_PATH: cmuxSocket, CMUX_BUNDLED_CLI_PATH: join(app, "Contents/Resources/bin/cmux"), PATH: `${join(app, "Contents/Resources/bin")}:${cleanEnv.PATH}`, CMUXLAYER_DAEMON_SOCKET: mcp, CMUXLAYER_STATE_DIR: join(home, ".local/state/cmuxlayer"), CMUXLAYER_INBOX_BASE_DIR: join(privateRoot, "inbox"), CMUXLAYER_FLEET_CONFIG: join(privateRoot, "fleet.json"), CMUXLAYER_HARNESS_HOME: privateRoot, CODEX_HOME: join(privateRoot, "codex"), CMUXLAYER_CONFIG_FILE: join(privateRoot, "no-config"), CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(scratch, "launchers.zsh"), CMUXLAYER_CONTROL_HEALTH_INTERVAL_MS: "0" };
     daemon = spawn(process.execPath, [join(tree, "dist/daemon.js")], { cwd: tree, env, stdio: ["ignore", "ignore", "pipe"] });
     receipt.processes.push({ pid: daemon.pid, sha, kind: "dist daemon", home }); daemon.stderr.on("data", c => { log += c; });
     await until(() => existsSync(mcp));
     daemonCommand = command(daemon.pid);
     await rpc(mcp, "initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "ratchet-live", version: "1" } }, true);
-    const token = `RATCHET_${row.fixture}_${sha.slice(0,8)}`;
     let result, surface;
     if (row.fixture === "banner") {
       const ws = await cmux("workspace.create", { cwd: scratch, initial_command: fixtureCommand }); surface = ws.surface_id;
@@ -124,6 +125,7 @@ async function sample(row, ref) {
     } else {
       result = await tool("spawn_agent", { repo: "ratchet", cli: "codex", effort: "low", role: "worker", authority: "worker", placement: "right", workspace: receipt.workspace.workspace_id, cwd: join(scratch, "repo"), worktree: false, mcp_profile: "sterile", prompt: token, boot_prompt_timeout_ms: 5000, verbose: true });
       surface = result.surface_id;
+      if (result.agent_id) runAgentIds.add(result.agent_id);
     }
     if (existsSync(events) && JSON.parse(readFileSync(events)).submitted === token) await until(() => JSON.parse(readFileSync(events)).phase === "working");
     const fixture = existsSync(events) ? JSON.parse(readFileSync(events)) : null;
@@ -139,13 +141,15 @@ async function sample(row, ref) {
       if (daemon) { await terminate(daemon.pid, daemonCommand ?? process.execPath); daemon = null; daemonCommand = null; }
       if (treeAdded) run("git", ["worktree", "remove", tree], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
     } finally {
-      const after = productionSnapshot(productionHome), changed = productionChanges(before, after);
-      sampled.production_guard = { before, after, changed, status: changed.length ? "FAIL" : "PASS" };
-      if (changed.length) { receipt.production_files_changed = true; Object.assign(sampled, { status: "FAIL", failure_kind: "production_state", expected_defect: false, error: "production files/agent listing changed" }); }
+      const reads = [], changed = productionChanges(before, productionSnapshot(productionHome), [launchToken, token, scratch, privateRoot, home, ...runAgentIds], [...runAgentIds], reads);
+      const positive = privateWrites(home), failed = changed.length > 0 || positive.status !== "PASS";
+      sampled.production_guard = { read_ranges: reads, violations: changed, positive_control: positive, status: failed ? "FAIL" : "PASS" };
+      if (failed) { receipt.isolation_failed = true; Object.assign(sampled, { status: "FAIL", failure_kind: changed.length ? "production_state" : "isolation", expected_defect: false, error: "attributed production write or missing private write" }); }
     }
   }
 }
 try {
+  productionBefore = productionSnapshot(productionHome);
   await startNightly();
   if (argv.includes("--capability")) receipt.rows.push({ name: "NIGHTLY capability", baseline: "—", candidate: "PASS", delta: "—", ceiling: 0, status: "PASS" });
   else for (const row of rows) {
@@ -153,12 +157,17 @@ try {
     const candidate = await sample(row, argv.includes("--prove") ? row.fix : option("--candidate", "HEAD"));
     const proof = !argv.includes("--prove") || baseline.status === "FAIL" && baseline.expected_defect;
     const frames = (row.fixture === "banner" ? ["composer-overlays/codex-boot.txt"] : ["codex-0.157/idle-empty.txt", "codex-0.157/idle-submitted-working.txt"]).map(file => ({ file, sha256: createHash("sha256").update(readFileSync(join(root, "tests/fixtures", file))).digest("hex") }));
-    receipt.rows.push({ ...row, provenance: { frames: "real", captures: frames, transition: `modeled from ${row.specimen}`, adaptation: "blank padding rows removed; boot committed row scroll-away modeled" }, baseline, candidate, delta: Number(candidate.status === "FAIL") - Number(baseline.status === "FAIL"), ceiling: 0, status: candidate.status === "PASS" && proof && !receipt.production_files_changed ? "PASS" : "FAIL" });
+    receipt.rows.push({ ...row, provenance: { frames: "real", captures: frames, transition: `modeled from ${row.specimen}`, adaptation: "blank padding rows removed; boot committed row scroll-away modeled" }, baseline, candidate, delta: Number(candidate.status === "FAIL") - Number(baseline.status === "FAIL"), ceiling: 0, status: candidate.status === "PASS" && proof && !receipt.isolation_failed ? "PASS" : "FAIL" });
   }
-  receipt.status = !receipt.production_files_changed && receipt.rows.every(row => row.status === "PASS") ? "PASS" : "FAIL";
+  receipt.status = !receipt.isolation_failed && receipt.rows.every(row => row.status === "PASS") ? "PASS" : "FAIL";
 } catch (error) { receipt.error = String(error); }
 finally {
   try { if (nightlyPid) await terminate(nightlyPid, `${app}/Contents/MacOS/cmux`); } catch (error) { receipt.error = String(error); receipt.status = "FAIL"; }
+  try { if (productionBefore) {
+    const reads = [], changed = productionChanges(productionBefore, productionSnapshot(productionHome), [launchToken, scratch, ...runAgentIds], [...runAgentIds], reads);
+    receipt.production_guard = { read_ranges: reads, violations: changed, status: changed.length ? "FAIL" : "PASS" };
+    if (changed.length) { receipt.status = "FAIL"; receipt.error = "attributed production write during run"; }
+  } } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }
   try { receipt.production_end = production(); if (JSON.stringify(receipt.production_start) !== JSON.stringify(receipt.production_end)) { receipt.status = "FAIL"; receipt.error = "production PID/start-time changed"; } } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }
   try { if (lockOwned && readFileSync(lockPath, "utf8") === launchToken) unlinkSync(lockPath); } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }
   receipt.scratch = scratch;
