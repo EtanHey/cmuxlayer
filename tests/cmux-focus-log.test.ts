@@ -39,6 +39,30 @@ function expectFocusLine(line: string, method: string, target: string) {
 }
 
 describe("focus RPC daemon diagnostics", () => {
+  it.each(["surface.focus", "workspace.select"].flatMap(method =>
+    ["{bad", "null", undefined, "[]", "42", '"text"'].map(payload => ({ method, payload })),
+  ))("invalid RPC params still dispatch without diagnostic fields: $method $payload", async ({ method, payload }) => {
+    const exec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const client = new CmuxClient({ exec, bin: "cmux-fixture", env: {} });
+    const args = ["rpc", method, ...(payload === undefined ? [] : [payload])];
+    const rawClient = client as unknown as { run(args: string[]): Promise<string> };
+    await expect(rawClient.run(args)).resolves.toBe("{}");
+    expect(exec).toHaveBeenCalledExactlyOnceWith("cmux-fixture", ["--json", "--id-format", "both", ...args], {});
+    expect(await lines()).toHaveLength(0);
+  });
+
+  it("missing workspace flag logs an unknown target while preserving dispatch", async () => {
+    const exec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
+    const client = new CmuxClient({ exec, bin: "cmux-fixture", env: {} });
+    const rawClient = client as unknown as { run(args: string[]): Promise<string> };
+    await expect(rawClient.run(["select-workspace"])).resolves.toBe("{}");
+    expect(exec).toHaveBeenCalledTimes(1);
+    const logged = await lines();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("target=null");
+    expect(logged[0]).not.toContain("target=select-workspace");
+  });
+
   it.each([false, true])("CLI emits one safe caller line per issued focus operation, wrapped=%s", async (wrapped) => {
     const exec = vi.fn().mockResolvedValue({ stdout: "{}", stderr: "" });
     const client = new CmuxClient({ exec, bin: "cmux-fixture", env: {} });

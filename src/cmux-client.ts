@@ -133,11 +133,15 @@ export class CmuxClient {
         assertCanonicalSurfaceRef(args[index + 1]);
       }
     }
+    let rpcParams: unknown;
     if (args[0] === "rpc" && args[2]) {
       try {
-        const params = JSON.parse(args[2]) as { surface_id?: unknown };
-        if (typeof params.surface_id === "string") {
-          assertCanonicalSurfaceRef(params.surface_id);
+        rpcParams = JSON.parse(args[2]);
+        if (rpcParams !== null && typeof rpcParams === "object" && !Array.isArray(rpcParams)) {
+          const params = rpcParams as Record<string, unknown>;
+          if (typeof params.surface_id === "string") {
+            assertCanonicalSurfaceRef(params.surface_id);
+          }
         }
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error;
@@ -152,10 +156,11 @@ export class CmuxClient {
       const env = this.env;
       const bin = this.resolveBin(env);
       const cliArgs = ["--json", "--id-format", "both", ...args];
+      const workspaceIndex = args.indexOf("--workspace");
       const focusFields = args[0] === "select-workspace"
-        ? focusRpcLogFields("workspace.select", { workspace_id: args[args.indexOf("--workspace") + 1] })
+        ? focusRpcLogFields("workspace.select", { workspace_id: workspaceIndex < 0 ? undefined : args[workspaceIndex + 1] })
         : args[0] === "rpc" && (args[1] === "surface.focus" || args[1] === "workspace.select")
-          ? focusRpcLogFields(args[1], JSON.parse(args[2]))
+          ? focusRpcLogFields(args[1], rpcParams)
           : null;
       if (focusFields) appendDaemonLog("focus_rpc", focusFields);
       const { stdout } = this.exec

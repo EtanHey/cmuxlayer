@@ -163,13 +163,14 @@ export type LogFields = Readonly<Record<string, LogFieldValue>>;
 /** Capture before async dispatch so the originating code path survives awaits.
  * Only relative code locations enter the log; never emit a raw stack/home path.
  */
-export function focusRpcLogFields(method: string, params: Record<string, unknown>): LogFields | null {
+export function focusRpcLogFields(method: string, params: unknown): LogFields | null {
   if (!activeLog || (method !== "workspace.select" && method !== "surface.focus")) return null;
+  if (params === null || typeof params !== "object" || Array.isArray(params)) return null;
   const caller = (new Error().stack ?? "").split("\n")
     .map((line) => line.match(/(?:^|[/\\])((?:src|dist|tests)\/[^():\s]+:\d+:\d+)/)?.[1])
     .find((location) => location && !/(?:^|\/)(?:daemon-log|cmux-client|cmux-socket-client|cmux-transport-self-heal|surface-topology)\.[cm]?[jt]s:/.test(location))
     ?? "unknown";
-  const target = params[method === "workspace.select" ? "workspace_id" : "surface_id"];
+  const target = (params as Record<string, unknown>)[method === "workspace.select" ? "workspace_id" : "surface_id"];
   return { method, target: typeof target === "string" ? target : null, caller };
 }
 
