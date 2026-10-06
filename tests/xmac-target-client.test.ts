@@ -24,3 +24,13 @@ it("lead-spawned children remain cheap and in the private workspace without inje
   expect(() => boundedSpawn({ cli: "claude", model: "opus" }, defaults)).toThrow("cheapest");
   expect(() => boundedSpawn({ cli: "codex", effort: "high" }, defaults)).toThrow("cheapest");
 });
+
+it("auth preflight checks the target environment and refuses a logged-out CLI without model calls", async () => {
+  const { checkCliAuth } = await import("../scripts/xmac/target-client.mjs");
+  const env = { HOME: "/synthetic/auth", CODEX_HOME: "/synthetic/auth/.codex" };
+  const calls: any[] = [];
+  checkCliAuth("codex", env, (...args: any[]) => { calls.push(args); return { status: 0, stdout: "" }; });
+  expect(calls[0]).toEqual(["/opt/homebrew/bin/codex", ["login", "status"], expect.objectContaining({ env })]);
+  expect(() => checkCliAuth("claude", env, () => ({ status: 0, stdout: '{"loggedIn":false}' }))).toThrow("authentication precondition");
+  expect(() => checkCliAuth("codex", env, () => ({ status: 1, stdout: "" }))).toThrow("authentication precondition");
+});

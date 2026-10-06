@@ -20,7 +20,7 @@ export function privateBuild(root, sha) {
   if (!real.startsWith(realpathSync(tmpdir()) + "/") || stat.uid !== process.getuid() || stat.mode & 0o077 || !stat.isDirectory()) throw new Error("unsafe private replay prefix");
   const marker = JSON.parse(readFileSync(join(real, "xmac-build.json"), "utf8"));
   if (!/^[a-f0-9]{40}$/.test(sha) || marker.sha !== sha) throw new Error("private replay SHA mismatch");
-  const entry = join(real, "dist/entry.js"), daemon = join(real, "dist/daemon.js");
+  const entry = join(real, "dist/index.js"), daemon = join(real, "dist/daemon.js");
   for (const path of [entry, daemon]) if (!realpathSync(path).startsWith(real + "/")) throw new Error("private replay executable escapes prefix");
   return { root: real, entry, daemon, sha };
 }
@@ -33,7 +33,7 @@ export function launcherEnvironment(env, target) {
 export function distDigest(root) {
   const hash = createHash("sha256"); let count = 0;
   const walk = relative => {
-    for (const item of readdirSync(join(root, relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const item of readdirSync(join(root, relative), { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const path = join(relative, item.name);
       if (item.isSymbolicLink()) throw new Error("dist symlink refused");
       if (item.isDirectory()) walk(path);

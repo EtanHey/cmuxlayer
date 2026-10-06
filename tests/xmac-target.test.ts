@@ -21,11 +21,11 @@ it("private replay roots must be owned real directories with an exact immutable 
   const root = mkdtempSync(join(tmpdir(), "cmux-xmac-replay-"));
   try {
     mkdirSync(join(root, "dist"));
-    writeFileSync(join(root, "dist/entry.js"), "");
+    writeFileSync(join(root, "dist/index.js"), "");
     writeFileSync(join(root, "dist/daemon.js"), "");
     const sha = "a".repeat(40);
     writeFileSync(join(root, "xmac-build.json"), JSON.stringify({ sha }));
-    expect(privateBuild(root, sha).entry).toBe(join(realpathSync(root), "dist/entry.js"));
+    expect(privateBuild(root, sha).entry).toBe(join(realpathSync(root), "dist/index.js"));
     expect(() => privateBuild(root, "b".repeat(40))).toThrow("SHA");
     expect(() => privateBuild("/opt/homebrew/opt/cmuxlayer", sha)).toThrow("private replay");
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -41,4 +41,30 @@ it("compiled reference digest changes when a module changes and refuses empty tr
     writeFileSync(join(root, "entry.js"), "export const x = 2;");
     expect(distDigest(root)).not.toBe(before);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it("keeps app pointer HOME private while the M1 CLI auth environment stays real", async () => {
+  const { appLaunchEnvironment, targetEnvironment } = await import("../scripts/soak-runtime.mjs");
+  const opts = { target: "m1-gate", app: "/Applications/cmux.app", privateAppHome: true };
+  const env = targetEnvironment({}, "/private/run", opts, "/target/auth-home");
+  const app = appLaunchEnvironment(env, opts, "/private/run", opts.app, env.CMUX_SOCKET_PATH);
+  expect(app.HOME).toBe("/private/run/home");
+  expect(env.HOME).toBe("/target/auth-home");
+  expect(app.CMUXLAYER_DAEMON_SOCKET).toBe(env.CMUXLAYER_DAEMON_SOCKET);
+  expect(app.ZDOTDIR).toBe("/private/run/zdot");
+});
+
+it("direct socket screens preserve UTF-8 split across packets and every blank/composer row", async () => {
+  const net = await import("node:net");
+  const { rpc } = await import("../scripts/soak-runtime.mjs");
+  const root = mkdtempSync(join(tmpdir(), "xmac-socket-test-")), path = join(root, "s.sock");
+  const text = "header\n\n› שלום\n";
+  const server = net.createServer(socket => socket.once("data", () => {
+    const bytes = Buffer.from(JSON.stringify({ result: { text } }) + "\n"), split = bytes.indexOf(Buffer.from("שלום")) + 1;
+    socket.write(bytes.subarray(0, split));
+    setTimeout(() => socket.end(bytes.subarray(split)), 20);
+  }));
+  await new Promise<void>(resolve => server.listen(path, resolve));
+  try { expect((await rpc(path, "surface.read_text", { surface_id: "synthetic" })).text).toBe(text); }
+  finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });
