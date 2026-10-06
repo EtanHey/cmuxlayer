@@ -3951,11 +3951,7 @@ describe("agent lifecycle tool handlers", () => {
       JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
-    expect(second.warnings).not.toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/Existing same-lane agent/),
-      ]),
-    );
+    expect(second.warning ?? "").not.toMatch(/Existing same-lane agent/);
     expect(second.duplicate_spawn_warning).toBeUndefined();
     expect(second.existing_same_lane_agents).toBeUndefined();
   });
