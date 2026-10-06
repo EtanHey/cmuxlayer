@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, writeFileSync, unlinkSync, realpathSync, statSync, lstatSync } from "node:fs";
 import { tmpdir, hostname, homedir } from "node:os";
 import { join, sep } from "node:path";
+import { privateBuild, launcherEnvironment } from "./xmac/target.mjs";
 import { randomUUID, createHash } from "node:crypto";
 import { assertAppTarget, assertProcessTarget, processBundleId } from "./soak-app-guard.mjs";
 
@@ -81,7 +82,7 @@ export async function stopOwnedProcess({ pid, saved, target = "nightly", app = f
   throw new Error(`owned process did not exit: ${pid}`);
 }
 
-function rpc(socketPath, method, params = {}) {
+export function rpc(socketPath, method, params = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath); let buffer = "", settled = false;
     const finish = (error, result) => {
@@ -120,7 +121,7 @@ export async function startSoakRuntime(opts, outputRoot) {
   const app = opts.app, socketPath = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
   const token = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
-  const receipt = { status: "FAIL", launch_token: token, target: opts.target, release_gate: opts.target === "m1-gate" && !opts.dryRun, dry_run: opts.dryRun, host: hostname(), processes: [], violations: [], production_start: production(),
+  const receipt = { status: "FAIL", launch_token: token, target: opts.target, release_gate: opts.target === "m1-gate" && !opts.dryRun && !opts.buildRoot, dry_run: opts.dryRun, host: hostname(), processes: [], violations: [], production_start: production(),
     production_pid_11224_start: identity(11224) };
   let lockOwned = false, nightly, daemon;
   mkdirSync(outputRoot, { recursive: true });
@@ -151,10 +152,12 @@ export async function startSoakRuntime(opts, outputRoot) {
       if (digest !== PINNED_DMG_SHA256) throw new Error("pinned 0.64.22 DMG digest mismatch");
       receipt.dmg_sha256 = digest;
       const version = JSON.parse(readFileSync("/opt/homebrew/opt/cmuxlayer/libexec/package.json", "utf8")).version;
-      if (!opts.dryRun && version !== "0.4.101") throw new Error("M1 gate requires installed cmuxlayer 0.4.101");
+      if (!opts.dryRun && !opts.buildRoot && version !== "0.4.101") throw new Error("M1 gate requires installed cmuxlayer 0.4.101");
       receipt.installed_cmuxlayer_version = version;
     }
-    if (realpathSync(opts.entry) !== realpathSync(INSTALLED_ENTRY)) throw new Error("soak requires the installed cmuxlayer entry");
+    const build = opts.buildRoot ? privateBuild(opts.buildRoot, opts.sha) : null;
+    if (!build && realpathSync(opts.entry) !== realpathSync(INSTALLED_ENTRY)) throw new Error("soak requires the installed cmuxlayer entry");
+    receipt.build = build ?? { entry: realpathSync(INSTALLED_ENTRY), kind: "installed" };
     acquireNightlyLock(lockPath, token); lockOwned = true;
     if (opts.target === "m1-gate" && production().length) throw new Error("M1 gate refused: existing stable cmux process");
     if (processes().some(line => line.includes(`${app}/Contents/MacOS/`)) || await socketIsLive(socketPath)) {
@@ -167,7 +170,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     }
     const scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
     for (const dir of ["home", "zdot", "state", "inbox", "repo"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
-    const env = targetEnvironment(process.env, scratch, opts);
+    const env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
     if (opts.privateHome && opts.target !== "m1-gate") {
       const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
       if (home === ownHome || statSync(home).uid !== process.getuid() || (statSync(home).mode & 0o077)) throw new Error("private auth HOME must be separate, owned, and mode 0700");
@@ -180,11 +183,14 @@ export async function startSoakRuntime(opts, outputRoot) {
       }
     }
     writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
-    writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
+    if (opts.launcherMode && opts.target === "m1-gate") {
+      if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
+    } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
     // App-created shells must use the same private environment, with no personal zsh startup files.
     writeFileSync(join(scratch, "zdot/.zshenv"), Object.entries(env).filter(([key]) =>
       /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key))
-      .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n", { mode: 0o600 });
+      .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n" +
+      (opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\n` : ""), { mode: 0o600 });
     const launchEnv = Object.fromEntries(Object.entries(env).filter(([key]) =>
       /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key)));
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
@@ -223,7 +229,7 @@ export async function startSoakRuntime(opts, outputRoot) {
       receipt.probe_seen = true;
     }
     // Start the installed daemon explicitly, so teardown never guesses which PID it owns.
-    const child = spawn("/opt/homebrew/opt/node/bin/node", ["/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js"],
+    const child = spawn("/opt/homebrew/opt/node/bin/node", [build?.daemon ?? "/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js"],
       { env, cwd: join(scratch, "repo"), stdio: ["ignore", "ignore", "inherit"] });
     let spawnError;
     child.on("error", error => { spawnError = error; });
