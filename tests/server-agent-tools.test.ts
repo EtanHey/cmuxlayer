@@ -7771,7 +7771,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(repair).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["security", "capacity", "hooks"])("silent-stall %s stays visible in list_agents", async kind => {
+  it.each(["security", "capacity", "hooks"])("silent-stall %s reports blocking disposition in list_agents", async kind => {
     const stableUuid = "51111111-2222-4333-8444-555555555555";
     const routeClient = makeUuidRouteClient([{ ref: "surface:stall", id: stableUuid, workspace_ref: "workspace:1" }]);
     routeClient.setScreenText(kind === "security"
@@ -7781,7 +7781,12 @@ describe("agent lifecycle tool handlers", () => {
     const server = await createUuidRouteServer(routeClient, makeServerAgentRecord({ agent_id: "stall", surface_id: "surface:stall", surface_uuid: stableUuid, workspace_id: "workspace:1", state: "ready", cli: "codex" }));
     const parsed = parseToolResult(await registeredTestTool(server, "list_agents").handler({ detail: "full" }, {}));
     const agent = parsed.agents.find((candidate: { agent_id: string }) => candidate.agent_id === "stall");
-    if (kind !== "capacity") {
+    if (kind === "security") {
+      expect(agent.blocked_on_prompt.value).toBe(false);
+      expect(agent.state.value).not.toBe("error");
+      const filtered = parseToolResult(await registeredTestTool(server, "list_agents").handler({ blocked_on_prompt: true }, {}));
+      expect(filtered.agents.map((candidate: { agent_id: string }) => candidate.agent_id)).not.toContain("stall");
+    } else if (kind === "hooks") {
       expect(agent.blocked_on_prompt).toMatchObject({ value: true, source: "screen" });
       const filtered = parseToolResult(await registeredTestTool(server, "list_agents").handler({ blocked_on_prompt: true }, {}));
       expect(filtered.agents.map((candidate: { agent_id: string }) => candidate.agent_id)).toContain("stall");

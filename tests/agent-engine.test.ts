@@ -11689,7 +11689,7 @@ Session ID: ${sessionId}`,
       ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
       ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
       ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
-    ])("silent-stall %s wakes the parent despite prior done evidence", async (kind, screen, tag) => {
+    ])("silent-stall %s escalates only blockers despite prior done evidence", async (kind, screen, tag) => {
       engine.dispose();
       engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient, {
         spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
@@ -11704,12 +11704,18 @@ Session ID: ${sessionId}`,
       vi.spyOn(engine, "hasCurrentRecordedOutputDoneEvidence").mockReturnValue(true);
       await engine["maybeEscalateLiveHalt"](child, screen);
       await engine["maybeEscalateLiveHalt"](engine.getAgentState(child.agent_id) ?? child, screen);
-      expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
-      if (kind === "security" || kind === "hooks") {
+      if (kind === "security") {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).not.toBe(true);
+        expect(engine.getAgentState(child.agent_id)?.state).toBe("working");
+      } else {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
+      }
+      if (kind === "hooks") {
         expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
         expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
         expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
-      } else expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      } else if (kind === "capacity") expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
       expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
