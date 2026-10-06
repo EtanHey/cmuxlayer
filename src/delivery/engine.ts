@@ -31,6 +31,7 @@ import {
   isPickerOrMenuScreen,
   parseScreen,
   codexScreenHasActiveTurn,
+  hasVisibleAgentProgress,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -927,6 +928,34 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     context.lifecycleSweepEngine?.getRegistry().set(updated.agent_id, updated);
   };
 
+  const ownsExactClaudeDraft = (opts: {
+    surface: string; workspace?: string; stableSurfaceIdentity?: string | null;
+    text: string; delivery_id?: string;
+  }, snapshot: { text: string; parsed: ParsedScreenResult } | null, requireIdle = true): boolean => {
+    if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
+        snapshot.parsed.control_state === "permission_prompt" ||
+        (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
+        isPickerOrMenuScreen(snapshot.text, "claude") || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+    // draft_pending takes precedence over activity in the screen parser. Clear
+    // only the current composer in a copied frame to inspect the turn status.
+    const rows = normalizeTerminalText(snapshot.text).split("\n");
+    let prompt = -1;
+    rows.forEach((row, index) => { if (/^[ \t]*[❯>](?:\s|$)/u.test(row)) prompt = index; });
+    if (requireIdle && prompt >= 0 && hasVisibleAgentProgress([...rows.slice(0, prompt), "❯ "].join("\n"), "claude")) return false;
+    const region = extractComposerInputRegion(snapshot.text, undefined, "claude", true);
+    if (region === null || !region.trim() || !composerRegionMatchesPayload(region, opts.text, "claude", snapshot.text)) return false;
+    return [...typedDraftOwners.values()].some(owner => {
+      const sameTarget = owner.uuid ? owner.uuid.toLowerCase() === opts.stableSurfaceIdentity?.toLowerCase()
+        : owner.ref === opts.surface && owner.workspace === (opts.workspace ?? null);
+      const entries = owner.texts ?? [owner.text];
+      const owned = opts.delivery_id ? entries.some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.delivery_id)
+        : Boolean(owner.caller) && owner.caller === resolveCurrentCallerAgent()?.agent_id && entries.includes(opts.text);
+      return sameTarget && owned && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+    });
+  };
+
+  class ClaudeDraftChanged extends Error {}
+
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
     workspace?: string;
@@ -1088,6 +1117,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     require_working_status?: boolean;
     require_attributable_submit_evidence?: boolean;
     allow_recovery_enter_retry?: boolean;
+    delivery_id?: string;
+    stableSurfaceIdentity?: string | null;
     submit_key?: "return" | "tab";
     codex_busy_mode?: "steer" | "queue";
     timeout_ms?: number;
@@ -1157,6 +1188,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       opts.pre_return_screen,
     );
     let sawNewInterrupt = false;
+    let stableBootClearedPolls = 0;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
@@ -1360,6 +1392,29 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
         (codexScreen ? codexSubmitEchoed : screenIncludesSubmittedText(snapshot.text));
+      // A boot starts from an observed owned payload in an idle composer.
+      // Codex can scroll the committed row away before the first read. Accept
+      // a fresh turn or a stable cleared composer, while retaining the paste
+      // burst, pending draft, queue and interrupt guards used by normal sends.
+      const bootComposerHasResidue = Boolean(composerInput?.trim());
+      const bootTurnStarted = opts.source_event === "boot_prompt" &&
+        bootFrameAdvanced && !hasPendingSubmitEvidence && !bootComposerHasResidue &&
+        isSubmitVerifiedStatus(snapshot.parsed.status) &&
+        !isSubmitVerifiedStatus(parseScreen(opts.pre_return_screen ?? "").status);
+      const bootComposerCleared = opts.source_event === "boot_prompt" &&
+        bootFrameIsMonotonic && composerInput !== null &&
+        !bootComposerHasResidue && !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted && !sawNewInterrupt &&
+        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
+      stableBootClearedPolls = bootComposerCleared ? stableBootClearedPolls + 1 : 0;
+      if (!sawNewInterrupt && !bootConsumptionRefuted &&
+          !bootHasTranscriptEcho && !codexSubmitEchoed &&
+          !cursorShowsSubmittedResponse && !bootHasTokenOrCostDelta &&
+          (bootTurnStarted || stableBootClearedPolls >= 2)) {
+        return { submit_verified: true,
+          submit_evidence: bootTurnStarted ? "status_only" : "cleared_composer",
+          submit_verification_reason: null, retry_count: retryCount, delivery: "submitted" };
+      }
       const interruptedHasTranscriptEcho =
         bootHasTranscriptEcho ||
         (opts.require_attributable_submit_evidence !== true &&
@@ -1449,10 +1504,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.source_event === "dispatch_nudge" ||
           opts.source_event === "report_to_parent" ||
           opts.source_event === "boot_prompt") &&
+        (opts.source_event !== "boot_prompt" || !isSubmitVerifiedStatus(snapshot.parsed.status)) &&
         hasPendingSubmitEvidence &&
         (screenCli === "codex" ||
-          (screenCli === "claude" &&
-            (opts.source_event === "send_to" || !isSubmitVerifiedStatus(snapshot.parsed.status))));
+          (screenCli === "claude" && ownsExactClaudeDraft(opts, snapshot)));
       if (
         agentRetryEligiblePendingInput &&
         screenCli === "claude" &&
@@ -1514,16 +1569,28 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             opts.source_event === "dispatch_nudge" ||
             opts.source_event === "report_to_parent");
         const recoverySelection: { key: "tab" | "return" } = { key: "return" };
-        const recoveryRpcMethod = await sendKeyWithRetry(
-          opts.surface,
-          codexRelay ? async () => {
-            recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
-            lastCodexRelayKey = recoverySelection.key;
-            return recoverySelection.key;
-          } : "return",
-          opts.workspace,
-          opts.beforeMutation,
-        );
+        let recoveryRpcMethod: DeliveryRpcMethod | null;
+        try {
+          recoveryRpcMethod = await sendKeyWithRetry(
+            opts.surface,
+            codexRelay ? async () => {
+              recoverySelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
+              lastCodexRelayKey = recoverySelection.key;
+              return recoverySelection.key;
+            } : "return",
+            opts.workspace,
+            screenCli === "claude" ? async () => {
+              await opts.beforeMutation?.();
+              const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              if (!ownsExactClaudeDraft(opts, latest)) throw new ClaudeDraftChanged();
+            } : opts.beforeMutation,
+            screenCli === "claude" ? 1 : SEND_INPUT_RETRY_ATTEMPTS,
+          );
+        } catch (error) {
+          if (!(error instanceof ClaudeDraftChanged)) throw error;
+          retryEligiblePendingSince = null;
+          continue;
+        }
         if (recoveryRpcMethod) opts.rpcMethods.add(recoveryRpcMethod);
         retryCount += 1;
         appendDeliveryEvent({
@@ -1906,6 +1973,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           ? ownedComposerText(owner, currentRegion, targetCli, submitBaseline.text) ?? (ownedQueuedText ?? "")
           : (ownedQueuedText ?? "");
         ownedSubmitText = ownedText;
+        if (targetCli === "claude" && ownedText && screenTranscriptContainsText(submitBaseline.text, ownedText)) {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
+        }
         if (ownerCurrent && owner?.bootAgentId && owner.bootInstanceId) {
           ownedBoot = { agentId: owner.bootAgentId, instanceId: owner.bootInstanceId };
         }
@@ -1925,10 +1995,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // #879: re-check the bound boot instance at the last pre-mutation hook,
       // like the pointer path's assertOwnedPointerBeforeReturn. A newer boot
       // installed after the ownership check must not receive this Return.
-      const beforeKeyMutation = ownedBoot
+      const beforeKeyMutation = (ownedBoot || (targetCli === "claude" && ownedSubmitText))
         ? async () => {
             await opts.beforeMutation?.();
-            if (stateMgr.readState(ownedBoot!.agentId)?.boot_instance_id !== ownedBoot!.instanceId) {
+            if (targetCli === "claude" && ownedSubmitText) {
+              const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              const current = typedDraftOwners.get(ownerKey);
+              const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
+              if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
+                  region === null || !composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) ||
+                  screenTranscriptContainsText(latest.text, ownedSubmitText)) {
+                throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline?.parsed ?? parseScreen(""));
+              }
+            }
+            if (ownedBoot && stateMgr.readState(ownedBoot.agentId)?.boot_instance_id !== ownedBoot.instanceId) {
               throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
             }
           }
@@ -2181,7 +2261,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     });
     const caller = resolveCurrentCallerAgent()?.agent_id;
     const beforeDraft = deliverySafetySnapshot ? composerPromptLineInput(deliverySafetySnapshot.text, targetCli)?.trim() : null;
-    if (!opts.delivery_id && caller && (beforeDraft === "" || (opts.source_event === "boot_prompt" && pendingBootAgent))) {
+    if (!opts.delivery_id && (beforeDraft === "" || (opts.source_event === "boot_prompt" && pendingBootAgent))) {
       opts = { ...opts, delivery_id: randomUUID() };
     }
     if (deliverySafetySnapshot?.text.trim()) {
@@ -2235,8 +2315,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(previousOwner) &&
       ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot.text) === draftGuardText;
-    if (opts.retry_owned_draft && !ownedRetry) {
+    if (opts.retry_owned_draft && (!ownedRetry || (targetCli === "claude" && deliverySafetySnapshot && screenTranscriptContainsText(deliverySafetySnapshot.text, draftGuardText)))) {
       throw new DeliverySafetyGateError("draft_ownership_unverified", deliverySafetySnapshot?.parsed ?? parseScreen(""));
+    }
+    if (opts.retry_owned_draft && targetCli === "claude") {
+      const beforeRetryMutation = opts.beforeMutation;
+      opts = { ...opts, beforeMutation: async () => {
+        await beforeRetryMutation?.();
+        const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!ownsExactClaudeDraft({ ...opts, text: draftGuardText }, latest, false)) {
+          throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? parseScreen(""));
+        }
+      } };
     }
     const deliveryBatches = ownedRetry ? [] : buildInputDeliveryBatches(opts.chunks);
     const shouldPaste = shouldPasteInputDelivery(
@@ -2273,10 +2363,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       0,
     );
     const submittedText = opts.chunks.join("");
-    if (textDispatched && caller && beforeDraft === "") {
-      const entries = previousOwner?.caller === caller ? previousOwner.texts ?? [previousOwner.text] : [];
+    if (textDispatched && beforeDraft === "" && opts.delivery_id) {
+      const entries = previousOwner && previousOwner.caller === (caller ?? null) ? previousOwner.texts ?? [previousOwner.text] : [];
       const boot = previousOwner?.text === submittedText ? previousOwner : undefined;
-      rememberDraftOwner(ownerKey, { caller, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
+      rememberDraftOwner(ownerKey, { caller: caller ?? null, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,
         deliveryIds: [...(previousOwner?.deliveryIds ?? entries.map(() => "")), opts.delivery_id ?? ""],
@@ -2399,6 +2489,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               source_agent: opts.source_agent,
               verify_submit: verifySubmit,
               allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+              delivery_id: opts.delivery_id,
+              stableSurfaceIdentity: opts.stableSurfaceIdentity,
               submit_key: submitSelection.key,
               codex_busy_mode: opts.codex_busy_mode,
               timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
@@ -3574,6 +3666,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   const deliverBootPrompt = async (opts: {
     surface: string;
+    delivery_id?: string;
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     cli?: CliType;
@@ -3729,6 +3822,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "boot_prompt",
+            delivery_id: opts.delivery_id ?? randomUUID(),
             // #793: key the boot draft's owner token by the stable UUID, the
             // same key a UUID-routed send_to key-Return looks it up by.
             stableSurfaceIdentity: opts.stableSurfaceIdentity,
@@ -4054,6 +4148,40 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }, 0);
   };
 
+  const retryPendingClaudeDraft = async (opts: {
+    surface: string; workspace?: string; stableSurfaceIdentity?: string | null;
+    receipt: { delivery_id: string; text: string; retry_count: number; rpc_methods?: DeliveryRpcMethod[]; submit_dispatched?: boolean };
+    beforeMutation: () => Promise<void>;
+  }): Promise<boolean> => {
+    if (opts.receipt.retry_count >= 1) return false;
+    const draft = { ...opts, text: opts.receipt.text, delivery_id: opts.receipt.delivery_id };
+    const observer = context.surfaceObserverId;
+    await opts.beforeMutation();
+    const baseline = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+    if (!ownsExactClaudeDraft(draft, baseline)) return false;
+    await delay(SEND_INPUT_RECOVERY_ENTER_DELAY_MS);
+    let method: DeliveryRpcMethod | null;
+    try {
+      method = await sendKeyWithRetry(opts.surface, "return", opts.workspace, async () => {
+        await opts.beforeMutation();
+        const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+        if (!ownsExactClaudeDraft(draft, latest)) throw new ClaudeDraftChanged();
+        // Spend the one retry before dispatch: an ambiguous acknowledgement
+        // must not cause another Return on a later verification sweep.
+        opts.receipt.retry_count += 1;
+        opts.receipt.submit_dispatched = true;
+      }, 1);
+    } catch (error) {
+      if (error instanceof ClaudeDraftChanged) return false;
+      recordSurfaceWriteFailure(opts.surface, error, opts.stableSurfaceIdentity, observer);
+      throw error;
+    }
+    recordSurfaceWriteSuccess(opts.surface, opts.stableSurfaceIdentity, observer);
+    if (method) opts.receipt.rpc_methods = [...new Set([...(opts.receipt.rpc_methods ?? []), method])];
+    const verified = await verifySubmitKeyOutcome({ surface: opts.surface, workspace: opts.workspace, baseline, owned_text: opts.receipt.text, owned_queue: false });
+    return verified.submit_verified === true;
+  };
+
   /**
    * #793: does the current caller hold a live ownership token for this draft?
    * Spawn calls this after it has captured the session and stamped the boot
@@ -4079,6 +4207,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   return {
     callerOwnsTypedDraft,
+    retryPendingClaudeDraft,
     settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,

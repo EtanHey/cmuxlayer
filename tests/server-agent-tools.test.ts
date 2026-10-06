@@ -851,12 +851,12 @@ describe("lean spawn tool responses", () => {
       } else {
         expect(result).toMatchObject({
           ok: true,
-          spawn_state: "boot_unsubmitted",
+          spawn_state: "pending_verify",
           boot_prompt_delivered: false,
-          boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
-            retry_count: 1, submit_verified: false },
+          boot_prompt_receipt: { typed: true, submitted: false, terminal: false,
+            retry_count: 1, submit_verified: null, delivery_id: expect.any(String) },
         });
-        expect(result.next_action).toMatch(/after 1 automatic Return retry/i);
+        expect(result.next_action).toContain(`wait_for({delivery_id:"${result.boot_prompt_receipt.delivery_id}"})`);
         expect(result.next_action).not.toMatch(/never .*manual Return/i);
       }
       // One Return launches the CLI; two more are the bounded prompt submit attempts.
@@ -7590,10 +7590,10 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(result.ok).toBe(true);
     expect(rawResult.content[0]!.text).toMatch(
-      /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
+      /^\{"ok":true,"spawn_state":"pending_verify","next_action":/,
     );
-    expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toMatch(/Boot prompt submission was not verified/i);
+    expect(result.spawn_state).toBe("pending_verify");
+    expect(result.next_action).toMatch(/Boot prompt is queued/i);
     expect(result.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
