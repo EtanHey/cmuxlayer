@@ -1,0 +1,11 @@
+{
+  "source": "2026-10-06 owned NIGHTLY scratch, Codex 0.160.1, branch dc6699c3; paths and shell identity sanitized, composer whitespace preserved",
+  "launcher_return_gap_ms": 157,
+  "prompt": "Reply exactly PR_C_CAPTURE_OK. Use no tools.",
+  "frames": {
+    "shell_echo": "Last login: Tue Oct  6 18:53:04 on ttys044\nsynthetic@host ~ % cd '/tmp/cmux-pr-c-synthetic/cmuxlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m gpt-6-luna -c model_reasoning_effort=low",
+    "empty_composer": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n \n  Set up security for Daybreak mode\n  Set up Advanced Account Security with a hardware security key. You can keep using Codex\n  while you finish setup.\n \n› 1. Set up security                                                                        \n \n  Press a number to choose · esc to dismiss · type to continue                              \n\n \n›\n \n \n  GPT-6-Luna low · /tmp/cmux-pr-c-synthetic/…\n                                                                  ⚠ 2 warnings · f2 to view",
+    "boot_draft": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n \n  Set up security for Daybreak mode\n  Set up Advanced Account Security with a hardware security key. You can keep using Codex\n  while you finish setup.\n \n› 1. Set up security                                                                        \n \n  Press a number to choose · esc to dismiss · type to continue                              \n\n \n›\n  Reply exactly PR_C_CAPTURE_OK. Use no tools.\n \n  GPT-6-Luna low · /tmp/cmux-pr-c-synthetic/…\n                                                                  ⚠ 2 warnings · f2 to view",
+    "post_boot_return": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n \n \n  Set up security for Daybreak mode\n  Set up Advanced Account Security with a hardware security key. You can keep using Codex\n  while you finish setup.\n \n› 1. Set up security                                                                        \n \n  Press a number to choose · esc to dismiss · type to continue                              \n \n \n› Ask Codex to do anything\n \n  GPT-6-Luna low · /tmp/cmux-pr-c-synthetic/…\n  ? for shortcuts                                                 ⚠ 2 warnings · f2 to view"
+  }
+}
