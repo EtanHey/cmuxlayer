@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { startSoakRuntime, rpc, INSTALLED_ENTRY } from "../soak-runtime.mjs";
-import { targetOptions, shellQuote, privateBuild, distDigest } from "./target.mjs";
+import { targetOptions, shellQuote, privateBuild, distDigest, requireLauncherMode } from "./target.mjs";
 import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 
@@ -39,6 +39,7 @@ export async function startTarget(input) {
   const before = productionSnapshot(homedir());
   let closeTarget;
   const runtime = await startSoakRuntime({ ...opts, privateAppHome: true, onSignal: fallback => closeTarget ? closeTarget() : fallback(), launcherMode: opts.target === "m1-gate", entry: opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY }, opts.outputRoot);
+  runtime.receipt.release_gate = false; runtime.receipt.scope = "scenario-target-lifecycle";
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
   const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
   const agents = new Map(), leads = new Set(), owned = new Set();
@@ -59,6 +60,7 @@ export async function startTarget(input) {
     if (name === "spawn_agent" && value.agent_id) {
       owned.add(value.agent_id);
       agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
+      if (opts.target === "m1-gate") requireLauncherMode(JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8")), runtime.receipt.expected_launchers[args.cli]);
     }
     return result;
   };
@@ -153,6 +155,7 @@ export async function startTarget(input) {
     const routing = Object.fromEntries(Object.entries(runtime.env).filter(([key]) => /^(CMUXLAYER|CMUX_SOCKET|CMUX_BUNDLE|CMUX_ALLOW|CODEX_HOME|CLAUDE_CONFIG_DIR)/.test(key)));
     routing.XMAC_ENTRY = opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY;
     routing.XMAC_DEFAULTS = JSON.stringify(defaults);
+    if (opts.target === "m1-gate") routing.XMAC_EXPECTED_LAUNCHERS = JSON.stringify(runtime.receipt.expected_launchers);
     writeFileSync(config, JSON.stringify({ mcpServers: { cmuxlayer: { command: "/opt/homebrew/opt/node/bin/node", args: [`${opts.driverRoot}/scripts/xmac/lead-proxy.mjs`], env: routing } } }), { mode: 0o600 });
     const binary = join(homedir(), ".local/bin/claude");
     if (!existsSync(binary)) throw new Error("target Claude binary missing");

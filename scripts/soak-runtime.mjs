@@ -129,6 +129,7 @@ export function socketIsLive(path) {
 }
 
 export async function startSoakRuntime(opts, outputRoot) {
+  opts = { ...opts, privateAppHome: opts.privateAppHome || opts.target === "m1-gate", launcherMode: opts.launcherMode || opts.target === "m1-gate" && !opts.dryRun };
   const app = opts.app, socketPath = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
   const token = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
@@ -196,6 +197,10 @@ export async function startSoakRuntime(opts, outputRoot) {
     writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
     if (opts.launcherMode && opts.target === "m1-gate") {
       if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
+      const { resolveLauncherNameFromRegistry } = await import("../dist/launcher-registry.js");
+      receipt.expected_launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli,
+        resolveLauncherNameFromRegistry(opts.repo ?? "cmuxlayer", cli, { sourcePath: env.CMUXLAYER_LAUNCHER_REGISTRY_PATH })]));
+      if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
     } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
     // App-created shells must use the same private environment, with no personal zsh startup files.
     writeFileSync(join(scratch, "zdot/.zshenv"), Object.entries(env).filter(([key]) =>
