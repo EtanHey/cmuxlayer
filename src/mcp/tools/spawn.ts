@@ -183,6 +183,13 @@ export function registerSpawnAgentTool(
     watchRegistryPath,
     withSurfaceWrite,
   } = deps;
+  const runtimeMetadataAvailable = async (): Promise<boolean> =>
+    typeof client.listSurfaceRuntimeMetadata === "function" ||
+    (typeof client.listTerminalMetadata === "function" &&
+      await readRuntimeMetadata(() => client.listTerminalMetadata())
+        .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
+        .catch(() => false));
+
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
@@ -348,9 +355,8 @@ export function registerSpawnAgentTool(
       focus: z
         .boolean()
         .optional()
-        .default(false)
         .describe(
-          "Leave focus on the created agent tab instead of restoring the exact origin after initialization.",
+          "Leave focus on the created agent tab instead of restoring the exact origin after initialization. On resume, false suppresses focus; omitted stays in the background on metadata-capable cmux and initializes legacy cmux with focus.",
         ),
       allow_long_inline: z
         .boolean()
@@ -459,13 +465,14 @@ export function registerSpawnAgentTool(
             args.workspace ?? existing.workspace_id ?? undefined,
           );
           await assertWorkspaceMutationAllowed("spawn_agent", workspace);
-          let focusRestoreLease = await focusTargetBeforeSplit(
-            workspace,
-            args.focus !== true,
-          );
+          const focusForResume = args.focus ?? !await runtimeMetadataAvailable();
+          let focusRestoreLease = focusForResume
+            ? await focusTargetBeforeSplit(workspace, args.focus !== true)
+            : null;
           const result = await engine.resumeAgent(args.resume_agent_id, {
             workspace,
             force: args.force,
+            focus: focusForResume,
           });
           creation.record({
             agent_id: result.agent_id,
@@ -593,10 +600,12 @@ export function registerSpawnAgentTool(
             new Set<string>(),
             { role: "worker" },
           );
+          // Preserve terminal creation's former schema default; resume alone
+          // needs to distinguish omitted focus from an explicit false.
           const created =
             placement.kind === "surface"
               ? await client.newSurface({
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                   pane: placement.pane,
                   ...(workspace ? { workspace } : {}),
                   type: "terminal",
@@ -604,7 +613,7 @@ export function registerSpawnAgentTool(
               : await client.newSplit(placement.direction, {
                   ...(workspace ? { workspace } : {}),
                   ...(placement.pane ? { pane: placement.pane } : {}),
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                 });
           creation.record({
             surface_id: created.surface,
@@ -919,11 +928,7 @@ export function registerSpawnAgentTool(
           }
           return true;
         };
-        const runtimeMetadataSupported = typeof client.listSurfaceRuntimeMetadata === "function" ||
-          (typeof client.listTerminalMetadata === "function" &&
-          await readRuntimeMetadata(() => client.listTerminalMetadata())
-            .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
-            .catch(() => false));
+        const runtimeMetadataSupported = await runtimeMetadataAvailable();
         const focusForLaunch = args.focus === true || !runtimeMetadataSupported;
         let focusRestoreLease = focusForLaunch
           ? await focusTargetBeforeSplit(spawnWorkspace, args.focus !== true)
