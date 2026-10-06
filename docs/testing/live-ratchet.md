@@ -26,7 +26,15 @@ The runner launches only `cmux NIGHTLY.app` with its own bundle ID, process-loca
 automation/socket overrides, session restoration disabled, and private daemon,
 registry, inbox, fleet and harness state. Existing NIGHTLY means FAIL (`NIGHTLY
 busy`); it is never adopted. Missing app/socket, build, or proof means exit 1 and
-FAIL. Production cmux PID/start time is recorded before and after. Teardown
+FAIL. Every dist daemon receives a private `HOME=<privateRoot>/home`, retaining
+PATH and the runner's absolute Node/Bun executable. NIGHTLY also receives a
+private HOME for pane shell startup. Before and after every sample
+(including teardown), metadata guards compare size/mtime of production daemon
+logs, socket pointers, tickets and events, plus a hash of the agents listing.
+Any change fails the whole run, even on a historical bug baseline. File contents
+are never read. Concurrent production activity also fails the guard; metadata
+alone cannot attribute the writer. Production cmux PID/start time is recorded
+before and after. Teardown
 verifies each recorded PID's executable, sends SIGTERM, waits up to 10 seconds,
 then verifies again before SIGKILL. No defaults edits, GUI driving or model calls.
 An exclusive runner lock and a unique launch argument identify this invocation's
@@ -36,3 +44,6 @@ new NIGHTLY process. Interrupts drain through the same cleanup and FAIL receipt.
 PR-triggered `NIGHTLY capability (advisory)` macos-15 job downloads a digest-pinned
 NIGHTLY, validates notarization, and uploads its receipt. It is not a required
 check; hosting and required-check selection remain with the owner through the lead.
+The `nightly` release tag rolls: the pinned DMG may disappear when it republishes.
+A download HTTP 404 reports distinct FAIL stage `asset_gone`; update the asset
+URL and independently verified digest together before retrying through a new PR.

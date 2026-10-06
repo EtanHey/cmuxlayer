@@ -20,8 +20,14 @@ jobs:
           printf '%s\n' '{"status":"FAIL","stage":"capability prerequisites"}' > "$RUNNER_TEMP/capability.json"
           printf '%s\n' '| row | status |' '| --- | --- |' '| capability prerequisites | FAIL |' > "$RUNNER_TEMP/capability.md"
           test "$(uname -m)" = arm64
-          curl --fail --location --retry 2 -o "$RUNNER_TEMP/nightly.dmg" \
-            'https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos-arm64-3742448899801.dmg'
+          http_status=$(curl --location --retry 2 --write-out '%{http_code}' -o "$RUNNER_TEMP/nightly.dmg" \
+            'https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos-arm64-3742448899801.dmg')
+          if [ "$http_status" = 404 ]; then
+            printf '%s\n' '{"status":"FAIL","stage":"asset_gone"}' > "$RUNNER_TEMP/capability.json"
+            printf '%s\n' '| row | status |' '| --- | --- |' '| asset_gone | FAIL |' > "$RUNNER_TEMP/capability.md"
+            exit 1
+          fi
+          test "$http_status" = 200
           echo '93d99db4e384722cde93aeee9121284dcd1766732701084b3a0ddc772b952e1c  '"$RUNNER_TEMP/nightly.dmg" | shasum -a 256 -c -
           hdiutil attach "$RUNNER_TEMP/nightly.dmg" -nobrowse -mountpoint "$RUNNER_TEMP/nightly-mount"
           trap 'hdiutil detach "$RUNNER_TEMP/nightly-mount"' EXIT
