@@ -6,19 +6,24 @@ permissions:
   contents: read
 jobs:
   capability:
-    name: ${{ matrix.version }} capability (advisory)
+    name: ${{ matrix.version }} capability (${{ matrix.purpose }})
     runs-on: macos-15
     timeout-minutes: 10
+    continue-on-error: ${{ matrix.early_warning }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - version: NIGHTLY
+            purpose: early warning
+            early_warning: true
             app: cmux NIGHTLY.app
             url: https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos-arm64-3742448899801.dmg
             sha256: 93d99db4e384722cde93aeee9121284dcd1766732701084b3a0ddc772b952e1c
             hosted_release: ''
           - version: 0.64.22
+            purpose: required gate candidate
+            early_warning: false
             app: cmux.app
             url: https://github.com/manaflow-ai/cmux/releases/download/v0.64.22/cmux-macos.dmg
             sha256: fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25

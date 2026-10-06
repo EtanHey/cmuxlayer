@@ -1,4 +1,4 @@
-# NIGHTLY behavior ratchet
+# cmux behavior ratchet
 
 Run `node scripts/ratchet-live.mjs --prove --output /absolute/path/proof.json`
 to establish the historical bug/fix pairs. The markdown table is written beside
@@ -46,7 +46,8 @@ then verifies again before SIGKILL. No defaults edits, GUI driving or model call
 An exclusive runner lock and a unique launch argument identify this invocation's
 new NIGHTLY process. Interrupts drain through the same cleanup and FAIL receipt.
 
-Local coverage is **NIGHTLY only**. A `--app` with production bundle ID
+On Etan's MBP, local coverage is **NIGHTLY only**, as non-required early warning.
+A `--app` with production bundle ID
 `com.cmuxterm.app` is explicitly refused before launch, including a renamed app
 or a NIGHTLY wrapper whose executable resolves into that production bundle.
 Recorded app process targets are checked again before each teardown signal.
@@ -64,8 +65,21 @@ These environment checks are a runner policy, not cryptographic host attestation
 never spoof them on a local Mac. No bundle retagging or re-signing is performed.
 The stable DMG URL is `/v0.64.22/cmux-macos.dmg`, with SHA-256
 `fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25`
-from the upstream GitHub release asset metadata. It is not a required
-check; hosting and required-check selection remain with the owner through the lead.
+from the upstream GitHub release asset metadata.
+
+**Required gate policy:** pinned hosted 0.64.22 capability and replay rows become
+the required check once hosted capability is proven. R1 adds the capability
+candidate; it does not activate required checks or add hosted replay rows.
+Required-check activation remains with the owner through the lead. NIGHTLY
+capability and replay rows are early-warning reports, **never required**. Its
+capability job uses `continue-on-error`; a failure retains its FAIL receipt and
+artifact without blocking the stable gate. The 0.64.22 job does not allow failure.
+
+The dedicated M1, when available, will add local pinned 0.64.22 coverage. Before
+every launch it must refuse if a non-test `com.cmuxterm.app` process is running.
+That future M1 path is not enabled here; the current runner's stable exception
+remains hosted-only, and this MBP must not launch 0.64.22.
+
 The `nightly` release tag rolls: the pinned DMG may disappear when it republishes.
 A download HTTP 404 reports distinct FAIL stage `asset_gone`; update the asset
 URL and independently verified digest together before retrying through a new PR.
