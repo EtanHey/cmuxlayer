@@ -30,3 +30,15 @@ it("private replay roots must be owned real directories with an exact immutable 
     expect(() => privateBuild("/opt/homebrew/opt/cmuxlayer", sha)).toThrow("private replay");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("compiled reference digest changes when a module changes and refuses empty trees", async () => {
+  const { distDigest } = await import("../scripts/xmac/target.mjs");
+  const root = mkdtempSync(join(tmpdir(), "xmac-digest-test-"));
+  try {
+    expect(() => distDigest(root)).toThrow("empty");
+    writeFileSync(join(root, "entry.js"), "export const x = 1;");
+    const before = distDigest(root);
+    writeFileSync(join(root, "entry.js"), "export const x = 2;");
+    expect(distDigest(root)).not.toBe(before);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

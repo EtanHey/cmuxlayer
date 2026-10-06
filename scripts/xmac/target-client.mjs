@@ -1,11 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { startSoakRuntime, rpc, INSTALLED_ENTRY } from "../soak-runtime.mjs";
-import { targetOptions, shellQuote, privateBuild } from "./target.mjs";
+import { targetOptions, shellQuote, privateBuild, distDigest } from "./target.mjs";
 import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 
@@ -27,6 +27,7 @@ export async function startTarget(input) {
   if (opts.host === "m1" && hostname() !== opts.gateHost) throw new Error("SSH target hostname mismatch");
   const harness = privateBuild(opts.driverRoot, opts.driverSha);
   opts.outputRoot = join(harness.root, "evidence");
+  if (!opts.buildRoot && (!/^[a-f0-9]{64}$/.test(opts.installedDistDigest) || distDigest("/opt/homebrew/opt/cmuxlayer/libexec/dist") !== opts.installedDistDigest)) throw new Error("installed exact-SHA dist digest missing or mismatched");
   const before = productionSnapshot(homedir());
   const runtime = await startSoakRuntime({ ...opts, launcherMode: opts.target === "m1-gate", entry: opts.buildRoot ? `${opts.buildRoot}/dist/entry.js` : INSTALLED_ENTRY }, opts.outputRoot);
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
@@ -124,7 +125,10 @@ export async function startTarget(input) {
       const reads = []; let changes = [];
       try { changes = productionChanges(before, productionSnapshot(homedir()), [runtime.receipt.launch_token, runtime.env.CMUXLAYER_DAEMON_SOCKET, runtime.env.CMUX_SOCKET_PATH, runtime.receipt.scratch, ...owned], [...owned], reads); }
       catch (error) { errors.push(`attribution guard: ${error}`); }
-      lifecycle.attribution = { changes, reads, private_socket: runtime.env.CMUXLAYER_DAEMON_SOCKET };
+      const logPath = join(runtime.env.CMUXLAYER_STATE_DIR, "daemon.log");
+      const positive = existsSync(logPath) ? statSync(logPath).size : 0;
+      if (!positive) errors.push("private daemon log positive control absent");
+      lifecycle.attribution = { changes, reads, private_socket: runtime.env.CMUXLAYER_DAEMON_SOCKET, positive_control: { path: logPath, bytes: positive, status: positive ? "PASS" : "FAIL" } };
       lifecycle.violations.push(...errors, ...changes.map(path => `production attribution: ${path}`));
       if (lifecycle.violations.length) lifecycle.status = "FAIL";
       writeFileSync(runtime.receiptPath, JSON.stringify(lifecycle, null, 2) + "\n");
