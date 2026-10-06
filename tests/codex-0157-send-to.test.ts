@@ -1144,42 +1144,42 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   it.each(["working", "cleared_composer", "transcript_echo"] as const)("P0 boot: delayed %s turn evidence settles a submitted boot", async evidence => {
     let afterReads = 0;
     const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
-    const t = await setup({
+    const bootSetup = await setup({
       empty: fixture("idle-empty"), buffered: fixture("burst-return-placeholder-frame"), draft,
       after: text => {
         // Return landed, but the first verifier read sees the old composer.
         if (++afterReads === 1) return draft(text);
-        return `OpenAI Codex\n${evidence === "transcript_echo" ? codexRows(text) + "\n" : ""}${evidence === "working" ? "Working (1s • esc to interrupt)\n" : ""}› Ask Codex to do anything\n GPT-6-Sol medium · ~/scratch`;
+        return `OpenAI Codex\n${evidence === "transcript_echo" ? `${codexRows(text)}\n` : ""}${evidence === "working" ? "Working (1s • esc to interrupt)\n" : ""}› Ask Codex to do anything\n GPT-6-Sol medium · ~/scratch`;
       },
     }, "Read and follow /tmp/synthetic-spawn-p0.md");
     try {
       expect(afterReads).toBeGreaterThan(1);
-      expect(t.pane.submitted).toHaveLength(1);
-      expect(t.spawned, JSON.stringify(t.spawned)).toMatchObject({ spawn_state: "started", boot_prompt_delivered: true,
+      expect(bootSetup.pane.submitted).toHaveLength(1);
+      expect(bootSetup.spawned, JSON.stringify(bootSetup.spawned)).toMatchObject({ spawn_state: "started", boot_prompt_delivered: true,
         boot_prompt_receipt: { delivery_state: "submitted", submit_verified: true, submit_evidence: evidence === "working" ? "status_only" : evidence } });
-      expect(t.pane.returns).toBe(2); // launcher Return plus one boot Return
-      expect(t.engine.getAgentState(t.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, boot_verify_started_at: null, prompt_delivered: true });
-    } finally { t.context.dispose(); }
+      expect(bootSetup.pane.returns).toBe(2); // launcher Return plus one boot Return
+      expect(bootSetup.engine.getAgentState(bootSetup.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, boot_verify_started_at: null, prompt_delivered: true });
+    } finally { bootSetup.context.dispose(); }
   }, 30_000);
 
   it.each([false, true])("P0 boot: an unproven Return resolves by delivery_id when dispatch flag is omitted=%s", async omitBootDispatch => {
     const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
-    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
+    const bootSetup = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
       after: draft }, "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500, omitBootDispatch);
     try {
-      expect(t.spawned, JSON.stringify(t.spawned)).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
+      expect(bootSetup.spawned, JSON.stringify(bootSetup.spawned)).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
         boot_prompt_receipt: { delivery_state: "pending_verify", terminal: false, delivery_id: expect.any(String), submit_verified: null } });
-      if (omitBootDispatch) expect(t.spawned.boot_prompt_receipt).not.toHaveProperty("submit_dispatched");
-      const id = t.spawned.boot_prompt_receipt.delivery_id;
-      expect(t.spawned.next_action).toContain(`wait_for({delivery_id:"${id}"})`);
-      expect(t.spawned.next_action).not.toContain("stop and");
-      expect(t.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: false, delivery_state: "pending_verify" });
-      t.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
-      await t.engine.verifyPendingDeliveries();
-      const waited = parseToolResult(await t.server._registeredTools.wait_for.handler({ delivery_id: id, timeout_ms: 100 }, {}));
+      if (omitBootDispatch) expect(bootSetup.spawned.boot_prompt_receipt).not.toHaveProperty("submit_dispatched");
+      const id = bootSetup.spawned.boot_prompt_receipt.delivery_id;
+      expect(bootSetup.spawned.next_action).toContain(`wait_for({delivery_id:"${id}"})`);
+      expect(bootSetup.spawned.next_action).not.toContain("stop and");
+      expect(bootSetup.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: false, delivery_state: "pending_verify" });
+      bootSetup.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
+      await bootSetup.engine.verifyPendingDeliveries();
+      const waited = parseToolResult(await bootSetup.server._registeredTools.wait_for.handler({ delivery_id: id, timeout_ms: 100 }, {}));
       expect(waited).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
-      expect(t.engine.getAgentState(t.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true, boot_verify_started_at: null });
-    } finally { t.context.dispose(); }
+      expect(bootSetup.engine.getAgentState(bootSetup.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true, boot_verify_started_at: null });
+    } finally { bootSetup.context.dispose(); }
   }, 30_000);
 
   it("boot: a lost Return is retried, and only the transcript row verifies it", async () => {
