@@ -32,6 +32,19 @@ can change after respawns, moves, reconnects, or stale terminal cleanup; an
 | Operate a raw terminal/shell | `send_to(mode:"surface"|"command"|"key")` | Agent mode without an `agent_id` |
 | Close or recover a stuck pane | `read_screen`, `close_surface`, then `spawn_agent` for managed agents | Absorbing the worker task into the caller |
 
+## Spawn Receipts
+
+`spawn_agent` successes return at most six fields: `ok`, `agent_id`,
+`surface_id`, `state`, `delivered`, and optional `warning`. `state` is the spawn
+outcome, such as `started` or `boot_unsubmitted`; `delivered` is true only when
+the boot prompt was verified delivered. A raw terminal has `agent_id:null`
+and `delivered:false`. Follow any recovery warning on the existing pane.
+
+Request `verbose:true` on the spawn call to include `contract_path`,
+`report_path`, `done_marker`, coordination notes, transport, worktree, and
+timings. The issued contract file already contains `report_path` and
+`done_marker`. Failures keep full detail regardless of `verbose`.
+
 ## Handling Existing Agents
 
 When a user names a worker by role, tab, or short ref:

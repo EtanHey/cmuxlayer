@@ -127,7 +127,7 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 
 | Tool | What it does |
 |------|-------------|
-| `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
+| `spawn_agent` | Spawn or resume; default receipt: `ok`, `agent_id`, `surface_id`, `state`, `delivered`, optional `warning` (at most six fields). Use `verbose:true` for contract and diagnostics; failures keep full detail |
 | `report_to_parent` | Raise a short blocker to the managed agent's registry parent |
 | `send_to` | Send by agent ID or raw surface using `mode:"agent"\|"surface"\|"command"\|"key"` |
 | `read_screen` | Read terminal output with parsed agent status |

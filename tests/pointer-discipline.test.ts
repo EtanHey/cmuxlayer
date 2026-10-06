@@ -893,7 +893,7 @@ describe("pane input pointer discipline", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(true);
+    expect(parsed.delivered).toBe(true);
     context.dispose();
   });
 
@@ -905,7 +905,7 @@ describe("pane input pointer discipline", () => {
       const context = createServerContext({ exec: makeLifecycleExec(), stateDir: join(testDir, `receipt-${index}`),
         disableSpawnPreflight: true, sessionIdentityResolver: () => null });
       const result = await (createServer({ context }) as any)._registeredTools.spawn_agent.handler(
-        { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium", workspace: "workspace:1",
+        { verbose: true, repo: "brainlayer", model: "codex", cli: "codex", effort: "medium", workspace: "workspace:1",
           ...(index === 0 ? { prompt } : { boot_prompt_path: promptPath }) }, {} as any);
       const receipt = parseToolResult(result).boot_prompt_receipt;
       expect(receipt).toMatchObject({ prompt_bytes: Buffer.byteLength(prompt), prompt_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });

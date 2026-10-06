@@ -318,6 +318,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       () =>
         tool.handler(
           {
+            verbose: true, // Contract diagnostics are requested explicitly.
             repo: "brainlayer",
             model: "sonnet",
             cli: "claude",
@@ -4209,6 +4210,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
             "spawn_agent"
           ].handler(
             {
+              verbose: true,
               repo: "brainlayer",
               model: "sonnet",
               cli: "claude",
@@ -4302,6 +4304,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         () =>
           rawServer._registeredTools["spawn_agent"].handler(
             {
+              verbose: true,
               repo: "brainlayer",
               cli: "claude",
               role: "worker",

@@ -191,7 +191,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       engine.stateMgr.writeState(seat); engine.getRegistry().set(seat.agent_id, seat);
     }
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
-      server._registeredTools.spawn_agent.handler({
+      server._registeredTools.spawn_agent.handler({ verbose: true,
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
         boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));

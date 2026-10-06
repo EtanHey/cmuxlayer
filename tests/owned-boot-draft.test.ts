@@ -128,7 +128,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     const as = <T>(uuid: string | undefined, fn: () => Promise<T>) =>
       runWithCallerContext(uuid ? { surfaceId: uuid, workspaceId: "workspace:1" } : undefined, fn);
     const spawn = (uuid: string | undefined) => as(uuid, async () => parseToolResult(
-      await server._registeredTools.spawn_agent.handler({
+      await server._registeredTools.spawn_agent.handler({ verbose: true,
         repo: "brainlayer", model: "sonnet", cli: "claude", workspace: "workspace:1",
         prompt: "Read and follow /tmp/reviewer-brief.md", boot_prompt_timeout_ms: 2_000,
       }, {})));

@@ -186,7 +186,7 @@ export function registerSpawnAgentTool(
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
-    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Default successes have at most six fields: ok, agent_id, surface_id, state (spawn outcome), delivered (boot prompt), and optional warning. Use verbose:true for contract_path, report_path, done_marker, transport, worktree, and diagnostics; report_path and done_marker are also in the issued contract file. Failures always keep full detail.",
     {
       version: z
         .literal(1)
@@ -364,7 +364,7 @@ export function registerSpawnAgentTool(
         .optional()
         .default(false)
         .describe(
-          "Return the full legacy spawn response instead of the lean default.",
+          "Return the full success receipt, including contract_path, report_path, done_marker, transport, worktree, and diagnostics; defaults to at most six fields. Failures always keep full detail.",
         ),
     },
     ANNOTATIONS.mutating,
