@@ -60,7 +60,7 @@ function makeCodexPane(frames: Frames) {
   };
   const read = (): string => {
     if (pane.shellUntilLaunch) return `$ ${pane.launcherCommand}`;
-    if (pane.bannerOpen) return overlayCapture(`codex-${pane.bannerVariant}`).replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
+    if (pane.bannerOpen && pane.bannerVariant === "hooks-review") return overlayCapture("codex-hooks-review").replace("Ask Codex to do anything", pane.text || "Ask Codex to do anything");
     if (pane.phase === "buffered") {
       if (--pane.bufferedReads <= 0) pane.phase = "draft";
       return frame(pane.frames.buffered);
@@ -73,6 +73,11 @@ function makeCodexPane(frames: Frames) {
       pane.endTurnAfterDraftRead = false;
       pane.endTurnAtPostTabRead = 0;
       pane.frames.draft = (typed) => fixture("idle-draft").replace(PONG, typed);
+    }
+    if (pane.bannerOpen) {
+      const banner = overlayCapture(`codex-${pane.bannerVariant}`);
+      const footer = "Press a number to choose · esc to dismiss · type to continue";
+      return `${banner.slice(0, banner.indexOf(footer) + footer.length)}\n${shown.slice(shown.search(/^\s*›/mu))}`;
     }
     return shown;
   };
@@ -511,23 +516,57 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     ["cursor", "cursor-path", "/999e_no_match_capture"],
   ] as const;
 
+  it.each(["boot", "daybreak-real"])("P0 nonblocking %s banner sends and verifies without Esc", async variant => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
+    try {
+      target.pane.bannerVariant = variant;
+      target.pane.bannerOpen = true; target.pane.bannerStuck = true;
+      const result = await target.send(PONG, false, true);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, typed: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["return"]);
+      expect(target.pane.submitted).toEqual([PONG]);
+      expect(target.pane.bannerOpen).toBe(true);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["boot", "daybreak-real"])("P0 nonblocking %s boot prompt verifies without Esc", async variant => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: typed => fixture("idle-draft").replace(`› ${PONG}`, codexRows(typed)), after: typed => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(typed)) }, PONG, 0, "codex", false, { variant, stuck: true });
+    try {
+      expect(target.spawned, JSON.stringify(target.spawned)).toMatchObject({ ok: true, boot_prompt_submit_verified: true });
+      expect(target.pane.keys).not.toContain("escape");
+      expect(target.pane.submitted.some(text => text.includes(PONG))).toBe(true);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("P0 nonblocking security notice still protects a foreign draft", async () => {
+    const foreign = plainFrame("codex", "synthetic human draft");
+    const target = await setup({ empty: foreign, buffered: foreign, draft: foreign, after: foreign });
+    try {
+      target.pane.bannerVariant = "daybreak-real"; target.pane.bannerOpen = true;
+      expect(await target.send(PONG, false, true)).toMatchObject({ ok: false, error_code: "blocked_by_foreign_draft", typed: false, submit_dispatched: false });
+      expect(target.pane.keys).toEqual([]); expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("#1007 bound banner Esc retains the stable surface identity", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") }, undefined, 0, "codex", true);
     try {
       const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
       expect(agent.surface_uuid).toBeTruthy();
       target.keyWrites?.mockClear();
-      target.pane.bannerOpen = true;
-      await target.engine["dismissBootSecurityBanner"](agent, { surface: agent.surface_id, text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true;
+      await target.engine["dismissBootSecurityBanner"](agent, { surface: agent.surface_id, text: overlayCapture("codex-hooks-review"), lines: 35, scrollback_used: false });
       expect(target.keyWrites).toHaveBeenCalledWith(agent.surface_uuid, "escape", { workspace: agent.workspace_id, stableSurfaceIdentity: agent.surface_uuid });
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it("#1007 raw boot preserves the structured persistent-banner safety code", async () => {
+  it("#1007 raw boot preserves the structured persistent-Hooks safety code", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
     try {
-      target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
-      expect(await target.rawBoot()).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed" });
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      expect(await target.rawBoot()).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed" });
       expect(target.pane.keys).toEqual(["return", "escape"]);
     } finally { target.context.dispose(); }
   }, 30_000);
@@ -542,13 +581,13 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         concurrentWrites = target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer")).length;
       };
       if (route === "raw boot") {
-        target.pane.bannerOnReturn = true;
+        target.pane.bannerVariant = "hooks-review"; target.pane.bannerOnReturn = true;
         target.pane.onEscape = async () => { target.pane.beforeRead = attempt; };
         await target.rawBoot();
       } else {
-        target.pane.bannerOpen = true; target.pane.beforeRead = attempt;
+        target.pane.bannerVariant = "hooks-review"; target.pane.bannerOpen = true; target.pane.beforeRead = attempt;
         const agent = { ...target.engine.getRegistry().get(target.spawned.agent_id), state: "booting" };
-        await target.engine["dismissBootSecurityBanner"](agent, { surface: "surface:new", text: overlayCapture("codex-boot"), lines: 35, scrollback_used: false });
+        await target.engine["dismissBootSecurityBanner"](agent, { surface: "surface:new", text: overlayCapture("codex-hooks-review"), lines: 35, scrollback_used: false });
       }
       expect(concurrent).toMatchObject({ ok: false });
       expect(JSON.stringify(concurrent)).toMatch(/busy|still in progress/u);
@@ -588,19 +627,19 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [stuck, variant] as const)))("#999(e) security banner is Esc-only before typing (stuck=%s, %s)", async (stuck, variant) => {
+  it.each([false, true].flatMap(stuck => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [stuck, variant] as const)))("security is nonblocking; Hooks is Esc-only (stuck=%s, %s)", async (stuck, variant) => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
       draft: typed => plainFrame("codex", typed), after: typed => plainFrame("codex", typed, true) });
     try {
       target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
       const result = await target.send(PONG, false, true);
-      if (stuck) {
-        expect(result).toMatchObject({ ok: false, error_code: variant === "hooks-review" ? "hooks_review_not_dismissed" : "account_security_banner_not_dismissed", typed: false, submit_dispatched: false });
+      if (stuck && variant === "hooks-review") {
+        expect(result).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed", typed: false, submit_dispatched: false });
         expect(target.pane.text).toBe("");
         expect(target.pane.keys).toEqual(["escape"]);
       } else {
         expect(result).toMatchObject({ ok: true, submit_verified: true });
-        expect(target.pane.keys).toEqual(["escape", "return"]);
+        expect(target.pane.keys).toEqual(variant === "hooks-review" ? ["escape", "return"] : ["return"]);
         expect(target.pane.submitted).toEqual([PONG]);
       }
     } finally { target.context.dispose(); }
@@ -624,11 +663,11 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       await target.typeDraft(PONG); target.pane.phase = "draft";
       target.pane.bannerVariant = variant; target.pane.bannerOpen = true; target.pane.bannerStuck = stuck;
       const result = await target.keyReturn(LEAD_UUID);
-      expect(result, JSON.stringify(result)).toMatchObject(stuck
-        ? { ok: false, error_code: variant === "hooks-review" ? "hooks_review_not_dismissed" : "account_security_banner_not_dismissed", submit_attempted: false }
+      expect(result, JSON.stringify(result)).toMatchObject(stuck && variant === "hooks-review"
+        ? { ok: false, error_code: "hooks_review_not_dismissed", submit_attempted: false }
         : { ok: true, submit_verified: true });
-      expect(target.pane.keys).toEqual(stuck ? ["escape"] : ["escape", "return"]);
-      expect(target.context.typedDraftOwners.size).toBe(stuck ? 1 : 0);
+      expect(target.pane.keys).toEqual(variant !== "hooks-review" ? ["return"] : stuck ? ["escape"] : ["escape", "return"]);
+      expect(target.context.typedDraftOwners.size).toBe(stuck && variant === "hooks-review" ? 1 : 0);
     } finally { target.context.dispose(); }
   }, 30_000);
 
@@ -665,15 +704,15 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { target.context.dispose(); }
   }, 30_000);
 
-  it("#999(e) security appearing between chunks preserves its distinct failure and stops input", async () => {
+  it("#999(e) Hooks appearing between chunks preserves its distinct failure and stops input", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
       draft: typed => plainFrame("codex", typed), after: fixture("idle-empty") });
     try {
-      target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
+      target.pane.bannerVariant = "hooks-review"; target.pane.bannerAfterType = true; target.pane.bannerStuck = true;
       const payload = "Synthetic packet ".repeat(1_100);
       const before = target.exec.mock.calls.length;
       const result = await target.sendChunks(payload);
-      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "account_security_banner_not_dismissed", typed: true });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error_code: "hooks_review_not_dismissed", typed: true });
       expect(target.pane.keys.filter(key => key === "escape" || key === "return")).toEqual(["escape"]);
       expect(target.exec.mock.calls.slice(before).filter(([, args]: [string, string[]]) => args.includes("send") || args.includes("set-buffer"))).toHaveLength(1);
       expect(payload.startsWith(target.pane.text)).toBe(true);

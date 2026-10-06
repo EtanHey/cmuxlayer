@@ -11,12 +11,10 @@ import * as daemonLog from "../src/daemon-log.js";
 
 const hooks = readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8");
 const composer = "› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch";
-const security = readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8");
 const roots: string[] = [];
 it.each([
   { kind: "hooks", screen: hooks, outcome: "dismissed" }, { kind: "hooks", screen: hooks, outcome: "read failure" },
-  { kind: "security", screen: security, outcome: "dismissed" }, { kind: "security", screen: security, outcome: "read failure" },
-  { kind: "hooks", screen: hooks, outcome: "stuck" }, { kind: "security", screen: security, outcome: "stuck" },
+  { kind: "hooks", screen: hooks, outcome: "stuck" },
 ])("audit failure preserves $kind dismissal result: $outcome", async ({ kind, screen, outcome }) => {
   vi.useFakeTimers();
   const stderr = vi.spyOn(console, "error").mockReturnValue(undefined);
@@ -33,9 +31,7 @@ it.each([
   await vi.advanceTimersByTimeAsync(1_100);
   const result = await settled;
   if (outcome === "dismissed") expect(result).toEqual({ value: { text: composer }, error: null });
-  else if (kind === "hooks") expect(result.error).toMatchObject({ error_code: "hooks_review_not_dismissed" });
-  else if (outcome === "stuck") expect(result.error).toMatchObject({ error_code: "account_security_banner_not_dismissed" });
-  else expect(result.error).toBe(originalError);
+  else expect(result.error).toMatchObject({ error_code: "hooks_review_not_dismissed" });
   expect(escape).toHaveBeenCalledTimes(1);
   expect(read).toHaveBeenCalledTimes(outcome === "stuck" ? 5 : 1);
   await flushDaemonLog();

@@ -2649,7 +2649,7 @@ export class AgentEngine {
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;
     } catch (error) {
-      if (error instanceof DeliverySafetyGateError && (error.error_code === "account_security_banner_not_dismissed" || error.error_code === "hooks_review_not_dismissed")) return this.registry.get(agent.agent_id) ?? agent;
+      if (error instanceof DeliverySafetyGateError && error.error_code === "hooks_review_not_dismissed") return this.registry.get(agent.agent_id) ?? agent;
       if (agent.boot_prompt_pending && this.isBootPromptPendingStale(agent) &&
           this.assertSweepInputCurrent(ctx)) {
         try {

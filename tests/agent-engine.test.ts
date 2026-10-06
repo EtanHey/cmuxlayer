@@ -10093,33 +10093,33 @@ Session ID: ${sessionId}`,
       }
     });
 
-    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("#999(e) %s boot dismisses %s account security before readiness", async (origin, variant) => {
+    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("%s boot skips only Hooks review, leaving %s security chrome alone", async (origin, variant) => {
       const id = `security-${origin}`;
       stateMgr.writeState(makeRecord({ agent_id: id, state: "booting", surface_id: "surface:42", cli: "codex",
         ...(origin === "resume" ? { boot_resumed_at: new Date().toISOString() } : {}) }));
       liveSurfaces = [makeSurface("surface:42")];
       let banner = true;
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
-        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? variant : "dismissed"}.txt`, import.meta.url), "utf8"), lines: 35, scrollback_used: false,
+        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? variant : "dismissed"}.txt`, import.meta.url), "utf8") + (banner && variant === "daybreak-synthetic" ? "\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch" : ""), lines: 35, scrollback_used: false,
       }));
       (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(async (_surface, key) => { if (key === "escape") banner = false; });
       await engine.getRegistry().reconstitute();
       await engine.runSweep(); await engine.runSweep();
-      expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
-      expect(mockClient.sendKey.mock.calls[0][1]).toBe("escape");
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(variant === "hooks-review" ? 1 : 0);
+      if (variant === "hooks-review") expect(mockClient.sendKey.mock.calls[0][1]).toBe("escape");
       expect(engine.getAgentState(id)?.state).toBe("ready");
-      expect(stateMgr.getEventLog().readEntries()).toContainEqual(expect.objectContaining({ event_type: "account_security_banner", agent_id: id, surface: "surface:42", outcome: "dismissed" }));
+      if (variant === "hooks-review") expect(stateMgr.getEventLog().readEntries()).toContainEqual(expect.objectContaining({ event_type: "account_security_banner", agent_id: id, surface: "surface:42", outcome: "dismissed" }));
     });
 
-    it("#999(e) a wedged security banner fails boot explicitly after one Esc", async () => {
+    it("#999(e) a persistent security notice permits boot readiness without Esc", async () => {
       stateMgr.writeState(makeRecord({ agent_id: "security-wedged", state: "booting", surface_id: "surface:42", cli: "codex" }));
       liveSurfaces = [makeSurface("surface:42")];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:42",
         text: readFileSync(new URL("./fixtures/composer-overlays/codex-boot.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false });
       await engine.getRegistry().reconstitute();
       await engine.runSweep(); await engine.runSweep();
-      expect(mockClient.sendKey).toHaveBeenCalledTimes(1);
-      expect(engine.getAgentState("security-wedged")).toMatchObject({ state: "error", error: expect.stringContaining("account_security_banner_not_dismissed") });
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(engine.getAgentState("security-wedged")).toMatchObject({ state: "ready" });
     });
 
     it("#1007 never sends Esc from an old banner after the agent rebinds", async () => {
@@ -10128,7 +10128,7 @@ Session ID: ${sessionId}`,
       liveSurfaces = [makeSurface("surface:43")];
       const closed = { surface: "surface:43", text: readFileSync(new URL("./fixtures/composer-overlays/codex-dismissed.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false };
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(closed);
-      const old = { ...closed, surface: "surface:42", text: readFileSync(new URL("./fixtures/composer-overlays/codex-boot.txt", import.meta.url), "utf8") };
+      const old = { ...closed, surface: "surface:42", text: readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8") };
       expect(await engine["dismissBootSecurityBanner"](agent, old)).toEqual(closed);
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.readScreen).toHaveBeenCalledWith("surface:43", expect.anything());
