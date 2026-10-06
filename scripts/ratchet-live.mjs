@@ -153,7 +153,7 @@ try {
     const candidate = await sample(row, argv.includes("--prove") ? row.fix : option("--candidate", "HEAD"));
     const proof = !argv.includes("--prove") || baseline.status === "FAIL" && baseline.expected_defect;
     const frames = (row.fixture === "banner" ? ["composer-overlays/codex-boot.txt"] : ["codex-0.157/idle-empty.txt", "codex-0.157/idle-submitted-working.txt"]).map(file => ({ file, sha256: createHash("sha256").update(readFileSync(join(root, "tests/fixtures", file))).digest("hex") }));
-    receipt.rows.push({ ...row, provenance: { frames: "real", captures: frames, transition: `modeled from ${row.specimen}`, adaptation: "blank padding rows removed; boot committed row scroll-away modeled" }, baseline, candidate, delta: Number(candidate.status === "FAIL") - Number(baseline.status === "FAIL"), ceiling: 0, status: candidate.status === "PASS" && proof ? "PASS" : "FAIL" });
+    receipt.rows.push({ ...row, provenance: { frames: "real", captures: frames, transition: `modeled from ${row.specimen}`, adaptation: "blank padding rows removed; boot committed row scroll-away modeled" }, baseline, candidate, delta: Number(candidate.status === "FAIL") - Number(baseline.status === "FAIL"), ceiling: 0, status: candidate.status === "PASS" && proof && !receipt.production_files_changed ? "PASS" : "FAIL" });
   }
   receipt.status = !receipt.production_files_changed && receipt.rows.every(row => row.status === "PASS") ? "PASS" : "FAIL";
 } catch (error) { receipt.error = String(error); }
