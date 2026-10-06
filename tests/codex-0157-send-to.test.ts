@@ -156,11 +156,21 @@ function parseToolResult(result: any) {
 describe("#905 send_to receipts on Codex 0.157", () => {
   let testDir = "";
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
-  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
+  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000, omitBootDispatch = false) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
+    if (omitBootDispatch) {
+      const spawnTools = await import("../src/mcp/tools/spawn.js");
+      const register = spawnTools.registerSpawnAgentTool;
+      vi.spyOn(spawnTools, "registerSpawnAgentTool").mockImplementationOnce((server, deps) =>
+        register(server, { ...deps, deliverBootPrompt: async opts => {
+          const receipt = await deps.deliverBootPrompt(opts);
+          delete receipt.submit_dispatched; // Legacy/optional receipt field.
+          return receipt;
+        } }));
+    }
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const { pane, exec } = makeCodexPane(bootPrompt ? frames : {
       empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
@@ -1152,13 +1162,14 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  it("P0 boot: an unproven dispatched Return remains pending and resolves by delivery_id", async () => {
+  it.each([false, true])("P0 boot: an unproven Return resolves by delivery_id when dispatch flag is omitted=%s", async omitBootDispatch => {
     const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
     const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
-      after: draft }, "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500);
+      after: draft }, "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500, omitBootDispatch);
     try {
       expect(t.spawned, JSON.stringify(t.spawned)).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
         boot_prompt_receipt: { delivery_state: "pending_verify", terminal: false, delivery_id: expect.any(String), submit_verified: null } });
+      if (omitBootDispatch) expect(t.spawned.boot_prompt_receipt).not.toHaveProperty("submit_dispatched");
       const id = t.spawned.boot_prompt_receipt.delivery_id;
       expect(t.spawned.next_action).toContain(`wait_for({delivery_id:"${id}"})`);
       expect(t.spawned.next_action).not.toContain("stop and");

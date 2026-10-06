@@ -86,6 +86,7 @@ import type { AgentRegistry } from "../../agent-registry.js";
 import type { CmuxServerContext, CreateServerOptions } from "../context.js";
 import type { CoordinationContract } from "../../coordination-paths.js";
 import type { DeliveryEngine } from "../../delivery/engine.js";
+import type { PublicDeliveryReceipt } from "../../delivery/receipts.js";
 import type { PreparedWorktree } from "../../worktree.js";
 import type { ServerAgentHealthEvaluator } from "./agent.js";
 import type { StateManager } from "../../state-manager.js";
@@ -96,6 +97,11 @@ import type {
   FocusTarget,
   MonitorBootResult,
 } from "../shared-types.js";
+
+function bootReturnDispatched(receipt: Pick<PublicDeliveryReceipt, "submit_dispatched">): boolean {
+  // Legacy receipts can omit this flag; only explicit false proves no Return.
+  return receipt.submit_dispatched !== false;
+}
 
 export interface SpawnAgentToolDeps {
   appendStaleBuildWarning: (result: { warnings?: string[]; }) => void;
@@ -1178,7 +1184,7 @@ export function registerSpawnAgentTool(
 
             await captureSpawnSessionBestEffort(result);
             if (bootPromptDelivery.delivery_state === "pending_verify" &&
-                bootPromptDelivery.submit_dispatched === true && bootPromptDelivery.delivery_id) {
+                bootReturnDispatched(bootPromptDelivery) && bootPromptDelivery.delivery_id) {
               const boot = engine.getAgentState(result.agent_id);
               engine.acceptPendingVerify({
                 delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
@@ -1502,7 +1508,7 @@ export function registerSpawnAgentTool(
           ...result,
           spawn_state:
             bootPromptDelivery && bootPromptDelivery.submit_verified !== true
-              ? bootPromptDelivery.delivery_state === "pending_verify" && bootPromptDelivery.submit_dispatched === false
+              ? bootPromptDelivery.delivery_state === "pending_verify" && !bootReturnDispatched(bootPromptDelivery)
                 ? "boot_unsubmitted"
                 : "pending_verify"
               : "started",
