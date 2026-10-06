@@ -34,6 +34,9 @@ log/ticket bytes to the run UUID, sample tokens, agent IDs and scratch paths.
 Only appended ranges are scanned (at most 4 MiB per file); buffers are discarded
 and receipts contain paths/offsets, never production content. Unrelated writes
 pass. Missing/truncated/changed sources and inspection errors fail closed.
+Rotation by rename is supported while the original inode remains in the watched
+files. Deleting a production log or rotated segment loses that inode and FAILs
+the run because its appended bytes can no longer be inspected.
 Production `~/.cmuxterm/events.jsonl` is never inspected. Each sample requires a
 nonempty daemon log under its private HOME as a positive isolation control.
 Attributed writes or missing private writes fail the run, including on a bug
