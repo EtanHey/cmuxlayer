@@ -610,7 +610,14 @@ export function composerRegionMatchesPayload(
   // An empty composer is an empty payload on every CLI. For Codex a
   // multi-row region is never compared literally: `a\n  b` on screen is the
   // payload `a\nb` (or a wrap), not `a\n  b`.
-  if (cli !== "codex") return region === expected;
+  if (cli !== "codex" && region === expected) return true;
+  // Claude continuation rows use the same two-column gutter. Only measured
+  // renderer wraps qualify; short rows, edited spacing and paste placeholders
+  // cannot establish ownership of the original payload.
+  if (cli === "claude" && screenText !== undefined && region.includes("\n")) {
+    return codexRenderedRowsMatch(region.split("\n"), payload, codexWrapWidthFloor(screenText));
+  }
+  if (cli !== "codex") return false;
   if (!region.trim()) return expected === "";
   const [first = "", ...following] = region.split("\n");
   return codexRenderedRowsMatch(

@@ -576,7 +576,7 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
 export async function resumeAgent(
   this: LifecycleHost,
   agentId: string,
-  opts?: { workspace?: string; force?: boolean },
+  opts?: { workspace?: string; force?: boolean; focus?: boolean },
 ): Promise<SpawnAgentResult> {
   let agent = this.resolveResumeAgent(agentId);
   if (!agent) {
@@ -616,6 +616,8 @@ export async function resumeAgent(
   const resumeCommand = resumeInvocation.command;
   const requestedWorkspace =
     opts?.workspace ?? agent.workspace_id ?? undefined;
+  // Match spawn's metadata-aware default while retaining legacy initialization.
+  const focus = opts?.focus ?? !this.client.supportsSurfaceRuntimeMetadata;
   this.spawnGuard.check(requestedWorkspace);
   const persistedAgent = this.stateMgr.readState(agent.agent_id);
   if (!persistedAgent) {
@@ -644,6 +646,7 @@ export async function resumeAgent(
   try {
     surface = await this.createAgentSurface(requestedWorkspace, {
       role: inferRecordRole(agent),
+      focus,
       parentAgent: agent.parent_agent_id
         ? this.registry.get(agent.parent_agent_id)
         : null,
@@ -655,15 +658,17 @@ export async function resumeAgent(
       "explicit agent resume",
     );
     const workspace = surface.actual_workspace ?? surface.workspace;
-    await this.client.focusSurface(surface.surface, {
-      workspace,
-      beforeMutation: async () => {
-        this.assertSurfaceObserverEpochCurrent(
-          surface!.observerEpoch,
-          "explicit agent resume focus",
-        );
-      },
-    });
+    if (focus) {
+      await this.client.focusSurface(surface.surface, {
+        workspace,
+        beforeMutation: async () => {
+          this.assertSurfaceObserverEpochCurrent(
+            surface!.observerEpoch,
+            "explicit agent resume focus",
+          );
+        },
+      });
+    }
 
     const creating = this.stateMgr.reopenForResume(agent.agent_id);
     recordReopened = true;

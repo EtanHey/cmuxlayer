@@ -4849,6 +4849,45 @@ describe("AgentEngine", () => {
       );
     });
 
+    it.each([
+      { metadata: true, focus: undefined, expected: false },
+      { metadata: true, focus: false, expected: false },
+      { metadata: true, focus: true, expected: true },
+      { metadata: false, focus: undefined, expected: true },
+      { metadata: false, focus: false, expected: false },
+      { metadata: false, focus: true, expected: true },
+    ])("resume focus policy metadata=$metadata focus=$focus", async ({ metadata, focus, expected }) => {
+      Object.assign(mockClient, { supportsSurfaceRuntimeMetadata: metadata });
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-focus-resume",
+        state: "done",
+        pid: DEAD_PID,
+        surface_id: "surface:old",
+        workspace_id: "ws:1",
+        repo: "brainlayer",
+        cli: "codex",
+        cli_session_id: sessionId,
+        launcher_name: "brainlayerCodex",
+      }));
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+      liveSurfaces = [makeSurface("surface:witness")];
+
+      const result = await engine.resumeAgent("agent-focus-resume", { focus });
+
+      expect(result.surface_id).toBe("surface:new");
+      expect(engine.getAgentState(result.agent_id)?.state).toBe("booting");
+      expect(mockClient.focusSurface).toHaveBeenCalledTimes(expected ? 1 : 0);
+      expect(mockClient.selectWorkspace).toHaveBeenCalledTimes(expected ? 1 : 0);
+      const creationOptions = [
+        ...(mockClient.newSurface as ReturnType<typeof vi.fn>).mock.calls.map(([opts]) => opts),
+        ...(mockClient.newSplit as ReturnType<typeof vi.fn>).mock.calls.map(([, opts]) => opts),
+      ];
+      expect(creationOptions).toEqual([expect.objectContaining({ focus: expected })]);
+      expect(mockClient.send).toHaveBeenCalledWith("surface:new", expect.stringContaining(`resume ${sessionId}`), { workspace: "ws:1" });
+    });
+
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
       const agentId = "agent-live-pid-must-not-resume";
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
