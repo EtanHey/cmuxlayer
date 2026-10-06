@@ -222,10 +222,14 @@ const result = {
 };
 
 describe("selective runner rebase", () => {
-  function refresh(rows: string | undefined, surfaceP50 = 80.53, legacy = false) {
+  // Baseline updates must not turn the positive raise control into a no-op.
+  const rebaseBaseline = attest({ ...baseline, measurements: {
+    ...baseline.measurements, cli_send_ms: baseline.measurements.send_to_surface_warm.p50_ms,
+  } });
+  function refresh(rows: string | undefined, surfaceP50 = 250, legacy = false) {
     const root = mkdtempSync(join(tmpdir(), "cmuxlayer-selective-rebase-"));
     const baselineFile = join(root, "benchmarks", "daemon-baseline.json");
-    const committed = structuredClone(hostedBaseline);
+    const committed = JSON.parse(JSON.stringify(rebaseBaseline));
     if (legacy) {
       delete committed.measurements.control_health;
       committed.refresh_attestation.content_sha256 = baselineContentSha256(committed);
@@ -243,7 +247,7 @@ describe("selective runner rebase", () => {
       }
       writeFileSync(baselineFile, before);
       const candidate = structuredClone(result);
-      candidate.replay = hostedBaseline.replay;
+      candidate.replay = rebaseBaseline.replay;
       candidate.latency.send_to_surface_warm.p50_ms = surfaceP50;
       // Some unlisted metrics rise, others fall. Neither direction may rebase.
       candidate.latency.daemon_path.read_screen.p50_ms = 1;
@@ -278,9 +282,9 @@ describe("selective runner rebase", () => {
   it("raises only the listed p50 and CLI alias, preserving every unlisted measurement", () => {
     const refreshed = refresh(" send_to_surface_warm.p50_ms, cli_send_ms,send_to_surface_warm.p50_ms ");
     expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
-    const expected = structuredClone(hostedBaseline.measurements);
-    expected.send_to_surface_warm.p50_ms = 80.53;
-    expected.cli_send_ms = 80.53;
+    const expected = structuredClone(rebaseBaseline.measurements);
+    expected.send_to_surface_warm.p50_ms = 250;
+    expected.cli_send_ms = 250;
     expect(JSON.stringify(refreshed.baseline.measurements)).toBe(JSON.stringify(expected));
     expect(refreshed.baseline.source.rebase_rows).toEqual([
       "send_to_surface_warm.p50_ms", "cli_send_ms",
@@ -294,7 +298,7 @@ describe("selective runner rebase", () => {
     const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 40);
     expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
     expect(JSON.stringify(refreshed.baseline.measurements)).toBe(
-      JSON.stringify(hostedBaseline.measurements),
+      JSON.stringify(rebaseBaseline.measurements),
     );
   });
 
@@ -315,7 +319,7 @@ describe("selective runner rebase", () => {
   });
 
   it("refuses legacy migration rather than adding unlisted measurements", () => {
-    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 80.53, true);
+    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 250, true);
     expect(refreshed.run.status).not.toBe(0);
     expect(refreshed.run.stderr).toContain("canonical committed baseline");
     expect(refreshed.after).toBe(refreshed.before);
