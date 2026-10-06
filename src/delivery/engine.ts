@@ -1497,6 +1497,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       // still definitively holds the original text.
       if (
         !retried &&
+        // An accepted launcher Return can leave a stale shell echo while the
+        // new CLI starts. A replay queues an empty composer line; readiness,
+        // rather than another Return, must resolve this ambiguous evidence.
+        opts.source_event !== "spawn_agent" &&
         retryEligiblePendingInput &&
         retryEligiblePendingSince !== null &&
         Date.now() - retryEligiblePendingSince >= retryObserveMs

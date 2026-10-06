@@ -5366,7 +5366,62 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   });
 
-  it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
+  it("spawn_agent does not insert a leading newline while the launcher shell echo is stale", async () => {
+    vi.useFakeTimers();
+    try {
+      const capture = JSON.parse(readFileSync(new URL(
+        "./fixtures/spawn/codex-0.160.1-launcher-leading-newline.json", import.meta.url,
+      ), "utf8"));
+      expect(capture.frames.boot_draft).toContain(`›\n  ${capture.prompt}`);
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let launchedAt: number | null = null;
+      let launcherReturns = 0;
+      let draft = "";
+      let submitted = "";
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") || args.includes("set-buffer")) {
+          if (text.includes("voicelayerCodex -s")) command = text;
+          else if (text === capture.prompt) draft += text;
+          else return baseExec(cmd, args);
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          if (draft.includes(capture.prompt)) { submitted = draft; draft = ""; }
+          else {
+            launcherReturns += 1;
+            if (launchedAt === null) launchedAt = Date.now();
+            else draft += "\n"; // A queued second launcher Return reaches Codex.
+          }
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          // The accepted first Return has not repainted the terminal yet. The
+          // capture's shell echo is indistinguishable from an unsubmitted line.
+          const text = launchedAt === null || Date.now() - launchedAt < 600
+            ? capture.frames.shell_echo.replace(/cd .*$/, command)
+            : submitted
+              ? `OpenAI Codex\n› ${submitted}\nWorking (1s • esc to interrupt)\n› \nGPT-6-Luna low · /tmp/synthetic`
+              : `OpenAI Codex\n› ${draft}\nGPT-6-Luna low · /tmp/synthetic`;
+          return { stdout: JSON.stringify({ surface: "surface:new", text, lines: 80, scrollback_used: false }), stderr: "" };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: capture.prompt, boot_prompt_timeout_ms: 2_000,
+      }, {} as any);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = parseToolResult(await pending);
+      expect(launcherReturns).toBe(1);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(submitted).toBe(capture.prompt);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spawn_agent fails without a second Return when the launcher never starts", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launcherReturnCount = 0;
@@ -5491,10 +5546,11 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toContain("launcher command remained pending after Return");
     expect(parsed.workspace_id).toBe("workspace:voice");
-    expect(launcherReturnCount).toBe(2);
-    expect(promptDelivered).toBe(true);
+    expect(launcherReturnCount).toBe(1);
+    expect(promptDelivered).toBe(false);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -5511,7 +5567,7 @@ describe("agent lifecycle tool handlers", () => {
           args.includes("set-buffer") &&
           String(args.at(-1) ?? "").includes("file prompt body"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   }, 10_000);
 
   it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
