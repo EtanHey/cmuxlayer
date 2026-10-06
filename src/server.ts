@@ -980,6 +980,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
     callerOwnsTypedDraft,
+    retryPendingClaudeDraft,
     settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
@@ -3625,6 +3626,24 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        if (cli === "claude" && receipt.delivery_state === "pending_verify" && receipt.press_enter && !receipt.boot_recovery && pending && receipt.retry_count < 1) {
+          const route = await engine.resolveAgentIoRoute(receipt.agent_id);
+          const beforeMutation = async () => {
+            await assertSurfaceMutationAllowed("send_to", route.surface_id, route.workspace_id ?? undefined);
+            const current = await engine.resolveAgentIoRoute(receipt.agent_id);
+            if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id ||
+                receipt.terminal || receipt.delivery_state !== "pending_verify") throw new Error("Pending delivery route or receipt changed");
+          };
+          const verified = await withSurfaceWrite(route.surface_id, () => retryPendingClaudeDraft({
+            surface: route.surface_id, workspace: route.workspace_id ?? undefined,
+            stableSurfaceIdentity: route.surface_uuid, receipt, beforeMutation,
+          }), { toolName: "send_to", workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
+          if (verified) {
+            settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+            return { outcome: "delivered" as const, submit_verified: true };
+          }
+          return { outcome: "pending" as const };
+        }
         const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
         const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
         // An older identical Tab queue is not this delivery. Its continued

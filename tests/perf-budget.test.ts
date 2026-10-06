@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -220,6 +220,111 @@ const result = {
     },
   },
 };
+
+describe("selective runner rebase", () => {
+  // Baseline updates must not turn the positive raise control into a no-op.
+  const rebaseBaseline = attest({ ...baseline, measurements: {
+    ...baseline.measurements, cli_send_ms: baseline.measurements.send_to_surface_warm.p50_ms,
+  } });
+  function refresh(rows: string | undefined, surfaceP50 = 250, legacy = false) {
+    const root = mkdtempSync(join(tmpdir(), "cmuxlayer-selective-rebase-"));
+    const baselineFile = join(root, "benchmarks", "daemon-baseline.json");
+    const committed = JSON.parse(JSON.stringify(rebaseBaseline));
+    if (legacy) {
+      delete committed.measurements.control_health;
+      committed.refresh_attestation.content_sha256 = baselineContentSha256(committed);
+    }
+    const before = JSON.stringify(committed, null, 2) + "\n";
+    const env = Object.fromEntries(Object.entries(process.env).filter(
+      ([key]) => !key.startsWith("GIT_") && !key.startsWith("CMUXLAYER_BENCH_") &&
+        !key.startsWith("GITHUB_"),
+    ));
+    try {
+      mkdirSync(join(root, "scripts"));
+      mkdirSync(join(root, "benchmarks"));
+      for (const script of ["refresh-daemon-baseline.mjs", "check-daemon-benchmark.mjs"]) {
+        copyFileSync(join(repoRoot, "scripts", script), join(root, "scripts", script));
+      }
+      writeFileSync(baselineFile, before);
+      const candidate = structuredClone(result);
+      candidate.replay = rebaseBaseline.replay;
+      candidate.latency.send_to_surface_warm.p50_ms = surfaceP50;
+      // Some unlisted metrics rise, others fall. Neither direction may rebase.
+      candidate.latency.daemon_path.read_screen.p50_ms = 1;
+      const imported = join(root, "imported.json");
+      writeFileSync(imported, JSON.stringify(candidate));
+      const git = (args: string[]) => {
+        const run = spawnSync("git", args, { cwd: root, env, encoding: "utf8" });
+        expect(run.status, run.stderr).toBe(0);
+        return run.stdout.trim();
+      };
+      git(["init", "-q"]);
+      git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-qm", "fixture"]);
+      const run = spawnSync("node", [join(root, "scripts", "refresh-daemon-baseline.mjs"),
+        "--reason", "reviewed selective runner calibration"], {
+        cwd: root, encoding: "utf8", timeout: 10_000,
+        env: { ...env, GITHUB_ACTIONS: "true", GITHUB_EVENT_NAME: "workflow_dispatch",
+          GITHUB_SHA: git(["rev-parse", "HEAD"]), GITHUB_RUN_ID: "999",
+          CMUXLAYER_BENCH_RUNNER_CLASS: "github-actions-ubuntu-latest",
+          CMUXLAYER_BENCH_IMPORT_RESULT_PATH: imported,
+          CMUXLAYER_BENCH_SOURCE_RUN_ID: "123", CMUXLAYER_BENCH_SOURCE_SHA: "a".repeat(40),
+          ...(rows === undefined ? {} : { CMUXLAYER_BENCH_REBASE_ROWS: rows }),
+        },
+      });
+      const after = readFileSync(baselineFile, "utf8");
+      return { run, before, after, baseline: JSON.parse(after) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("raises only the listed p50 and CLI alias, preserving every unlisted measurement", () => {
+    const refreshed = refresh(" send_to_surface_warm.p50_ms, cli_send_ms,send_to_surface_warm.p50_ms ");
+    expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
+    const expected = structuredClone(rebaseBaseline.measurements);
+    expected.send_to_surface_warm.p50_ms = 250;
+    expected.cli_send_ms = 250;
+    expect(JSON.stringify(refreshed.baseline.measurements)).toBe(JSON.stringify(expected));
+    expect(refreshed.baseline.source.rebase_rows).toEqual([
+      "send_to_surface_warm.p50_ms", "cli_send_ms",
+    ]);
+    expect(() => validateBaseline(refreshed.baseline)).not.toThrow();
+    refreshed.baseline.source.rebase_rows.push("list_agents.p50_ms");
+    expect(() => validateBaseline(refreshed.baseline)).toThrow(/baseline consistency assertion failed/);
+  });
+
+  it("never tightens listed metrics when the imported sample is faster", () => {
+    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 40);
+    expect(refreshed.run.status, refreshed.run.stderr).toBe(0);
+    expect(JSON.stringify(refreshed.baseline.measurements)).toBe(
+      JSON.stringify(rebaseBaseline.measurements),
+    );
+  });
+
+  it.each([undefined, "", " ", ",", "send_to_surface_warm.p50_ms,"])(
+    "refuses an absent or empty row list (%s) without writing the baseline", (rows) => {
+      const refreshed = refresh(rows);
+      expect(refreshed.run.status).not.toBe(0);
+      expect(refreshed.run.stderr).toContain("non-empty rebase row list");
+      expect(refreshed.after).toBe(refreshed.before);
+    },
+  );
+
+  it("refuses an unknown metric without writing the baseline", () => {
+    const refreshed = refresh("send_to_surface_warm.p500_ms,cli_send_ms");
+    expect(refreshed.run.status).not.toBe(0);
+    expect(refreshed.run.stderr).toContain("unknown rebase row");
+    expect(refreshed.after).toBe(refreshed.before);
+  });
+
+  it("refuses legacy migration rather than adding unlisted measurements", () => {
+    const refreshed = refresh("send_to_surface_warm.p50_ms,cli_send_ms", 250, true);
+    expect(refreshed.run.status).not.toBe(0);
+    expect(refreshed.run.stderr).toContain("canonical committed baseline");
+    expect(refreshed.after).toBe(refreshed.before);
+  });
+});
 
 function budgetCandidate() {
   const candidate = structuredClone(result);
@@ -1625,7 +1730,7 @@ describe("daemon performance budget", () => {
       );
     }
     expect(committed.source.runner_class).toBe("github-actions-ubuntu-latest");
-    expect(committed.source.workflow_run_id).toBe(33380548570);
+    expect(committed.source.workflow_run_id).toBe(37512215757);
     expect(committed).not.toHaveProperty("ceilings");
     expect(committed.refresh_attestation.content_sha256).toMatch(
       /^[0-9a-f]{64}$/,
@@ -1799,6 +1904,12 @@ describe("daemon performance budget", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("perf-baseline-refresh:");
     expect(workflow).toContain("baseline_source_run_id:");
+    expect(workflow).toContain("baseline_rebase_rows:");
+    expect(workflow).toContain("CMUXLAYER_BENCH_REBASE_ROWS: ${{ inputs.baseline_rebase_rows }}");
+    const ordinaryRefresh = workflow.split("- name: Produce canonical CI-runner baseline")[1]
+      .split("- name: Produce rebased CI-runner baseline")[0];
+    expect(ordinaryRefresh).toContain("if: inputs.baseline_source_run_id == ''");
+    expect(ordinaryRefresh).not.toContain("CMUXLAYER_BENCH_REBASE_ROWS");
     expect(workflow).toContain(
       'git merge-base --is-ancestor "$source_sha" HEAD',
     );
@@ -1854,7 +1965,7 @@ describe("daemon performance budget", () => {
     );
     expect(source).toContain("CMUXLAYER_BENCH_IMPORT_RESULT_PATH");
     expect(source).toContain("runnerRebase");
-    expect(source).toContain("runnerRebase ? Math.max : Math.min");
+    expect(source).toContain("CMUXLAYER_BENCH_REBASE_ROWS");
     expect(source).toContain('--reason');
     expect(source).toContain("increase_reason");
   });

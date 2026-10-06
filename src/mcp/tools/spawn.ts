@@ -2,6 +2,7 @@
 // captured closure state arrives as SpawnAgentToolDeps.
 
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -85,6 +86,7 @@ import type { AgentRegistry } from "../../agent-registry.js";
 import type { CmuxServerContext, CreateServerOptions } from "../context.js";
 import type { CoordinationContract } from "../../coordination-paths.js";
 import type { DeliveryEngine } from "../../delivery/engine.js";
+import type { PublicDeliveryReceipt } from "../../delivery/receipts.js";
 import type { PreparedWorktree } from "../../worktree.js";
 import type { ServerAgentHealthEvaluator } from "./agent.js";
 import type { StateManager } from "../../state-manager.js";
@@ -95,6 +97,11 @@ import type {
   FocusTarget,
   MonitorBootResult,
 } from "../shared-types.js";
+
+function bootReturnDispatched(receipt: Pick<PublicDeliveryReceipt, "submit_dispatched">): boolean {
+  // Legacy receipts can omit this flag; only explicit false proves no Return.
+  return receipt.submit_dispatched !== false;
+}
 
 export interface SpawnAgentToolDeps {
   appendStaleBuildWarning: (result: { warnings?: string[]; }) => void;
@@ -183,10 +190,17 @@ export function registerSpawnAgentTool(
     watchRegistryPath,
     withSurfaceWrite,
   } = deps;
+  const runtimeMetadataAvailable = async (): Promise<boolean> =>
+    typeof client.listSurfaceRuntimeMetadata === "function" ||
+    (typeof client.listTerminalMetadata === "function" &&
+      await readRuntimeMetadata(() => client.listTerminalMetadata())
+        .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
+        .catch(() => false));
+
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
-    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts; unresolved Return submission is pending_verify with a delivery_id to query using wait_for. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
     {
       version: z
         .literal(1)
@@ -348,9 +362,8 @@ export function registerSpawnAgentTool(
       focus: z
         .boolean()
         .optional()
-        .default(false)
         .describe(
-          "Leave focus on the created agent tab instead of restoring the exact origin after initialization.",
+          "Leave focus on the created agent tab instead of restoring the exact origin after initialization. On resume, false suppresses focus; omitted stays in the background on metadata-capable cmux and initializes legacy cmux with focus.",
         ),
       allow_long_inline: z
         .boolean()
@@ -459,13 +472,14 @@ export function registerSpawnAgentTool(
             args.workspace ?? existing.workspace_id ?? undefined,
           );
           await assertWorkspaceMutationAllowed("spawn_agent", workspace);
-          let focusRestoreLease = await focusTargetBeforeSplit(
-            workspace,
-            args.focus !== true,
-          );
+          const focusForResume = args.focus ?? !await runtimeMetadataAvailable();
+          let focusRestoreLease = focusForResume
+            ? await focusTargetBeforeSplit(workspace, args.focus !== true)
+            : null;
           const result = await engine.resumeAgent(args.resume_agent_id, {
             workspace,
             force: args.force,
+            focus: focusForResume,
           });
           creation.record({
             agent_id: result.agent_id,
@@ -593,10 +607,12 @@ export function registerSpawnAgentTool(
             new Set<string>(),
             { role: "worker" },
           );
+          // Preserve terminal creation's former schema default; resume alone
+          // needs to distinguish omitted focus from an explicit false.
           const created =
             placement.kind === "surface"
               ? await client.newSurface({
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                   pane: placement.pane,
                   ...(workspace ? { workspace } : {}),
                   type: "terminal",
@@ -604,7 +620,7 @@ export function registerSpawnAgentTool(
               : await client.newSplit(placement.direction, {
                   ...(workspace ? { workspace } : {}),
                   ...(placement.pane ? { pane: placement.pane } : {}),
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                 });
           creation.record({
             surface_id: created.surface,
@@ -919,11 +935,7 @@ export function registerSpawnAgentTool(
           }
           return true;
         };
-        const runtimeMetadataSupported = typeof client.listSurfaceRuntimeMetadata === "function" ||
-          (typeof client.listTerminalMetadata === "function" &&
-          await readRuntimeMetadata(() => client.listTerminalMetadata())
-            .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
-            .catch(() => false));
+        const runtimeMetadataSupported = await runtimeMetadataAvailable();
         const focusForLaunch = args.focus === true || !runtimeMetadataSupported;
         let focusRestoreLease = focusForLaunch
           ? await focusTargetBeforeSplit(spawnWorkspace, args.focus !== true)
@@ -1116,6 +1128,8 @@ export function registerSpawnAgentTool(
 
         let bootPromptDelivery:
           Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+        const bootDeliveryId = randomUUID();
+        let bootDeliveryText: string | null = null;
         let launcherSurfaceClosed = false;
         try {
           {
@@ -1125,6 +1139,7 @@ export function registerSpawnAgentTool(
             );
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
+              delivery_id: bootDeliveryId,
               workspace: deliveryWorkspace,
               stableSurfaceIdentity: spawnedBinding?.surface_uuid,
               resolveRoute: spawnedBinding?.surface_uuid
@@ -1145,6 +1160,7 @@ export function registerSpawnAgentTool(
               injected_prompt: injectedBootPrompt,
               timeout_ms: args.boot_prompt_timeout_ms,
               onPreTypeScreen: (screenText, deliveryText) => {
+                bootDeliveryText = deliveryText;
                 try {
                   const updated = stateMgr.updateRecord(result.agent_id, {
                     boot_pre_type_screen: screenText,
@@ -1176,6 +1192,18 @@ export function registerSpawnAgentTool(
             }
 
             await captureSpawnSessionBestEffort(result);
+            if (bootPromptDelivery.delivery_state === "pending_verify" &&
+                bootReturnDispatched(bootPromptDelivery) && bootPromptDelivery.delivery_id) {
+              const boot = engine.getAgentState(result.agent_id);
+              engine.acceptPendingVerify({
+                delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
+                text: bootDeliveryText ?? boot?.boot_delivery_text ?? bootPromptDelivery.prompt_text ?? "",
+                press_enter: true, source_event: "boot_prompt",
+                typed: bootPromptDelivery.typed, submit_dispatched: bootPromptDelivery.submit_dispatched,
+                retry_count: bootPromptDelivery.retry_count, rpc_methods: bootPromptDelivery.rpc_methods,
+                boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined,
+              });
+            }
             if (bootPromptDelivery.prompt_text !== null) {
               const updated = stateMgr.updateRecord(result.agent_id, {
                 ...bootPromptRegistryFields(
@@ -1367,7 +1395,17 @@ export function registerSpawnAgentTool(
                 }),
               });
             }
-            const bootPromptReceipt = e.submit_verification_error
+            const bootPromptReceipt = e.submit_dispatched
+              ? { ...buildPublicDeliveryReceipt({
+                  delivery_state: "pending_verify",
+                  delivery_id: e.submit_verification_error?.receipt.delivery_id ?? bootDeliveryId,
+                  typed: e.typed || e.delivered_chars > 0, submit_attempted: true,
+                  submit_dispatched: true, submit_verified: null,
+                  submit_verification_reason: e.submit_verification_error?.reason,
+                  retry_count: e.submit_verification_error?.retry_count ?? currentTransportRetryCount(),
+                  rpc_methods: e.rpc_methods,
+                }), bytes: e.delivered_chars }
+              : e.submit_verification_error
               ? { ...submitVerificationFailurePayload(e.submit_verification_error),
                   terminal: true,
                   bytes: e.delivered_chars }
@@ -1385,16 +1423,24 @@ export function registerSpawnAgentTool(
                 };
             await refreshManagedMetadataBestEffort(result.agent_id);
             await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
+            if (e.submit_dispatched && bootPromptReceipt.delivery_id) {
+              const boot = engine.getAgentState(result.agent_id);
+              engine.acceptPendingVerify({ delivery_id: bootPromptReceipt.delivery_id,
+                agent_id: result.agent_id, text: bootDeliveryText ?? boot?.boot_delivery_text ?? "",
+                press_enter: true, source_event: "boot_prompt", typed: true, submit_dispatched: true,
+                retry_count: bootPromptReceipt.retry_count, rpc_methods: e.rpc_methods,
+                boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined });
+            }
             return buildSpawnToolReturn(
               {
                 retry_count: currentTransportRetryCount(),
                 ...result,
-                spawn_state: "boot_unsubmitted",
+                spawn_state: e.submit_dispatched ? "pending_verify" : "boot_unsubmitted",
                 workspace_id: result.workspace_id,
                 delivered_chars: e.delivered_chars,
                 boot_prompt_delivered: false,
                 boot_prompt_receipt: bootPromptReceipt,
-                boot_prompt_submit_verified: false,
+                boot_prompt_submit_verified: e.submit_dispatched ? null : false,
               },
               args.verbose,
               undefined,
@@ -1471,7 +1517,9 @@ export function registerSpawnAgentTool(
           ...result,
           spawn_state:
             bootPromptDelivery && bootPromptDelivery.submit_verified !== true
-              ? "boot_unsubmitted"
+              ? bootPromptDelivery.delivery_state === "pending_verify" && !bootReturnDispatched(bootPromptDelivery)
+                ? "boot_unsubmitted"
+                : "pending_verify"
               : "started",
           worktree: worktree.prepared,
           mcp_profile: worktree.mcpProfileLabel,
