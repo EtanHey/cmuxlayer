@@ -158,7 +158,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     const { runWithCallerContext } = await import("../src/caller-context.js");
@@ -188,9 +188,9 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
-        boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
+        boot_prompt_timeout_ms: bootTimeout, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
-    if (bootPrompt) return { pane, context, spawned, keyWrites };
+    if (bootPrompt) return { pane, context, spawned, keyWrites, engine, server };
     engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
     if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
@@ -1126,6 +1126,48 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         expect(t.pane.returns).toBe(returns);
       }
       expect(t.pane.submitted).toEqual(submitted);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // Lead's 2026-10-06 live-specimen-1: this worker's spawn receipt said
+  // boot_unsubmitted / working_status_not_observed while health said working.
+  it.each(["working", "cleared_composer", "transcript_echo"] as const)("P0 boot: delayed %s turn evidence settles a submitted boot", async evidence => {
+    let afterReads = 0;
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    const t = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("burst-return-placeholder-frame"), draft,
+      after: text => {
+        // Return landed, but the first verifier read sees the old composer.
+        if (++afterReads === 1) return draft(text);
+        return `OpenAI Codex\n${evidence === "transcript_echo" ? codexRows(text) + "\n" : ""}${evidence === "working" ? "Working (1s • esc to interrupt)\n" : ""}› Ask Codex to do anything\n GPT-6-Sol medium · ~/scratch`;
+      },
+    }, "Read and follow /tmp/synthetic-spawn-p0.md");
+    try {
+      expect(afterReads).toBeGreaterThan(1);
+      expect(t.pane.submitted).toHaveLength(1);
+      expect(t.spawned, JSON.stringify(t.spawned)).toMatchObject({ spawn_state: "started", boot_prompt_delivered: true,
+        boot_prompt_receipt: { delivery_state: "submitted", submit_verified: true, submit_evidence: evidence === "working" ? "status_only" : evidence } });
+      expect(t.pane.returns).toBe(2); // launcher Return plus one boot Return
+      expect(t.engine.getAgentState(t.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, boot_verify_started_at: null, prompt_delivered: true });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("P0 boot: an unproven dispatched Return remains pending and resolves by delivery_id", async () => {
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    const t = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
+      after: draft }, "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500);
+    try {
+      expect(t.spawned, JSON.stringify(t.spawned)).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
+        boot_prompt_receipt: { delivery_state: "pending_verify", terminal: false, delivery_id: expect.any(String), submit_verified: null } });
+      const id = t.spawned.boot_prompt_receipt.delivery_id;
+      expect(t.spawned.next_action).toContain(`wait_for({delivery_id:"${id}"})`);
+      expect(t.spawned.next_action).not.toContain("stop and");
+      expect(t.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: false, delivery_state: "pending_verify" });
+      t.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
+      await t.engine.verifyPendingDeliveries();
+      const waited = parseToolResult(await t.server._registeredTools.wait_for.handler({ delivery_id: id, timeout_ms: 100 }, {}));
+      expect(waited).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+      expect(t.engine.getAgentState(t.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true, boot_verify_started_at: null });
     } finally { t.context.dispose(); }
   }, 30_000);
 

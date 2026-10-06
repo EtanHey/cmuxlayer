@@ -7339,10 +7339,10 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(result.ok).toBe(true);
     expect(rawResult.content[0]!.text).toMatch(
-      /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
+      /^\{"ok":true,"spawn_state":"pending_verify","next_action":/,
     );
-    expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toMatch(/Boot prompt submission was not verified/i);
+    expect(result.spawn_state).toBe("pending_verify");
+    expect(result.next_action).toMatch(/Boot prompt is queued/i);
     expect(result.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
     expect(result.boot_prompt_receipt).toMatchObject({
