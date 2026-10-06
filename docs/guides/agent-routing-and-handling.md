@@ -19,6 +19,13 @@ This path keeps pane, tab, and surface refs as transport details. Surface refs
 can change after respawns, moves, reconnects, or stale terminal cleanup; an
 `agent_id` is the routing handle.
 
+After spawning, `state:"pending_verify"` in the default lean receipt means boot
+submission remains unproven. Keep the agent and follow `warning`'s
+`wait_for({delivery_id})` guidance (`verbose:true` exposes `spawn_state` and the
+boot receipt's ID). A queued boot has no submission ID because no payload was sent;
+inspect the existing pane before sending work. `boot_unsubmitted` identifies a
+boot whose Return was never dispatched, with recovery scoped to the draft owner.
+
 ## Tool Choice
 
 | Need | Use | Avoid |

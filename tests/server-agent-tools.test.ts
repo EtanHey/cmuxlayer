@@ -805,11 +805,13 @@ describe("lean spawn tool responses", () => {
   });
 
   it.each([
-    { requiredPromptReturns: 2, recovered: true },
-    { requiredPromptReturns: 99, recovered: false },
+    { requiredPromptReturns: 2, recovered: true, verbose: true },
+    { requiredPromptReturns: 99, recovered: false, verbose: true },
+    { requiredPromptReturns: 2, recovered: true, verbose: false },
+    { requiredPromptReturns: 99, recovered: false, verbose: false },
   ])(
-    "#636 D1 Claude boot recovery is bounded (Returns=$requiredPromptReturns)",
-    async ({ requiredPromptReturns, recovered }) => {
+    "#636 D1 Claude boot recovery is bounded (Returns=$requiredPromptReturns, verbose=$verbose)",
+    async ({ requiredPromptReturns, recovered, verbose }) => {
       mkdirSync(TEST_DIR, { recursive: true });
       const promptPath = join(TEST_DIR, `claude-recovery-${requiredPromptReturns}.md`);
       writeFileSync(promptPath, "Claude boot recovery specimen", "utf8");
@@ -820,39 +822,61 @@ describe("lean spawn tool responses", () => {
         disableSpawnPreflight: true,
         sessionIdentityResolver: () => null,
       });
-      const result = parseToolResult(
-        await (server as any)._registeredTools.spawn_agent.handler(
-          { verbose: true,
-            repo: "brainlayer",
-            model: "sonnet",
-            cli: "claude",
-            boot_prompt_path: promptPath,
-            boot_prompt_timeout_ms: 1_000,
-          },
-          {} as any,
-        ),
+      const rawResult = await (server as any)._registeredTools.spawn_agent.handler(
+        { verbose,
+          repo: "brainlayer",
+          model: "sonnet",
+          cli: "claude",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 1_000,
+        },
+        {} as any,
       );
+      const result = parseToolResult(rawResult);
       const returnCount = (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([, args]) => args.includes("send-key") && args.includes("return"),
       ).length;
 
       if (recovered) {
-        expect(result).toMatchObject({
+        expect(result).toMatchObject(verbose ? {
           ok: true,
           boot_prompt_delivered: true,
           boot_prompt_submit_verified: true,
           boot_prompt_receipt: { typed: true, retry_count: 1, submit_verified: true },
-        });
+        } : { ok: true, state: "started", delivered: true });
       } else {
-        expect(result).toMatchObject({
+        expect(result).toMatchObject(verbose ? {
           ok: true,
-          spawn_state: "boot_unsubmitted",
+          spawn_state: "pending_verify",
           boot_prompt_delivered: false,
-          boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
-            retry_count: 1, submit_verified: false },
+          boot_prompt_receipt: { typed: true, submitted: false, terminal: false,
+            retry_count: 1, submit_verified: null, delivery_id: expect.any(String) },
+        } : { ok: true, state: "pending_verify", delivered: false });
+        // Real PR-a producer + registration: guidance is constructed from the
+        // actual unverified boot receipt, not supplied as fixture next_action.
+        const action = result[verbose ? "next_action" : "warning"] as string;
+        const guidance = action.match(/wait_for\(\{delivery_id:"([^"]+)"\}\)/);
+        expect(guidance, action).not.toBeNull();
+        const deliveryId = guidance![1];
+        expect(action).toContain(`wait_for({delivery_id:"${deliveryId}"})`);
+        expect(action).toContain("keep this agent and pane");
+        expect(action).not.toMatch(/never .*manual Return/i);
+        if (verbose) expect(deliveryId).toBe(result.boot_prompt_receipt.delivery_id);
+        expect(engineForTests(server).getDeliveryReceipt(deliveryId)).toMatchObject({
+          delivery_id: deliveryId, agent_id: result.agent_id,
+          delivery_state: "pending_verify", submit_dispatched: true,
         });
-        expect(result.next_action).toMatch(/after 1 automatic Return retry/i);
-        expect(result.next_action).not.toMatch(/never .*manual Return/i);
+        const waited = parseToolResult(await (server as any)._registeredTools.wait_for.handler(
+          { delivery_id: deliveryId, timeout_ms: 1 }, {} as any,
+        ));
+        expect(waited).toMatchObject({ ok: true, delivery_id: deliveryId,
+          delivered: false, submit_dispatched: true });
+      }
+      if (!verbose) {
+        expect(Object.keys(result).sort()).toEqual([
+          "ok", "agent_id", "surface_id", "state", "delivered", ...(!recovered ? ["warning"] : []),
+        ].sort());
+        expect(JSON.parse(rawResult.content[0]!.text)).toEqual(result);
       }
       // One Return launches the CLI; two more are the bounded prompt submit attempts.
       expect(returnCount).toBe(3);
@@ -7487,9 +7511,12 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(result.ok).toBe(true);
     const action = result[verbose ? "next_action" : "warning"] as string;
-    expect(result[verbose ? "spawn_state" : "state"]).toBe("boot_unsubmitted");
-    expect(action).toMatch(/Boot prompt submission was not verified/i);
+    expect(result[verbose ? "spawn_state" : "state"]).toBe("pending_verify");
+    expect(action).toMatch(/Boot prompt is queued/i);
     expect(action).not.toMatch(/retr(?:y|ies).*exhausted/i);
+    if (verbose) expect(rawResult.content[0]!.text).toMatch(
+      /^\{"ok":true,"spawn_state":"pending_verify","next_action":/,
+    );
     expect(result.surface_id).toBe("surface:new");
     if (verbose) {
       expect(result.boot_prompt_receipt).toMatchObject({

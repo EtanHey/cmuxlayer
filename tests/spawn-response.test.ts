@@ -20,7 +20,7 @@ const base = {
 describe("spawn response shaping", () => {
   it("preserves pending_verify wait_for delivery guidance in the lean warning", () => {
     const result = buildSpawnToolReturn({ ...base, spawn_state: "pending_verify",
-      delivery_id: "delivery-synthetic", next_action: 'wait_for({delivery_id:"delivery-synthetic"})' });
+      boot_prompt_receipt: { delivery_id: "delivery-synthetic", submit_dispatched: true } });
     expect(result.structuredContent.state).toBe("pending_verify");
     expect(result.structuredContent.warning).toContain('wait_for({delivery_id:"delivery-synthetic"})');
     expect(Object.keys(result.structuredContent)).toHaveLength(6);

@@ -140,7 +140,11 @@ export function buildSpawnToolReturn(
         ...(state === "boot_unsubmitted"
           ? { next_action: bootUnsubmittedNextAction(
               data.surface_id, data.boot_prompt_receipt, opts.callerOwnsBootDraft === true) }
-          : {}) }
+          : state === "pending_verify"
+            ? { next_action: record(data.boot_prompt_receipt)?.delivery_id
+                ? `Boot submission is pending verification. Query wait_for({delivery_id:${JSON.stringify(record(data.boot_prompt_receipt)?.delivery_id)}}) before sending again; keep this agent and pane.`
+                : `Boot prompt is queued while the pane is busy. Inspect read_screen({surface:${JSON.stringify(data.surface_id)}}); keep this agent and pane.` }
+            : {}) }
     : {};
   const full = { ok: true, ...stateFields, ...data };
   const payload = verbose || full.ok !== true
