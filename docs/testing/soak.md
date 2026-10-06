@@ -23,8 +23,11 @@ Busy apps, live sockets and locks fail; stale locks require operator cleanup.
 The app may reclaim its own stale socket; the runner never unlinks it or
 kills an unowned app.
 
-Prepare a separate mode-0700 `--private-home` with Codex and Claude logged in
-before a real soak. Do this on the dedicated host through the lead; the
+On MBP/NIGHTLY, prepare a separate mode-0700 `--private-home` with Codex and
+Claude logged in before a real soak. On the dedicated M1, `m1-gate` always uses
+the target operator's real HOME for authenticated CLIs; `--private-home` is not
+required and does not replace the M1 HOME. Daemon socket, state, inbox and
+workspace remain private per run on both hosts. Do this on the dedicated host through the lead; the
 runner does not copy credentials, configure accounts, or use personal shell
 startup files. The optional auth HOME persists harness sessions, but daemon
 state, inboxes, workspace cwd, and sockets remain per-run scratch resources.
@@ -36,7 +39,7 @@ inventory; personal launcher hooks are not sourced into private shells.
 After the lead coordinates the M1 and confirms 0.4.101 installed:
 
 ```bash
-node scripts/soak-live.mjs --agent-id M1_SOAK_ID --target m1-gate --gate-host M1_HOSTNAME --app "/Applications/cmux.app" --dmg /path/to/pinned-cmux-0.64.22.dmg --private-home /path/to/private-soak-home --cases a,b,c,d,e,f,g,h
+node scripts/soak-live.mjs --agent-id M1_SOAK_ID --target m1-gate --gate-host M1_HOSTNAME --app "/Applications/cmux.app" --dmg /path/to/pinned-cmux-0.64.22.dmg --cases a,b,c,d,e,f,g,h
 ```
 
 `M1_HOSTNAME` must be the lead-designated dedicated host's exact `hostname`.

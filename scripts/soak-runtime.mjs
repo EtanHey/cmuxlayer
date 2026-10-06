@@ -31,6 +31,20 @@ export function isolatedEnvironment(parent, scratch, app = "/Applications/cmux N
     CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(scratch, "empty-launchers.zsh") };
 }
 
+export function targetEnvironment(parent, scratch, opts, home = homedir()) {
+  const socket = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
+  const env = isolatedEnvironment(parent, scratch, opts.app, socket);
+  if (opts.target === "m1-gate") {
+    // Dedicated target-host auth, never a controller HOME or copied auth file.
+    // These HOME-derived harness paths change; cmuxlayer state/inbox/socket do not.
+    for (const key of ["HOME", "CMUXLAYER_HARNESS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+      "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
+      env[key] = env[key].replace(join(scratch, "home"), home);
+    }
+  }
+  return env;
+}
+
 export function assertProcessIdentity(saved, observed) {
   if (!saved || !observed || saved !== observed) throw new Error("PID identity/start-time mismatch");
 }
@@ -153,8 +167,8 @@ export async function startSoakRuntime(opts, outputRoot) {
     }
     const scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
     for (const dir of ["home", "zdot", "state", "inbox", "repo"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
-    const env = isolatedEnvironment(process.env, scratch, app, socketPath);
-    if (opts.privateHome) {
+    const env = targetEnvironment(process.env, scratch, opts);
+    if (opts.privateHome && opts.target !== "m1-gate") {
       const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
       if (home === ownHome || statSync(home).uid !== process.getuid() || (statSync(home).mode & 0o077)) throw new Error("private auth HOME must be separate, owned, and mode 0700");
       for (const dir of [".codex", ".claude", ".config", ".local", ".cache"]) {

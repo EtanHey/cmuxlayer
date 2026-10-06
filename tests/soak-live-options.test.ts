@@ -73,3 +73,9 @@ describe("pool seat liveness", () => {
     expect(isPoolSeatDead(null)).toBe(true);
   });
 });
+
+it("M1 real runs do not require private-home; NIGHTLY real runs do", () => {
+  expect(options(["--agent-id", "scratch", "--target", "m1-gate", "--cases", "a,b,c,d,e,f,g"]))
+    .toMatchObject({ target: "m1-gate", privateHome: "" });
+  expect(() => options(["--agent-id", "scratch"])).toThrow(/private-home/);
+});

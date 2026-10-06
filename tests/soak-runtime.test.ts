@@ -5,7 +5,7 @@ import net from "node:net";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { assertAppTarget } from "../scripts/soak-app-guard.mjs";
-import { acquireNightlyLock, releaseNightlyLock, isolatedEnvironment, stopOwnedProcess, startSoakRuntime, socketIsLive } from "../scripts/soak-runtime.mjs";
+import { acquireNightlyLock, releaseNightlyLock, isolatedEnvironment, stopOwnedProcess, startSoakRuntime, socketIsLive, targetEnvironment } from "../scripts/soak-runtime.mjs";
 
 vi.mock("node:child_process", async (original) => {
   const actual = await original<typeof import("node:child_process")>();
@@ -90,4 +90,19 @@ it("distinguishes absent, live and abandoned sockets without deleting them", asy
   try { expect(await socketIsLive(path)).toBe(true); }
   finally { await new Promise<void>(resolve => server.close(() => resolve())); }
   expect(await socketIsLive(path)).toBe(false);
+});
+
+it("M1 uses its real auth HOME while daemon state and inbox stay per-run private", () => {
+  const env = targetEnvironment({ HOME: "/Users/test-operator", PATH: "/bin", CODEX_HOME: "/unrelated/auth",
+    CMUXLAYER_STATE_DIR: "/production/state", CMUXLAYER_INBOX_BASE_DIR: "/production/inbox" },
+    "/scratch", { target: "m1-gate", app: "/Applications/cmux.app" }, "/Users/test-operator");
+  expect(env).toMatchObject({ HOME: "/Users/test-operator", CODEX_HOME: "/Users/test-operator/.codex",
+    CLAUDE_CONFIG_DIR: "/Users/test-operator/.claude", CMUXLAYER_HARNESS_HOME: "/Users/test-operator",
+    CMUXLAYER_DAEMON_SOCKET: "/scratch/d.sock", CMUXLAYER_STATE_DIR: "/scratch/state",
+    CMUXLAYER_INBOX_BASE_DIR: "/scratch/inbox", CMUX_SOCKET_PATH: "/tmp/cmux-soak-stable.sock" });
+});
+it("NIGHTLY does not inherit the operator's real auth HOME", () => {
+  expect(targetEnvironment({ HOME: "/Users/test-operator", PATH: "/bin" }, "/scratch",
+    { target: "nightly", app: "/Applications/cmux NIGHTLY.app" }, "/Users/test-operator"))
+    .toMatchObject({ HOME: "/scratch/home", CMUXLAYER_STATE_DIR: "/scratch/state", CMUXLAYER_INBOX_BASE_DIR: "/scratch/inbox" });
 });

@@ -48,7 +48,7 @@ export function options(argv) {
     (opts.cycles !== 40 || opts.durationMinutes < 60 || !"abcdefg".split("").every(id => opts.cases.includes(id)))) {
     throw new Error("M1 release gate requires 40 cycles, at least 60 minutes, and cases a-g");
   }
-  if (!opts.dryRun && !opts.privateHome) throw new Error("real soak requires an authenticated --private-home");
+  if (!opts.dryRun && opts.target !== "m1-gate" && !opts.privateHome) throw new Error("MBP/NIGHTLY real soak requires an authenticated --private-home");
   return opts;
 }
 
