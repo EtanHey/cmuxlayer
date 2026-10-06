@@ -91,9 +91,11 @@ The workflow-dispatch job collects three canonical 8-client x 12-round samples o
 If a later `ubuntu-latest` runner is demonstrably slower than the runner that produced the committed baseline, first run the normal pull-request CI at the calibration commit. Then dispatch the same commit and import that exact perf artifact:
 
 ```bash
-gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id>
+gh workflow run CI --ref <calibration-commit> -f baseline_source_run_id=<ci-run-id> -f baseline_rebase_rows=send_to_surface_warm.p50_ms,cli_send_ms -f baseline_increase_reason='<reviewed runner drift>'
 ```
 
-This explicit runner rebase accepts only a `CI` pull-request run from the dispatched commit or an ancestor separated solely by the baseline workflow, checker, refresh script, baseline JSON, documentation, or tests. Runtime-source changes are refused. It verifies the canonical replay identity and retains the larger of each committed and imported measurement, so unrelated metrics cannot silently tighten. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+This explicit runner rebase accepts only a `CI` pull-request run from the dispatched commit or an ancestor separated solely by the baseline workflow, checker, refresh script, baseline JSON, documentation, or tests. Runtime-source changes are refused. It verifies the canonical replay identity. The source run and SHA remain in the attested baseline. This is only for reviewed runner-class drift; the ordinary no-input refresh remains improvement-only and refuses every baseline increase.
+
+Runner rebase requires an explicit, non-empty `baseline_rebase_rows` list, passed as `CMUXLAYER_BENCH_REBASE_ROWS` only to the rebase step. Names are `<operation>.p50_ms`, `<operation>.p95_ms`, `<operation>.lock_hold_ms`, or `cli_send_ms`; unknown names and empty entries fail before any baseline write. Only listed metrics retain `max(committed, imported)`; every unlisted measurement keeps its committed value exactly, including values that would otherwise fall. The attested `source.rebase_rows` records the normalized list. Selective rebase requires a canonical committed baseline and cannot perform a legacy migration. For the current calibration, only `send_to_surface_warm.p50_ms,cli_send_ms` is approved; the lead owns the dispatch, increase review, and JSON commit.
 
 Do not hand-edit or refresh a baseline merely to make a regression green. A code-regression proof must turn `perf-budget` RED; a baseline-only measurement edit must fail the consistency assertion.

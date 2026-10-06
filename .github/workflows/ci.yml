@@ -11,6 +11,10 @@ on:
         description: Required audit reason if imported measurements raise any committed row
         required: false
         type: string
+      baseline_rebase_rows:
+        description: Required comma-separated metrics for a runner rebase (e.g. send_to_surface_warm.p50_ms,cli_send_ms)
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -372,7 +376,20 @@ jobs:
           echo "CMUXLAYER_BENCH_SOURCE_RUN_ID=$SOURCE_RUN_ID" >> "$GITHUB_ENV"
           echo "CMUXLAYER_BENCH_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
       - name: Produce canonical CI-runner baseline
+        if: inputs.baseline_source_run_id == ''
         env:
+          BASELINE_INCREASE_REASON: ${{ inputs.baseline_increase_reason }}
+        run: |
+          if [ -n "$BASELINE_INCREASE_REASON" ]; then
+            bun run bench:daemon:refresh -- --reason "$BASELINE_INCREASE_REASON"
+          else
+            bun run bench:daemon:refresh
+          fi
+
+      - name: Produce rebased CI-runner baseline
+        if: inputs.baseline_source_run_id != ''
+        env:
+          CMUXLAYER_BENCH_REBASE_ROWS: ${{ inputs.baseline_rebase_rows }}
           BASELINE_INCREASE_REASON: ${{ inputs.baseline_increase_reason }}
         run: |
           if [ -n "$BASELINE_INCREASE_REASON" ]; then
