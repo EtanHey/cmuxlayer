@@ -46,9 +46,25 @@ then verifies again before SIGKILL. No defaults edits, GUI driving or model call
 An exclusive runner lock and a unique launch argument identify this invocation's
 new NIGHTLY process. Interrupts drain through the same cleanup and FAIL receipt.
 
+Local coverage is **NIGHTLY only**. A `--app` with production bundle ID
+`com.cmuxterm.app` is explicitly refused before launch, including a renamed app
+or a NIGHTLY wrapper whose executable resolves into that production bundle.
+Recorded app process targets are checked again before each teardown signal.
+Do not launch a second production cmux: 0.64.22's single-instance enforcement
+terminates other processes with its bundle ID. Private HOME/socket overrides
+do not prevent that behavior or isolate its real-account state writes.
+
 `--capability` tests launch, ping, workspace creation and pane text only. The
-PR-triggered `NIGHTLY capability (advisory)` macos-15 job downloads a digest-pinned
-NIGHTLY, validates notarization, and uploads its receipt. It is not a required
+PR-triggered macos-15 capability matrix downloads digest-pinned NIGHTLY and
+**0.64.22**, validates notarization, and uploads separate receipts. 0.64.22 is
+**hosted only**: `--hosted-release` requires `--capability`, GitHub Actions on a
+`github-hosted` macOS runner, an app under `RUNNER_TEMP`, the production bundle ID
+and version `0.64.22`. An existing process with that bundle ID refuses the run.
+These environment checks are a runner policy, not cryptographic host attestation;
+never spoof them on a local Mac. No bundle retagging or re-signing is performed.
+The stable DMG URL is `/v0.64.22/cmux-macos.dmg`, with SHA-256
+`fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25`
+from the upstream GitHub release asset metadata. It is not a required
 check; hosting and required-check selection remain with the owner through the lead.
 The `nightly` release tag rolls: the pinned DMG may disappear when it republishes.
 A download HTTP 404 reports distinct FAIL stage `asset_gone`; update the asset

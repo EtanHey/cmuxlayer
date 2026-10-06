@@ -7,10 +7,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { productionSnapshot, productionChanges, privateWrites } from "./ratchet-production-guard.mjs";
+import { assertAppTarget, assertProcessTarget, processBundleId } from "./ratchet-app-guard.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const argv = process.argv.slice(2), option = (key, fallback) => argv.includes(key) ? argv[argv.indexOf(key) + 1] : fallback;
 const app = option("--app", "/Applications/cmux NIGHTLY.app"), cmuxSocket = "/tmp/cmux-nightly.sock";
+const hostedRelease = argv.includes("--hosted-release");
 const output = resolve(option("--output", join(tmpdir(), `ratchet-${process.pid}.json`)));
 const receipt = { status: "FAIL", mode: argv.includes("--capability") ? "capability" : argv.includes("--prove") ? "bug/fix proof" : "comparison", rows: [], processes: [] };
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: "utf8", timeout: 120_000, env: cleanEnv, ...opts }).trim();
@@ -22,7 +24,7 @@ const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603f", fix: "64260ba3", specimen: "#1007 / composer-overlays/codex-boot.txt" },
   { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5", fix: "f8f0e4ee", provisional_fix: "#1019 head; replace with merge SHA", specimen: "docs.local/lanes/spawn-p0/live-specimen-1.md" },
 ];
-let nightlyPid, scratch, mcp, daemon, daemonCommand, productionBefore, sequence = 0, lockOwned = false;
+let nightlyPid, appTarget, scratch, mcp, daemon, daemonCommand, productionBefore, sequence = 0, lockOwned = false;
 const runAgentIds = new Set();
 const launchToken = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
 const abort = new AbortController();
@@ -38,9 +40,11 @@ async function until(fn, ms = 10_000, cancellable = true) {
 async function terminate(pid, expected) {
   if (!pid || !command(pid)) return;
   if (command(pid) !== expected) throw new Error(`PID identity mismatch: ${pid}`);
+  if (pid === nightlyPid) assertProcessTarget(expected, appTarget.hostedRelease);
   receipt.processes.push({ pid, command: expected, signal: "SIGTERM" }); process.kill(pid, "SIGTERM");
   try { await until(() => !command(pid), 10_000, false); } catch {
     if (command(pid) !== expected) throw new Error(`PID identity mismatch before SIGKILL: ${pid}`);
+    if (pid === nightlyPid) assertProcessTarget(expected, appTarget.hostedRelease);
     receipt.processes.push({ pid, command: expected, signal: "SIGKILL" }); process.kill(pid, "SIGKILL");
     await until(() => !command(pid), 10_000, false);
   }
@@ -71,8 +75,14 @@ function rpc(path, method, params, jsonrpc = false) {
 const cmux = (method, params = {}) => rpc(cmuxSocket, method, params);
 async function startNightly() {
   receipt.production_start = production();
-  if (!app.endsWith("/cmux NIGHTLY.app") || !existsSync(join(app, "Contents/MacOS/cmux"))) throw new Error("NIGHTLY missing");
-  if (run("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", join(app, "Contents/Info.plist")]) !== "com.cmuxterm.app.nightly") throw new Error("NIGHTLY bundle identity mismatch");
+  if (!existsSync(join(app, "Contents/MacOS/cmux"))) throw new Error("NIGHTLY missing");
+  appTarget = assertAppTarget(app, { hostedRelease, capability: argv.includes("--capability") });
+  receipt.app_target = appTarget;
+  if (hostedRelease && processes().some(line => {
+    const executable = line.trim().replace(/^\d+\s+/, "");
+    if (!executable.includes(".app/Contents/MacOS/")) return false;
+    return processBundleId(executable) === "com.cmuxterm.app";
+  })) throw new Error("hosted release busy: existing production bundle process");
   try { const fd = openSync(lockPath, "wx", 0o600); closeSync(fd); lockOwned = true; writeFileSync(lockPath, launchToken); }
   catch { throw new Error("NIGHTLY busy (runner lock; stale locks require operator cleanup)"); }
   if (processes().some(line => line.includes("/cmux NIGHTLY.app/Contents/MacOS/"))) throw new Error("NIGHTLY busy");
@@ -82,12 +92,13 @@ async function startNightly() {
   const env = { HOME: join(scratch, "home"), CMUX_SOCKET_PATH: cmuxSocket, CMUX_ALLOW_SOCKET_OVERRIDE: "1", CMUX_SOCKET_MODE: "automation", CMUX_DISABLE_SESSION_RESTORE: "1", CMUXLAYER_DAEMON_SOCKET: join(scratch, "d.sock"), ZDOTDIR: join(scratch, "zdot") };
   run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(env).flatMap(([k,v]) => ["--env", `${k}=${v}`]), "--args", "--ratchet-launch-token", launchToken]);
   nightlyPid = Number(await until(() => processes().filter(line => line.includes(`${app}/Contents/MacOS/cmux`)).map(line => line.trim().split(/\s/)[0]).find(pid => run("ps", ["-p", pid, "-o", "args="]).includes(launchToken)), 10_000, false));
+  assertProcessTarget(command(nightlyPid), appTarget.hostedRelease);
   receipt.nightly = { app, pid: nightlyPid, launch_token: launchToken, env };
   receipt.ping = await until(async () => { try { return await cmux("system.ping"); } catch { return null; } });
   const ws = await cmux("workspace.create", { cwd: scratch, initial_command: "/bin/sh -c 'printf RATCHET_CAPABILITY_READY; exec /bin/cat'" });
   receipt.capability_screen = await until(async () => { try { const s = await cmux("surface.read_text", { surface_id: ws.surface_id, workspace_id: ws.workspace_id }); return s.text.includes("RATCHET_CAPABILITY_READY") ? s : null; } catch { return null; } });
   receipt.workspace = ws;
-  receipt.runner = { sha: run("git", ["rev-parse", "HEAD"], { cwd: root }), sha256: createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex"), fixture_sha256: createHash("sha256").update(readFileSync(join(root, "scripts/ratchet-fixture-tui.mjs"))).digest("hex"), guard_sha256: createHash("sha256").update(readFileSync(join(root, "scripts/ratchet-production-guard.mjs"))).digest("hex") };
+  receipt.runner = { sha: run("git", ["rev-parse", "HEAD"], { cwd: root }), sha256: createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex"), fixture_sha256: createHash("sha256").update(readFileSync(join(root, "scripts/ratchet-fixture-tui.mjs"))).digest("hex"), app_guard_sha256: createHash("sha256").update(readFileSync(join(root, "scripts/ratchet-app-guard.mjs"))).digest("hex"), guard_sha256: createHash("sha256").update(readFileSync(join(root, "scripts/ratchet-production-guard.mjs"))).digest("hex") };
 }
 async function tool(name, args) {
   const result = await rpc(mcp, "tools/call", { name, arguments: args }, true);
@@ -151,7 +162,7 @@ async function sample(row, ref) {
 try {
   productionBefore = productionSnapshot(productionHome);
   await startNightly();
-  if (argv.includes("--capability")) receipt.rows.push({ name: "NIGHTLY capability", baseline: "—", candidate: "PASS", delta: "—", ceiling: 0, status: "PASS" });
+  if (argv.includes("--capability")) receipt.rows.push({ name: hostedRelease ? "0.64.22 capability" : "NIGHTLY capability", baseline: "—", candidate: "PASS", delta: "—", ceiling: 0, status: "PASS" });
   else for (const row of rows) {
     const baseline = await sample(row, argv.includes("--prove") ? row.bug : option("--baseline", "origin/main"));
     const candidate = await sample(row, argv.includes("--prove") ? row.fix : option("--candidate", "HEAD"));
