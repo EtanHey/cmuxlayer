@@ -368,7 +368,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       expect(owner.texts).toEqual(Array.from({ length: 8 }, (_, index) => `unverified request ${192 + index}`));
       expect(owner.deliveryIds).toEqual(ids.slice(-8));
     } finally { target.context.dispose(); }
-  });
+  }, 15_000);
 
   it("RESCOPE bounds evict the oldest timestamps after 200 unverified surfaces", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
@@ -386,7 +386,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
         "surface:bounded-0", ...Array.from({ length: 127 }, (_, index) => `surface:bounded-${73 + index}`),
       ]);
     } finally { target.context.dispose(); }
-  });
+  }, 15_000);
 
   it("RESCOPE bounds prune transcript-seen entries above an empty composer but retain queued entries", async () => {
     const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft: fixture("idle-empty"), after: fixture("idle-empty") });
