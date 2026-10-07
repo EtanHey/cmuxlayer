@@ -24,6 +24,7 @@ import type {
   DeliveryEventType,
   DeliveryTelemetryEvent,
 } from "../agent-types.js";
+import type { AgentDeliveryReceipt } from "../engine/types.js";
 import {
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
@@ -1995,12 +1996,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
       // ACK loss cannot distinguish a consumed Return from a failed transport.
       // Preserve owned boot uncertainty at dispatch, after all refusal gates.
-      const recoveringBootIds: string[] = [];
+      const recoveryEngine = context.lifecycleSweepEngine;
+      const recoveringBootReceipts: AgentDeliveryReceipt[] = [];
+      const currentRecoveryReceipt = (original: AgentDeliveryReceipt): AgentDeliveryReceipt | null => {
+        if (!recoveryEngine || context.lifecycleSweepEngine !== recoveryEngine || !owner || !bootTokenInstanceCurrent(owner)) return null;
+        const receipt = recoveryEngine.getDeliveryReceipt(original.delivery_id);
+        const binding = receipt?.boot_recovery_context;
+        const captured = original.boot_recovery_context;
+        return receipt && receipt.boot_recovery === true && receipt.agent_id === original.agent_id &&
+          receipt.text === original.text && receipt.boot_instance_id === original.boot_instance_id &&
+          receipt.created_at === original.created_at && binding?.caller_agent_id === captured?.caller_agent_id &&
+          binding?.surface_uuid === captured?.surface_uuid && binding?.workspace_id === captured?.workspace_id &&
+          binding?.cli_session_id === captured?.cli_session_id && binding?.pre_type_screen === captured?.pre_type_screen
+          ? receipt : null;
+      };
       const rememberOwnedBootDispatch = () => {
         if (!ownedBoot || !owner) return;
-        const engine = context.lifecycleSweepEngine;
+        const engine = recoveryEngine;
         const boot = stateMgr.readState(ownedBoot.agentId);
-        if (!engine || !boot || boot.boot_instance_id !== ownedBoot.instanceId ||
+        if (!engine || context.lifecycleSweepEngine !== engine || !boot || boot.boot_instance_id !== ownedBoot.instanceId ||
             !bootTokenInstanceCurrent(owner) || !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity)) {
           throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
         }
@@ -2012,7 +2026,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               binding.workspace_id !== (boot.workspace_id ?? null) || binding.cli_session_id !== null && binding.cli_session_id !== boot.cli_session_id)) {
             throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline!.parsed);
           }
-          engine.acceptPendingVerify({
+          const pending = engine.acceptPendingVerify({
             delivery_id: id, agent_id: original.agent_id, text: original.text,
             source_event: "boot_prompt", typed: true, press_enter: true,
             retry_count: original.retry_count, rpc_methods: original.rpc_methods,
@@ -2023,9 +2037,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               pre_type_screen: deliveryPreTypeScreens.get(id) ?? boot.boot_pre_type_screen ?? null,
             },
           });
-          recoveringBootIds.push(id);
+          recoveringBootReceipts.push(pending);
         }
-        if (recoveringBootIds.length) {
+        if (recoveringBootReceipts.length) {
           const updated = stateMgr.updateRecord(boot.agent_id, { boot_submit_dispatched: true, boot_verify_started_at: new Date().toISOString() });
           engine.getRegistry().set(updated.agent_id, updated);
         }
@@ -2080,13 +2094,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       );
       submitDispatched = submitAttempted;
       if (keyRpcMethod) rpcMethods.add(keyRpcMethod);
-      for (const id of recoveringBootIds) {
-        const receipt = context.lifecycleSweepEngine!.getDeliveryReceipt(id)!;
-        context.lifecycleSweepEngine!.acceptPendingVerify({ ...receipt, submit_dispatched: true,
+      let recoveryUnavailable = false;
+      for (const original of recoveringBootReceipts) {
+        const receipt = currentRecoveryReceipt(original);
+        if (!receipt) { recoveryUnavailable = true; continue; }
+        recoveryEngine?.acceptPendingVerify({ ...receipt, submit_dispatched: true,
           rpc_methods: [...new Set([...(receipt.rpc_methods ?? []), ...rpcMethods])] });
       }
       const verification =
-        submitAttempted && opts.verify_submit
+        submitAttempted && opts.verify_submit && !recoveryUnavailable
           ? await timeDeliveryPhase(opts.timings, "verify", () =>
               verifySubmitKeyOutcome({
                 surface: opts.surface,
@@ -2097,6 +2113,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               }),
             )
           : { submit_verified: null, submit_verification_reason: null };
+      // Verification also awaits I/O. A replacement/absent engine or receipt
+      // cannot inherit this Return or settle the original boot from its screen.
+      recoveryUnavailable ||= recoveringBootReceipts.some(original => !currentRecoveryReceipt(original));
+      if (recoveryUnavailable) {
+        verification.submit_verified = null;
+        verification.submit_verification_reason = "submit_evidence_absent";
+      }
       if (ownedQueuedText && submitBaseline && !codexScreenHasActiveTurn(submitBaseline.text) && verification.submit_verified !== true) {
         throw new DeliverySafetyGateError("queued_stalled_idle", submitBaseline.parsed, visibleCodexQueuedText(submitBaseline.text), buildPublicDeliveryReceipt({
           delivery_state: "pending_verify", typed: false, submit_attempted: true,
@@ -2131,7 +2154,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ...(submitAttempted && verification.submit_verified === null
           ? {
               WARNING:
-                "SUBMIT NOT VERIFIED — the key was dispatched, but no " +
+                recoveryUnavailable
+                  ? "SUBMIT NOT VERIFIED — the owned recovery engine or original receipt changed during Return. No Return will be retried automatically."
+                  : "SUBMIT NOT VERIFIED — the key was dispatched, but no " +
                 "observable prompt/composer transition confirmed submission. " +
                 "Do not treat ok:true as submission confirmation.",
             }

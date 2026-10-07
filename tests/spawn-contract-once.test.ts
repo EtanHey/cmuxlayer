@@ -24,7 +24,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = "codex") {
   const root = mkdtempSync(join(tmpdir(), "spawn-contract-once-"));
   const pane = { draft: "", submitted: [] as string[], inputs: [] as string[],
-    returns: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, lostAck: false, onReturn: undefined as (() => void) | undefined, overlay: "", beforeReturn: undefined as (() => void) | undefined };
+    returns: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, lostAck: false, onReturn: undefined as (() => void | Promise<void>) | undefined, onRead: undefined as (() => void | Promise<void>) | undefined, overlay: "", beforeReturn: undefined as (() => void) | undefined };
   const render = (text: string) => wrapped ? text.match(/.{1,96}/g)?.join("\n  ") ?? "" : text;
   const frame = () => [cli === "claude" ? "Claude Code" : "OpenAI Codex (v0.157.0)",
     ...pane.submitted.map(text => `${cli === "claude" ? "⏺" : "›"} ${render(text)}`),
@@ -42,12 +42,13 @@ async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = 
   const fake: ExecFn = async (_cmd, args) => {
     if (args.includes("read-screen")) {
       if (args.includes("surface:lead") || args.includes(LEAD)) return response({ surface: "surface:lead", text: "OpenAI Codex\nWorking (1s • esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer", lines: 20, scrollback_used: false });
+      await pane.onRead?.();
       if (pane.beforeReturn) pane.baselineRead = true;
       const text = pane.overlay || (pane.initializing-- > 0 ? "OpenAI Codex\nInitializing…\nWorking (1s • esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer" : frame());
       return response({ surface: "surface:new", text, lines: 20, scrollback_used: false });
     }
     if (args.includes("send-key") && args.includes("return")) {
-      pane.onReturn?.();
+      await pane.onReturn?.();
       pane.returns++;
       if (!pane.hidden && pane.draft) { pane.submitted.push(pane.draft); pane.draft = ""; }
       if (pane.lostAck) { pane.lostAck = false; throw new Error("synthetic Return ACK lost"); }
@@ -86,7 +87,7 @@ async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = 
   const client = new Client({ name: "spawn-contract-ratchet", version: "1" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
-  cleanups.push(async () => { await client.close(); await server.close(); context.dispose(); rmSync(root, { recursive: true, force: true }); });
+  cleanups.push(async () => { await client.close(); await server.close(); context.dispose(); engine.dispose(); rmSync(root, { recursive: true, force: true }); });
   const call = async (name: string, args: Payload): Promise<Payload> => {
     const result = await runWithCallerContext({ surfaceId: pane.caller, workspaceId: "workspace:1" },
       () => client.callTool({ name, arguments: args }));
@@ -271,6 +272,119 @@ describe("R1 original boot receipt at recovery dispatch", () => {
 });
 
 // Null capture is a conditional synthetic state, not a native incident.
+describe("Post-dispatch recovery lifetime ratchet", () => {
+  async function suspendedReturn() {
+    const t = await setup(true);
+    const boot = await t.spawn();
+    const id = boot.boot_prompt_receipt.delivery_id;
+    const text = t.pane.draft;
+    const instance = t.engine.getAgentState(boot.agent_id)!.boot_instance_id;
+    expect(instance).toBeTypeOf("string");
+    t.pane.hidden = false;
+    let resume!: () => void;
+    let entered!: () => void;
+    const suspended = new Promise<void>(resolve => { entered = resolve; });
+    const released = new Promise<void>(resolve => { resume = resolve; });
+    t.pane.onReturn = async () => {
+      t.pane.onReturn = undefined;
+      expect(t.engine.getDeliveryReceipt(id)).toMatchObject({
+        delivery_id: id, text, delivery_state: "pending_verify", terminal: false,
+        submit_verified: null, boot_instance_id: instance,
+      });
+      entered();
+      await released;
+    };
+    const result = t.key(boot.surface_id);
+    await Promise.race([suspended, result.then(value => {
+      throw new Error(`Return completed before the suspension barrier: ${JSON.stringify(value)}`);
+    })]);
+    return { ...t, boot, id, text, resume, result, returns: t.pane.returns };
+  }
+
+  it("stable engine and original receipt settle after the awaited Return", async () => {
+    const t = await suspendedReturn();
+    const original = t.engine.getDeliveryReceipt(t.id)!;
+    t.resume();
+    expect(await t.result).toMatchObject({ ok: true, submit_dispatched: true, submit_verified: true, submitted: true });
+    expect(t.engine.getDeliveryReceipt(t.id)).toMatchObject({
+      delivery_id: t.id, agent_id: original.agent_id, text: original.text,
+      boot_recovery_context: original.boot_recovery_context,
+      terminal: true, submit_verified: true, delivery_state: "submitted",
+    });
+    expect(t.engine.getAgentState(t.boot.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true });
+    expect(t.pane.returns).toBe(t.returns + 1);
+    expect(t.pane.inputs).toEqual([t.text]);
+  });
+
+  const faults = ["disposed", "missing", "replacement", "receipt-replaced"] as const;
+  it.each(faults.flatMap(fault => ([{ fault, during: "Return" }, { fault, during: "verification" }])))(
+    "$fault during awaited $during preserves truthful completion and never replays", async ({ fault, during }) => {
+      const t = await suspendedReturn();
+      const original = t.engine.getDeliveryReceipt(t.id)!;
+      if (during === "verification") {
+        let entered!: () => void;
+        const verifying = new Promise<void>(resolve => { entered = resolve; });
+        let release!: () => void;
+        const released = new Promise<void>(resolve => { release = resolve; });
+        t.pane.onRead = async () => { t.pane.onRead = undefined; entered(); await released; };
+        t.resume();
+        await Promise.race([verifying, t.result.then(value => {
+          throw new Error(`Return completed before verification suspension: ${JSON.stringify(value)}`);
+        })]);
+        t.resume = release;
+      }
+      let replacement: Awaited<ReturnType<typeof setup>> | undefined;
+      let replacementReceipts: ReturnType<typeof t.engine.listDeliveryReceipts> | undefined;
+      let writes: ReturnType<typeof vi.spyOn> | undefined;
+      if (fault === "disposed") t.context.dispose();
+      if (fault === "missing") {
+        // Deliberately remove the real private queue entry, not a mocked lookup.
+        const queue = (t.engine as unknown as { deliveryQueue: { deliveryReceipts: Map<string, unknown>; persistDeliveryReceipts(): void } }).deliveryQueue;
+        expect(queue.deliveryReceipts.delete(t.id)).toBe(true);
+        queue.persistDeliveryReceipts();
+        expect(t.engine.getDeliveryReceipt(t.id)).toBeNull();
+      }
+      if (fault === "replacement") {
+        replacement = await setup();
+        replacement.engine.acceptPendingVerify({ ...original, agent_id: "replacement-owner", text: "replacement payload" });
+        replacementReceipts = replacement.engine.listDeliveryReceipts();
+        writes = vi.spyOn(replacement.engine, "acceptPendingVerify");
+        t.context.lifecycleSweepEngine = replacement.engine;
+      }
+      if (fault === "receipt-replaced") {
+        t.engine.resolveDelivery({ ...original, agent_id: "replacement-owner", text: "replacement payload" });
+      }
+      t.resume();
+      const sent = await t.result;
+      expect(sent, JSON.stringify(sent)).toMatchObject({
+        ok: true, key_dispatched: true, submit_dispatched: true, submit_verified: null,
+        submitted: false, delivered: false, terminal: false,
+      });
+      expect(sent.WARNING).toContain("NOT VERIFIED");
+      expect(t.engine.getAgentState(t.boot.agent_id)).toMatchObject({
+        boot_prompt_pending: true, boot_submit_dispatched: true, prompt_delivered: false,
+      });
+      if (fault === "disposed" || fault === "replacement") {
+        expect(t.engine.getDeliveryReceipt(t.id)).toMatchObject({
+          delivery_id: t.id, agent_id: original.agent_id, text: original.text,
+          boot_recovery_context: original.boot_recovery_context, terminal: false,
+          delivery_state: "pending_verify", submit_verified: null,
+        });
+      }
+      if (fault === "missing") expect(t.engine.getDeliveryReceipt(t.id)).toBeNull();
+      if (fault === "receipt-replaced") expect(t.engine.getDeliveryReceipt(t.id)).toMatchObject({ agent_id: "replacement-owner", text: "replacement payload", submit_verified: null });
+      if (replacement) {
+        expect(writes).not.toHaveBeenCalled();
+        expect(replacement.engine.listDeliveryReceipts()).toEqual(replacementReceipts);
+        expect(replacement.engine.getRegistry().get(t.boot.agent_id)).toBeNull();
+      }
+      expect(t.pane.returns).toBe(t.returns + 1);
+      expect(t.pane.inputs).toEqual([t.text]);
+      expect(t.pane.submitted).toEqual([t.text]);
+    },
+  );
+});
+
 describe("Immutable recovery baseline and legacy receipts", () => {
   it("immutable absent pre-type evidence cannot be replaced by a later memory baseline", async () => {
     const t=await setup(true);const boot=await t.spawn();const id=boot.boot_prompt_receipt.delivery_id;t.context.deliveryPreTypeScreens.delete(id);
