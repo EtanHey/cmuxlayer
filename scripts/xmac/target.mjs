@@ -1,5 +1,6 @@
-import { realpathSync, statSync, readFileSync } from "node:fs";
+import { realpathSync, statSync, readFileSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 
 export const shellQuote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
@@ -26,4 +27,19 @@ export function privateBuild(root, sha) {
 export function launcherEnvironment(env, target) {
   return { ...env, PATH: `${env.PATH}:${env.HOME}/.local/bin:/opt/homebrew/bin`,
     ...(target === "m1-gate" ? { CMUXLAYER_LAUNCHER_REGISTRY_PATH: join(env.HOME, ".config/ralphtools/launchers.zsh") } : {}) };
+}
+
+// The expected digest must come from the exact SHA's compiled reference build.
+export function distDigest(root) {
+  const hash = createHash("sha256"); let count = 0;
+  const walk = relative => {
+    for (const item of readdirSync(join(root, relative), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(relative, item.name);
+      if (item.isSymbolicLink()) throw new Error("dist symlink refused");
+      if (item.isDirectory()) walk(path);
+      else if (item.isFile() && item.name.endsWith(".js")) { hash.update(path + "\0"); hash.update(readFileSync(join(root, path))); count++; }
+    }
+  };
+  walk(""); if (!count) throw new Error("compiled reference dist is empty");
+  return hash.digest("hex");
 }
