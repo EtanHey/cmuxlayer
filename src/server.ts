@@ -3654,7 +3654,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           return { outcome: "pending" as const };
         }
-        const baseline = receipt.boot_recovery_context?.pre_type_screen ?? context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const baseline = receipt.boot_recovery_context
+          ? receipt.boot_recovery_context.pre_type_screen
+          : context.deliveryPreTypeScreens.get(receipt.delivery_id);
         const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
         // An older identical Tab queue is not this delivery. Its continued
         // presence must not hide a fresh committed steer at the tool boundary.
@@ -3714,7 +3716,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           !pending;
         const relayProof = binding ? baseline != null && composerCleared && !pending &&
           screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)
-          : receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
+          : receipt.source_event !== "send_to" || (baseline != null && composerCleared && !pending && (
           (screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)) ||
           (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
         ));

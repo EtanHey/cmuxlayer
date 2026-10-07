@@ -269,3 +269,39 @@ describe("R1 original boot receipt at recovery dispatch", () => {
     expect(await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1})).toMatchObject({ terminal: true, submit_dispatched: false, delivery_state: "typed" });
   });
 });
+
+// Null capture is a conditional synthetic state, not a native incident.
+describe("Immutable recovery baseline and legacy receipts", () => {
+  it("immutable absent pre-type evidence cannot be replaced by a later memory baseline", async () => {
+    const t=await setup(true);const boot=await t.spawn();const id=boot.boot_prompt_receipt.delivery_id;t.context.deliveryPreTypeScreens.delete(id);
+    const r=t.engine.stateMgr.updateRecord(boot.agent_id,{boot_pre_type_screen:null});t.engine.getRegistry().set(r.agent_id,r);t.pane.hidden=false;t.pane.lostAck=true;await t.key(boot.surface_id);
+    expect(t.engine.getDeliveryReceipt(id)!.boot_recovery_context!.pre_type_screen).toBe(null);
+    t.context.deliveryPreTypeScreens.set(id,"OpenAI Codex (v0.157.0)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer");const before=t.pane.returns;
+    await t.engine.verifyPendingDeliveries();const receipt=t.engine.getDeliveryReceipt(id)!;
+    expect(receipt,JSON.stringify(receipt)).toMatchObject({terminal:false,submit_verified:null});expect(t.pane.returns).toBe(before);
+  });
+
+  it("captured baseline wins over a later memory frame containing the payload", async () => {
+    const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+    const text = t.pane.draft; t.pane.hidden = false; t.pane.lostAck = true;
+    await t.key(boot.surface_id); const captured = t.engine.getDeliveryReceipt(id)!.boot_recovery_context!;
+    expect(captured.pre_type_screen).toBeTypeOf("string");
+    t.context.deliveryPreTypeScreens.set(id, `OpenAI Codex (v0.157.0)\n› ${text}\nWorking (1s • esc to interrupt)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`);
+    const before = t.pane.returns; await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 })).toMatchObject({ terminal: true, submit_verified: true });
+    expect(t.engine.getDeliveryReceipt(id)!.boot_recovery_context).toEqual(captured);
+    expect(t.pane.returns).toBe(before); expect(t.pane.inputs).toEqual([text]);
+  });
+
+  it.each([true, false])("legacy receipt without context uses only available memory evidence (present=%s)", async present => {
+    const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+    const text = t.pane.draft; t.pane.hidden = false; t.pane.lostAck = true; await t.key(boot.surface_id);
+    const pending = t.engine.getDeliveryReceipt(id)!;
+    t.engine.resolveDelivery({ ...pending, boot_recovery_context: undefined });
+    expect(t.engine.getDeliveryReceipt(id)!.boot_recovery_context).toBeUndefined();
+    if (!present) t.context.deliveryPreTypeScreens.delete(id);
+    const before = t.pane.returns; await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 })).toMatchObject({ terminal: present, submit_verified: present ? true : null });
+    expect(t.pane.returns).toBe(before); expect(t.pane.inputs).toEqual([text]);
+  });
+});
