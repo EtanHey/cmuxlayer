@@ -2,6 +2,9 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 const [row, events] = process.argv.slice(2);
+if (row === "xmac-codex" || row === "xmac-claude") {
+  await (await import("./xmac/fixture-tui.mjs")).runFixtureTui(row.slice(5));
+} else {
 const capture = name => readFileSync(fileURLToPath(new URL(`../tests/fixtures/${name}`, import.meta.url)), "utf8");
 const banner = capture("composer-overlays/codex-boot.txt");
 const idle = capture("codex-0.157/idle-empty.txt");
@@ -37,3 +40,4 @@ process.stdin.on("data", data => {
   }
   render();
 });
+}
