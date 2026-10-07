@@ -311,7 +311,7 @@ export function registerSpawnAgentTool(
       role: spawnFunctionSchema()
         .optional()
         .describe(
-          "Agent job function: implementor, reviewer, or gatherer. Legacy orchestrator/worker aliases remain accepted for compatibility. Claude requires this field explicitly.",
+          "Agent job function: implementor, reviewer, or gatherer. Lead callers may omit it to spawn an implementor with worker authority on the right by default; explicit roles and axes still apply. Legacy orchestrator/worker aliases remain accepted. Other Claude callers require an explicit role.",
         ),
       placement: spawnPlacementSchema()
         .optional()
@@ -688,6 +688,15 @@ export function registerSpawnAgentTool(
             ...(cwdReceipt ? { cwd_receipt: cwdReceipt } : {}),
           });
         }
+        await refreshManagedMetadataBestEffort(args.parent_agent_id);
+        await refreshManagedMetadataBestEffort();
+        const callerAgent = resolveCurrentCallerAgent();
+        const callerRole = callerAgent
+          ? inferRecordRoleOrNull(callerAgent)
+          : null;
+        const callerIsLead = callerAgent?.authority !== undefined
+          ? callerAgent.authority === "lead"
+          : callerRole === "orchestrator";
         const spawnProblems: string[] = [];
         let effortRequired = false;
         if (!args.repo) {
@@ -699,7 +708,8 @@ export function registerSpawnAgentTool(
         const rolelessClaude =
           args.version === 1 &&
           (args.cli === "claude" || args.cli === undefined) &&
-          args.role === undefined;
+          args.role === undefined &&
+          !callerIsLead;
         if (rolelessClaude) {
           spawnProblems.push(
             'Claude spawns require an explicit job role; use either authority:"lead", role:"implementor" or authority:"worker", role:"reviewer"',
@@ -775,12 +785,6 @@ export function registerSpawnAgentTool(
           reportPathReservationKey = earlyReservation.key;
           reportPathReservationId = earlyReservation.reservation_id;
         }
-        await refreshManagedMetadataBestEffort(args.parent_agent_id);
-        await refreshManagedMetadataBestEffort();
-        const callerAgent = resolveCurrentCallerAgent();
-        const callerRole = callerAgent
-          ? inferRecordRoleOrNull(callerAgent)
-          : null;
         const callerIsWorker = callerRole === "worker";
         const effectiveParentAgentId = callerIsWorker
           ? callerAgent!.agent_id
