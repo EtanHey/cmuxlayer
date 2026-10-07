@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { openDriver, prepareBuild } from "./driver.mjs";
 import { targetOptions } from "./target.mjs";
 import { runScenarios, ratchetProof, markdownTable } from "./runner.mjs";
+import { scenarioLaunchers, launchFailureRows } from "./launcher-preflight.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cleanGitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
@@ -54,14 +55,14 @@ export async function main(argv) {
     let build, result;
     try {
       build = replay ? prepareBuild(opts, sha, root) : null;
-      const driver = await openDriver({ ...opts, dryRun: false, sha, driverRoot: harness.root, driverSha: harness.sha, buildRoot: build?.root });
+      const launcherClis = [...new Set(selected.flatMap(scenarioLaunchers))];
+      const driver = await openDriver({ ...opts, launcherClis, dryRun: false, sha, driverRoot: harness.root, driverSha: harness.sha, buildRoot: build?.root });
       result = await runScenarios({ scenarios: selected, driver, evidenceDir: path, parseScreen, phase });
     } catch (error) {
       await mkdir(path, { recursive: true, mode: 0o700 });
       const evidencePath = join(path, "infrastructure.json");
-      await writeFile(evidencePath, JSON.stringify({ error: String(error), build, harness }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-      result = { status: "FAIL", rows: selected.map(scenario => ({ id: scenario.id, host: opts.host, cmux: opts.cmux === "prod" ? "prod-0.64.22" : "nightly", cmux_version: null,
-        cmuxlayer_sha: sha, phase, status: "FAIL", failure_kind: "infrastructure", expected_defect: false, evidence_path: evidencePath })) };
+      await writeFile(evidencePath, JSON.stringify({ error: String(error), precondition: error.precondition, build, harness }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      result = { status: "FAIL", rows: launchFailureRows(selected, opts, sha, phase, evidencePath, error) };
     }
     samples.push(result); return result;
   };

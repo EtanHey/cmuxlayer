@@ -29,6 +29,6 @@ try {
         else throw new Error("unknown target operation");
       }
       process.stdout.write(JSON.stringify({ id: message.id, result }) + "\n");
-    } catch (error) { process.stdout.write(JSON.stringify({ id: message?.id, error: String(error) }) + "\n"); }
+    } catch (error) { process.stdout.write(JSON.stringify({ id: message?.id, error: String(error), precondition: error.precondition }) + "\n"); }
   }
 } finally { clearTimeout(idle); await finish(); }

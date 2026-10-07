@@ -19,7 +19,7 @@ export function connectProcess(child, timeoutMs = 120_000) {
       const message = JSON.parse(line), item = pending.get(message.id);
       if (!item) throw new Error("unexpected target response id");
       clearTimeout(item.timer); pending.delete(message.id);
-      message.error ? item.reject(new Error(message.error)) : item.resolve(message.result);
+      message.error ? item.reject(Object.assign(new Error(message.error), { precondition: message.precondition })) : item.resolve(message.result);
     } catch (error) { fail(error); child.stdin.end(); }
   });
   child.on("error", fail); child.on("exit", (code, signal) => fail(new Error(`target bridge exited ${code ?? signal}`)));
