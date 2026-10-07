@@ -18,6 +18,8 @@ node scripts/xmac/live.mjs --host m1 --cmux prod \
 cmux socket and preserves blank and composer rows. MCP receipts are decoded
 separately. It closes owned seats, enumerates real-lead children and falls back
 to a raw sweep of the run-created workspace when child enumeration fails.
+Both cleanup paths retain the initial anchor and any sole remaining surface;
+the owned runtime app/daemon stops after surface cleanup.
 
 Live execution requires review of the driver and teardown first. On M1, the
 CLIs use the target user's authenticated HOME and actual repoGolem registry.
@@ -32,6 +34,12 @@ it cannot count as a behavior defect or a passing fix. The current scenarios'
 CLI requirements are known; new scenarios declare `launcherClis` explicitly
 (a nonempty array of `codex` and/or `claude`). This check never creates a root,
 changes the registry or installs a repository.
+The private shell bootstraps the dispatcher, sources launchers, then registers
+the dispatcher's thin wrappers last. Before opening cmux, a model-free Codex
+shim runs through that same shell and requires separate `--model` and
+`gpt-6-luna` argv elements. A mismatch is `PRECONDITION_ABSENT` with the observed
+model arguments (other arguments are redacted). The shim uses a temporary
+private CODEX_HOME and does not modify target launcher or auth files.
 
 `--prepare-driver` archives the committed harness SHA, transfers tracked code
 only through fixed-alias `ssh m1`, and builds inside a new mode-0700 temporary
