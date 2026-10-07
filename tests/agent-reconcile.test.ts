@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   rmSync,
   writeFileSync,
   utimesSync,
@@ -3308,6 +3309,84 @@ describe("Agent reconcile", () => {
         await engine.runSweep();
         expect(doneCalls()).toHaveLength(3);
         expect(stateMgr.readState(childId)!.report_episode_key).toBe(generation);
+      });
+    });
+
+    describe("F1 completion-loss ratchets", () => {
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+      const input = (id: string) => engine.acceptPendingVerify({
+        delivery_id: id, agent_id: childId, text: "Synthetic next task",
+        press_enter: true, source_event: "send_to", retry_count: 0,
+      });
+      const confirm = (id: string) => {
+        engine.resolveDelivery({ ...engine.getDeliveryReceipt(id)!, delivery_state: "submitted",
+          terminal: true, submit_verified: true });
+        engine.markAgentWorking(childId, { verifiedDelivery: true, deliveryId: id });
+      };
+      const restart = () => {
+        engine.dispose();
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+      };
+
+      it.each(["pending", "failed"])("F1-R1 %s B boundary preserves verified A without verifying B", async (status) => {
+        await setup(); await finish(); await tick();
+        input("loss-a"); confirm("loss-a"); await tick();
+        writeFileSync(reportPath, "A complete\nDONE_REPORT_EPISODE\n"); await tick();
+        const b = input("loss-b");
+        engine.acceptPendingVerify({ ...b, typed: true, submit_dispatched: true });
+        if (status === "failed") engine.resolveDelivery({ ...engine.getDeliveryReceipt("loss-b")!,
+          delivery_state: "failed_confirmed", terminal: true, submit_verified: false });
+        await tick(); writeFileSync(reportPath, "B partial\n");
+        restart(); await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2); // Initial + verified A from B's capture.
+        expect(engine.getDeliveryReceipt("loss-b")!.submit_verified).toBe(status === "failed" ? false : null);
+        confirm("loss-a"); // Duplicate ACK cannot replay A.
+        await tick(); writeFileSync(reportPath, "Unverified B terminal\nDONE_REPORT_EPISODE\n");
+        restart(); await engine.runSweep(); await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2); // B's own report never invents a completion.
+      });
+
+      it("F1-R2 failed send survives report edit and restart with the same durable identity", async () => {
+        await setup(); await finish(); await tick();
+        const stale = input("loss-a"); confirm("loss-a"); await tick();
+        writeFileSync(reportPath, "A complete\nDONE_REPORT_EPISODE\n");
+        const version = statSync(reportPath).mtimeMs;
+        let durableBeforeSend: unknown;
+        mockClient.notifyLifecycleEvent.mockImplementationOnce(async (_event, child) => {
+          // A new engine reads disk while the parent call is still unacknowledged.
+          const reader = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+          durableBeforeSend = reader.getDeliveryReceipt("loss-a")!.report_pending_done;
+          reader.dispose();
+          expect(durableBeforeSend).toEqual({ mtime_ms: version, delivery_id: child.report_done_delivery_id });
+          throw new Error("parent temporarily unavailable");
+        });
+        await engine.runSweep(); expect(doneCalls()).toHaveLength(2);
+        const attemptedId = doneCalls()[1]![1].report_done_delivery_id;
+        await tick(); writeFileSync(reportPath, "A edited partial\n");
+        engine.resolveDelivery({ ...stale, delivery_state: "submitted", terminal: true, submit_verified: true });
+        restart(); await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        expect(durableBeforeSend).toEqual({ mtime_ms: version, delivery_id: attemptedId });
+        expect(doneCalls()[2]![1].report_done_delivery_id).toBe(attemptedId);
+        expect(engine.getDeliveryReceipt("loss-a")!.report_done_notified).toBe(true);
+        confirm("loss-a");
+        engine.resolveDelivery({ ...stale, delivery_state: "submitted", terminal: true, submit_verified: true });
+        await tick(); writeFileSync(reportPath, "A background edit\nDONE_REPORT_EPISODE\n");
+        restart(); await engine.runSweep(); await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+      });
+
+      it("F1 control initial A and B completed before a sweep retain three identities", async () => {
+        await setup(); await tick();
+        writeFileSync(reportPath, "Initial complete\nDONE_REPORT_EPISODE\n");
+        persist({ state: "done" }); screen(readyScreen); await tick();
+        input("loss-a"); confirm("loss-a"); await tick();
+        writeFileSync(reportPath, "A complete\nDONE_REPORT_EPISODE\n"); await tick();
+        input("loss-b"); confirm("loss-b"); await tick();
+        writeFileSync(reportPath, "B complete\nDONE_REPORT_EPISODE\n");
+        restart(); await engine.runSweep(); await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        expect(new Set(doneCalls().map(([, child]) => child.report_done_delivery_id)).size).toBe(3);
       });
     });
 

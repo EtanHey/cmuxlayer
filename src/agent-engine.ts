@@ -3374,23 +3374,47 @@ export class AgentEngine {
   private async notifyInputReportOutcomes(ctx: SweepAgentContext, agent: AgentRecord): Promise<boolean> {
     const boundaries = this.listDeliveryReceipts().filter((receipt) =>
       receipt.agent_id === agent.agent_id && receipt.source_event === "send_to" &&
-      receipt.press_enter && receipt.submit_verified !== false && receipt.submission_started_at &&
+      receipt.press_enter && (receipt.submit_verified === true ||
+        (receipt.typed === true && receipt.submit_dispatched === true)) && receipt.submission_started_at &&
       receipt.report_submission && this.reportSubmissionMatches(agent, receipt.report_submission),
     ).sort((a, b) => Date.parse(a.submission_started_at!) - Date.parse(b.submission_started_at!));
     const receipts = boundaries.filter((receipt) => receipt.submit_verified === true);
     if (!receipts.length) return false;
     // Freeze the current artifact before awaiting any parent delivery.
     const latest = this.reportSnapshot(agent);
+    // A dispatched next input fences the preceding VERIFIED iteration, even if its
+    // own ACK is pending/failed. It never makes the next iteration eligible.
+    // Persist every observed terminal before any parent await can lose its version.
+    for (let i = 0; i < boundaries.length; i++) {
+      const receipt = boundaries[i]!;
+      if (receipt.submit_verified !== true) continue;
+      const evidence = receipt.report_submission!;
+      const observed = boundaries[i + 1]?.report_submission ?? latest;
+      if (!observed.outcome || observed.mtime_ms < Date.parse(receipt.submission_started_at!) ||
+          observed.mtime_ms <= evidence.mtime_ms) continue;
+      const outcome = observed.outcome;
+      const pendingField = outcome === "done" ? "report_pending_done" : "report_pending_blocked";
+      const ackField = outcome === "done" ? "report_done_notified" : "report_blocked_notified";
+      if (receipt[ackField] || receipt[pendingField]) continue;
+      const pending = { mtime_ms: observed.mtime_ms,
+        delivery_id: outcome === "done" ? evidence.done_id : evidence.blocked_id };
+      this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { [pendingField]: pending });
+      receipt[pendingField] = pending;
+    }
     const emit = async (receipt: AgentDeliveryReceipt, outcome: "done" | "blocked", prior = false) => {
       const evidence = receipt.report_submission!;
       const field = prior
         ? (outcome === "done" ? "report_prior_done_notified" : "report_prior_blocked_notified")
         : (outcome === "done" ? "report_done_notified" : "report_blocked_notified");
       if (receipt[field]) return;
+      const pendingField = outcome === "done" ? "report_pending_done" : "report_pending_blocked";
+      const pending = receipt[pendingField];
       const id = prior
         ? (outcome === "done" ? evidence.prior.done_id : evidence.prior.blocked_id)
-        : (outcome === "done" ? evidence.done_id : evidence.blocked_id);
+        : pending?.delivery_id;
       if (!id) return;
+      // Re-persist on retry as well: a failed disk write must prevent parent send.
+      if (!prior) this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { [pendingField]: pending });
       // Ownership still uses the current contract; delivery identity belongs to this input.
       const child = { ...agent, [outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"]: id };
       const signature = prior ? evidence.prior.key : `input:${evidence.boot}:${receipt.delivery_id}`;
@@ -3406,16 +3430,9 @@ export class AgentEngine {
         (before.prior.floor === null || before.mtime_ms > before.prior.floor)) {
       await emit(first, before.outcome, true);
     }
-    for (let i = 0; i < receipts.length; i++) {
-      const receipt = receipts[i]!;
-      const evidence = receipt.report_submission!;
-      // The next input captured this iteration's last report before it could be overwritten.
-      const boundary = receipts[i + 1]?.report_submission;
-      const mtime = boundary?.mtime_ms ?? latest.mtime_ms;
-      const outcome = boundary ? boundary.outcome : latest.outcome;
-      if (outcome && mtime >= Date.parse(receipt.submission_started_at!) && mtime > evidence.mtime_ms) {
-        await emit(receipt, outcome);
-      }
+    for (const receipt of receipts) {
+      if (receipt.report_pending_done) await emit(receipt, "done");
+      if (receipt.report_pending_blocked) await emit(receipt, "blocked");
     }
     return true;
   }

@@ -69,6 +69,8 @@ function snapshotDeliveryReceipt(
   return {
     ...snapshot,
     ...(receipt.report_submission ? { report_submission: { ...receipt.report_submission, prior: { ...receipt.report_submission.prior } } } : {}),
+    ...(receipt.report_pending_done ? { report_pending_done: { ...receipt.report_pending_done } } : {}),
+    ...(receipt.report_pending_blocked ? { report_pending_blocked: { ...receipt.report_pending_blocked } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -144,12 +146,15 @@ export class DeliveryQueue {
       report_blocked_notified: receipt?.report_blocked_notified,
       report_prior_done_notified: receipt?.report_prior_done_notified,
       report_prior_blocked_notified: receipt?.report_prior_blocked_notified,
+      report_pending_done: receipt?.report_pending_done,
+      report_pending_blocked: receipt?.report_pending_blocked,
     };
   }
 
   updateReportReceipt(deliveryId: string, patch: Partial<Pick<AgentDeliveryReceipt,
     "report_reopen_armed" | "report_done_notified" | "report_blocked_notified" |
-    "report_prior_done_notified" | "report_prior_blocked_notified">>): void {
+    "report_prior_done_notified" | "report_prior_blocked_notified" |
+    "report_pending_done" | "report_pending_blocked">>): void {
     const receipt = this.deliveryReceipts.get(deliveryId);
     if (!receipt) return;
     Object.assign(receipt, patch);

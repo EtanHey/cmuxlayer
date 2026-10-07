@@ -134,6 +134,9 @@ export interface AgentDeliveryReceipt {
   report_blocked_notified?: boolean;
   report_prior_done_notified?: boolean;
   report_prior_blocked_notified?: boolean;
+  /** Frozen terminal observations, persisted before parent send; ACK bits govern replay. */
+  report_pending_done?: { mtime_ms: number; delivery_id: string };
+  report_pending_blocked?: { mtime_ms: number; delivery_id: string };
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
   next_attempt_at?: string | null;
   /** The receiving TUI visibly accepted this into its own queue; never replay it. */

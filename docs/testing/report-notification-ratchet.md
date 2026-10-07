@@ -22,7 +22,10 @@ ratchet. This is local engine and captured transport evidence, not live proof.
 The reopen/restart rows are in `tests/agent-reconcile.test.ts`; the observer
 rows exercise the production app-server wiring in `tests/app-server-runtime.test.ts`.
 
-Run through the shared heavy-suite queue with `GOLEMS_HEAVY_MAX_LOAD=40`:
+Run the following payload through strict shared admission: MAX40, RAM >=6 GiB,
+mandatory shared slot and legacy lock, `strict_load=True`, and refusal on timeout
+or missing locks. Setting `GOLEMS_HEAVY_MAX_LOAD=40` alone is insufficient because
+the stock helper can warn and run after its non-strict timeout.
 
 ```sh
 bun run test tests/agent-reconcile.test.ts tests/app-server-runtime.test.ts -t 'R2-'
@@ -50,3 +53,20 @@ These rows encode Etan's ruling: one DONE per input-defined work iteration.
 Separate inputs may produce separate pending completions inside one sweep
 interval. Background edits within one iteration do not create new outcomes.
 This remains local synthetic engine evidence, not real-client or live proof.
+
+## F1 completion-loss correction rows
+
+Replay against immutable `ca40600989c4e63fc8dbb8f3e652e6eac7cc114c` **before**
+source edits, then run identical test bytes against the additive correction.
+Seal exact base/head, per-row results, killed mutations and strict admissions
+in the lane's `f1-completion-loss/` receipt packet; preserve the earlier F1 packet.
+
+| Durable row | Test selector | Required behavior |
+| --- | --- | --- |
+| report-unverified-next-boundary | F1-R1 | Pending and failed dispatched B preserve verified A's captured DONE after report overwrite/restart. B remains unverified and its own terminal report never creates DONE; duplicate A ACK stays quiet. |
+| report-durable-observed-terminal | F1-R2 | Persist terminal version and delivery identity before parent send. Failed send followed by partial edit/restart retries the same ID; stale receipt updates and duplicate ACK cannot erase pending evidence or replay acknowledged DONE. |
+
+Also retain the initial+A+B-before-sweep control, F1-P2/Q3, and R2 B1–B3/N1.
+The separately dispositioned DONE/BLOCKED semantics remain unchanged. Unbounded
+receipt-history growth is an explicit follow-up risk; this correction does not
+redesign indexing, storage or retention. All rows remain synthetic, not live proof.
