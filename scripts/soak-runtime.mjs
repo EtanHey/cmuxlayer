@@ -13,6 +13,7 @@ import { launcherCwdStartup, launchRecords } from "./xmac/launch-cwd.mjs";
 import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, normalizeProcessIdentity } from "./cmux-session-guard.mjs";
 import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-preferences.mjs";
 import { installFixtureLaunchers, verifyFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
+import { verifyFixtureShell } from "./xmac/fixture-shell.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -70,6 +71,14 @@ export function shellStartup(env, opts) {
     // register the modern thin wrappers LAST. Nothing in target ~/.config changes.
     (opts.fixtureMode ? `repoGolem() { :; }\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\n` :
       opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\nsource ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\n` : "") + launcherCwdStartup(opts);
+}
+
+export function writeShellStartup(env, opts) {
+  const startup = shellStartup(env, opts);
+  writeFileSync(join(env.ZDOTDIR, ".zshenv"), startup, { mode: 0o600 });
+  // /etc/zprofile path_helper runs after .zshenv. For owned fixture shells,
+  // restore sealed routing after all login/interactive startup processing.
+  if (opts.fixtureMode) writeFileSync(join(env.ZDOTDIR, ".zlogin"), startup, { mode: 0o600 });
 }
 
 export function assertProcessIdentity(saved, observed) {
@@ -258,7 +267,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
     const shellOpts = { ...opts, launchCwd: scenarioRepo.path, launchers: receipt.expected_launchers, launchReceipt: join(scratch, "launches.jsonl") };
     // App-created shells use only the private startup, including the final cwd wrapper.
-    writeFileSync(join(scratch, "zdot/.zshenv"), shellStartup(env, shellOpts), { mode: 0o600 });
+    writeShellStartup(env, shellOpts);
     receipt.launch_receipt_path = shellOpts.launchReceipt;
     receipt.argv_preflight = opts.fixtureMode ? null : checkLauncherArgv(env, shellOpts, receipt.expected_launchers);
     receipt.preflight_launches = launchRecords(shellOpts.launchReceipt);
@@ -266,6 +275,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
     if (opts.fixtureMode) receipt.close_preferences = verifyClosePreferences();
     if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
+    if (receipt.fixtures?.row) receipt.shell_preflight = verifyFixtureShell(receipt.fixtures, env);
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
       "--args", "--soak-launch-token", token, ...(opts.fixtureMode ? closePreferenceArgs() : [])]);
     const deadline = Date.now() + 10_000;

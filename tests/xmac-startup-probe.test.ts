@@ -75,6 +75,18 @@ it("requires raw enumeration to prove normal close completed", async () => {
   f.deps.rpc = async (...args: Parameters<typeof original>) => args[1] === "workspace.list" ? { workspaces: [{ id: workspace }] } : original(...args);
   await expect(run(f)).rejects.toThrow("close unverified");
 });
+it("requires exact run-owned fixture trap equality, not merely an absolute CLI", async () => {
+  const f=fixture();f.runtime.receipt.fixtures={row:"contract",binaries:{codex:"/private/run/bin/codex"}};
+  await expect(run(f)).rejects.toThrow(/resolution mismatch/);
+  expect(f.calls.some(c=>c.method==="workspace.close")).toBe(false);
+  const valid=fixture();valid.runtime.receipt.fixtures={row:"contract",binaries:{codex:"/scratch/bin/codex"}};
+  await run(valid);expect(valid.runtime.receipt.startup_probe.closed).toBe(true);
+});
+it("retains the separate generic xmac bundle-wrapper expectation", async () => {
+  const f=fixture();f.runtime.receipt.fixtures={binaries:{codex:"/different/private/bin/codex"}};
+  await runCodexResolutionProbe(f.runtime,"/scratch/bin/codex",f.deps);
+  expect(f.runtime.receipt.startup_probe.closed).toBe(true);
+});
 it("keeps real-home marker changes as strict failures for both targets", () => {
   const path = ".local/state/cmux/last-socket-path";
   const before = { home: "/synthetic/operator", files: {}, agents: [], socket_pointers: { [path]: "/tmp/old.sock\n" } };

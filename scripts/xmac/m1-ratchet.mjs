@@ -21,7 +21,7 @@ export const rows = [
 ];
 export const requiredRunnerFiles = ["scripts/xmac/m1-ratchet.mjs", "scripts/xmac/fixture-launchers.mjs", "scripts/xmac/fixture-attestation.mjs",
   "scripts/ratchet-fixture-tui.mjs", "scripts/soak-runtime.mjs", "scripts/soak-app-guard.mjs", "scripts/cmux-session-guard.mjs",
-  "scripts/xmac/production-guard.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
+  "scripts/xmac/production-guard.mjs", "scripts/xmac/fixture-shell.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
 export function validateWrapperConfig(cfg) {
   if (cfg.nativeApproved !== true || !/^[a-f0-9]{40}$/.test(cfg.runnerSha) || cfg.host && cfg.host !== "m1" ||
       cfg.cmux && cfg.cmux !== "prod" || rows.some(row => cfg.runnerSha === row.fix || cfg.runnerSha === row.bug) ||
@@ -81,7 +81,7 @@ async function sample(cfg, row, product, outputRoot) {
     runtime = await startSoakRuntime(opts, outputRoot);
     verifyFixtureLaunchers(runtime.receipt.fixtures, runtime.env);
     checkProductRegistry(privateBuild(product.root, product.sha), runtime.env);
-    await runCodexResolutionProbe(runtime);
+    await runCodexResolutionProbe(runtime, runtime.receipt.fixtures.binaries.codex);
     const owner = observeProbeOwner(runtime);
     const assertOwner = () => {
       const current = observeProbeOwner(runtime);

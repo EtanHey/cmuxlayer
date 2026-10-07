@@ -24,6 +24,8 @@ export function observeProbeOwner(runtime, { exec = execFileSync, lstat = lstatS
 export async function runCodexResolutionProbe(runtime, wrapper = null,
   { rpc: request = rpc, observe = observeProbeOwner, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   const receipt = runtime.receipt, app = receipt.app_process, socket = runtime.env.CMUX_SOCKET_PATH;
+  const expected = receipt.fixtures?.row ? receipt.fixtures.binaries.codex : wrapper;
+  if (receipt.fixtures?.row && (!expected || wrapper && wrapper !== expected)) throw new Error("run-owned fixture trap required");
   const uuid = value => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
   const expectedSocket = receipt.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : receipt.target === "nightly" ? "/tmp/cmux-nightly.sock" : null;
   if (!expectedSocket || socket !== expectedSocket || !uuid(receipt.launch_token) || !app?.saved ||
@@ -65,7 +67,7 @@ export async function runCodexResolutionProbe(runtime, wrapper = null,
     await sleep(100);
   }
   if (!settled) throw new Error("startup probe did not reach bound rendering idle prompt");
-  if (wrapper && receipt.resolved_codex !== wrapper) throw new Error("bundle Codex wrapper is not first on pane PATH");
+  if (expected && receipt.resolved_codex !== expected) throw new Error("run-owned Codex resolution mismatch");
   assertOwner();
   const value = await request(socket, "surface.list", { workspace_id: probe.workspace_id });
   if (value.workspace_id !== probe.workspace_id || !Array.isArray(value.surfaces) || value.surfaces.length !== 1 || value.surfaces[0].id !== probe.surface_id) throw new Error("startup probe surface ownership changed");
