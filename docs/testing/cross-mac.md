@@ -45,9 +45,18 @@ recreated empty for every sample under the exclusive harness lock. Recreation
 and teardown require the held lock's token and identity; teardown also checks
 the recorded repo identity and parents. Codex exact-path trust is an owner
 setup step; the harness never writes that configuration.
+After dispatcher registration, a function in the run's private `.zshenv`
+forwards `-w <fixed repo>` to each scenario launcher, preserving an explicit
+caller `-w`. It leaves the target launcher body and historical builds intact.
+The model-free argv probe also checks the CLI's actual cwd; a mismatch produces
+`PRECONDITION_ABSENT` (`launch_cwd`) and stops replay as `UNPROVEN`.
+Private lifecycle receipts retain normalized spawn requests and observed
+dispatcher-boundary commands/`-w` paths. These are shell-quoted observed argv,
+not the original PTY bytes; engine-recorded cwd remains a separate field.
 Launch readiness observes new run-owned surfaces while spawn is pending. Trust,
 update, and other numbered launch pickers stop the batch promptly with
-`PRECONDITION_ABSENT` (`launch_overlay`) and the first overlay lines. The harness
+`PRECONDITION_ABSENT` (`launch_overlay`) and up to 24 preceding lines so the
+trust folder header is retained. The harness
 sends no overlay input, adds no trust entry, and uses no trust override. A trust
 prompt inside HOME remains an absent precondition; further replay requires GO.
 

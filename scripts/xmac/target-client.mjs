@@ -11,6 +11,7 @@ import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 import { checkLauncherRoots } from "./launcher-preflight.mjs";
 import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
 import { guardLaunch } from "./launch-overlay.mjs";
+import { launchRecords } from "./launch-cwd.mjs";
 
 
 export function boundedSpawn(args, defaults) {
@@ -56,6 +57,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       if (args.resume_agent_id && !args.cli) args = { ...args, cli: (await inspect(args.resume_agent_id))?.cli };
       args = boundedSpawn(args, defaults);
       checkCliAuth(args.cli, runtime.env);
+      (runtime.receipt.normalized_spawn_args ??= []).push(args);
     }
     if (name === "close_surface" && args.agent_id && !agents.has(args.agent_id)) {
       const child = await inspect(args.agent_id);
@@ -68,7 +70,11 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       if (name === "spawn_agent" && value.agent_id) {
         owned.add(value.agent_id);
         agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
-        if (opts.target === "m1-gate") requireLauncherMode(JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8")), runtime.receipt.expected_launchers[args.cli]);
+        if (opts.target === "m1-gate") {
+          const state = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8"));
+          requireLauncherMode(state, runtime.receipt.expected_launchers[args.cli]);
+          (runtime.receipt.engine_launch_cwds ??= []).push({ agent_id: value.agent_id, launch_cwd: state.launch_cwd, worktree_path: state.worktree_path });
+        }
       }
       return result;
     };
@@ -84,6 +90,8 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     } catch (error) {
       if (error.precondition?.kind === "launch_overlay") runtime.receipt.launch_overlay = error.precondition;
       throw error;
+    } finally {
+      if (name === "spawn_agent" && runtime.receipt.launch_receipt_path) runtime.receipt.launches = launchRecords(runtime.receipt.launch_receipt_path);
     }
   };
   const inspect = async id => unwrap(await call("list_agents", { agent_ids: [id], detail: "full" })).agents?.[0];
