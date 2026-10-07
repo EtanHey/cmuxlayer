@@ -2,7 +2,7 @@ export function classifyLaunchOverlay(text) {
   const lines = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "").split("\n").map(line => line.trimEnd());
   const selected = lines.findIndex(line => /^\s*[›❯>]\s*\d+[.)]\s+\S/u.test(line));
   if (selected < 0 || lines.filter(line => /^\s*(?:[›❯>]\s*)?\d+[.)]\s+\S/u.test(line)).length < 2) return null;
-  const first_lines = lines.slice(Math.max(0, selected - 2), selected + 8);
+  const first_lines = lines.slice(Math.max(0, selected - 24), selected + 8);
   const overlay = /Trust and continue/i.test(first_lines.join("\n")) ? "trust" : /Update now/i.test(first_lines.join("\n")) ? "update" : "numbered_picker";
   return { status: "PRECONDITION_ABSENT", kind: "launch_overlay", overlay, first_lines };
 }
