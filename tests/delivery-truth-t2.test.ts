@@ -992,7 +992,10 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
+      const bootSpawn = vi.spyOn(server._registeredTools.spawn_agent, "handler");
       const agentId = await spawnReadyAgent(server);
+      expect(parseToolResult(await bootSpawn.mock.results[0].value).boot_prompt_receipt)
+        .toMatchObject({ submit_dispatched: false });
       const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);

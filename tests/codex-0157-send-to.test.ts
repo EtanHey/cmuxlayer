@@ -8,6 +8,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
+import { parseScreen } from "../src/screen-parser.js";
 import { withFakeRightSplitTopology } from "./helpers/fake-right-split-topology.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { engineForTests } from "../src/server.js";
@@ -158,14 +159,56 @@ function parseToolResult(result: any) {
   return result.structuredContent ?? JSON.parse(result.content[0].text);
 }
 
+interface BootDispatchFault {
+  failRegistryWrite: boolean;
+  originalDeliveryId?: string;
+  deliveryText?: string;
+  preTypeScreen?: string;
+  submitDispatched?: boolean;
+  registryWriteFailed?: boolean;
+}
+
 describe("#905 send_to receipts on Codex 0.157", () => {
   let testDir = "";
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
-  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.resetModules(); });
+  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000, omitBootDispatch = false, dispatchFault?: BootDispatchFault) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
+    if (omitBootDispatch || dispatchFault) {
+      const spawnTools = await import("../src/mcp/tools/spawn.js");
+      const { BootPromptDeliveryError } = await import("../src/delivery/receipts.js");
+      const register = spawnTools.registerSpawnAgentTool;
+      vi.spyOn(spawnTools, "registerSpawnAgentTool").mockImplementationOnce((server, deps) =>
+        register(server, { ...deps, deliverBootPrompt: async opts => {
+          const receipt = await deps.deliverBootPrompt(dispatchFault ? {
+            ...opts,
+            onPreTypeScreen: (screenText, deliveryText) => {
+              dispatchFault.preTypeScreen = screenText;
+              dispatchFault.deliveryText = deliveryText;
+              const stateWrite = dispatchFault.failRegistryWrite
+                ? vi.spyOn(deps.stateMgr, "updateRecord").mockImplementationOnce(() => {
+                    dispatchFault.registryWriteFailed = true;
+                    throw new Error("synthetic best-effort boot state write failed");
+                  }) : undefined;
+              try { opts.onPreTypeScreen?.(screenText, deliveryText); }
+              finally { stateWrite?.mockRestore(); }
+            },
+          } : opts);
+          if (dispatchFault) {
+            dispatchFault.originalDeliveryId = receipt.delivery_id;
+            dispatchFault.submitDispatched = receipt.submit_dispatched;
+            // A real synthetic Return landed; model a later observation failure
+            // that carries mutation evidence but no SubmitVerificationError.
+            throw new BootPromptDeliveryError("synthetic post-Return observation failed", receipt.bytes,
+              undefined, { typed: receipt.typed, submit_dispatched: receipt.submit_dispatched,
+                rpc_methods: receipt.rpc_methods });
+          }
+          if (omitBootDispatch) delete receipt.submit_dispatched; // Legacy/optional receipt field.
+          return receipt;
+        } }));
+    }
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const { pane, exec } = makeCodexPane(bootPrompt ? frames : {
       empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
@@ -193,9 +236,9 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({
         repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
-        boot_prompt_timeout_ms: 5_000, ...(bootPrompt ? { prompt: bootPrompt } : {}),
+        boot_prompt_timeout_ms: bootTimeout, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
-    if (bootPrompt) return { pane, context, spawned, keyWrites };
+    if (bootPrompt) return { pane, context, spawned, keyWrites, engine, server };
     engine.getRegistry().set(spawned.agent_id, { ...engine.getRegistry().get(spawned.agent_id), state: "ready", cli });
     if (cli !== "codex") engine.stateMgr.writeState(engine.getRegistry().get(spawned.agent_id));
     // Spawn's contract relay has completed its observed submit before the
@@ -1166,6 +1209,91 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       }
       expect(t.pane.submitted).toEqual(submitted);
     } finally { t.context.dispose(); }
+  }, 30_000);
+
+  // Lead's 2026-10-06 live-specimen-1: this worker's spawn receipt said
+  // boot_unsubmitted / working_status_not_observed while health said working.
+  it.each(["working", "cleared_composer", "transcript_echo"] as const)("P0 boot: delayed %s turn evidence settles a submitted boot", async evidence => {
+    let afterReads = 0;
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    const bootSetup = await setup({
+      empty: fixture("idle-empty"), buffered: fixture("burst-return-placeholder-frame"), draft,
+      after: text => {
+        // Return landed, but the first verifier read sees the old composer.
+        if (++afterReads === 1) return draft(text);
+        return `OpenAI Codex\n${evidence === "transcript_echo" ? `${codexRows(text)}\n` : ""}${evidence === "working" ? "Working (1s • esc to interrupt)\n" : ""}› Ask Codex to do anything\n GPT-6-Sol medium · ~/scratch`;
+      },
+    }, "Read and follow /tmp/synthetic-spawn-p0.md");
+    try {
+      expect(afterReads).toBeGreaterThan(1);
+      expect(bootSetup.pane.submitted).toHaveLength(1);
+      expect(bootSetup.spawned, JSON.stringify(bootSetup.spawned)).toMatchObject({ spawn_state: "started", boot_prompt_delivered: true,
+        boot_prompt_receipt: { delivery_state: "submitted", submit_verified: true, submit_evidence: evidence === "working" ? "status_only" : evidence } });
+      expect(bootSetup.pane.returns).toBe(2); // launcher Return plus one boot Return
+      expect(bootSetup.engine.getAgentState(bootSetup.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, boot_verify_started_at: null, prompt_delivered: true });
+    } finally { bootSetup.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("P0 boot: an unproven Return resolves by delivery_id when dispatch flag is omitted=%s", async omitBootDispatch => {
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    const bootSetup = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
+      after: draft }, "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500, omitBootDispatch);
+    try {
+      expect(bootSetup.spawned, JSON.stringify(bootSetup.spawned)).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
+        boot_prompt_receipt: { delivery_state: "pending_verify", terminal: false, delivery_id: expect.any(String), submit_verified: null } });
+      if (omitBootDispatch) expect(bootSetup.spawned.boot_prompt_receipt).not.toHaveProperty("submit_dispatched");
+      const id = bootSetup.spawned.boot_prompt_receipt.delivery_id;
+      expect(bootSetup.spawned.next_action).toContain(`wait_for({delivery_id:"${id}"})`);
+      expect(bootSetup.spawned.next_action).not.toContain("stop and");
+      expect(bootSetup.engine.getDeliveryReceipt(id)).toMatchObject({ terminal: false, delivery_state: "pending_verify" });
+      bootSetup.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
+      await bootSetup.engine.verifyPendingDeliveries();
+      const waited = parseToolResult(await bootSetup.server._registeredTools.wait_for.handler({ delivery_id: id, timeout_ms: 100 }, {}));
+      expect(waited).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+      expect(bootSetup.engine.getAgentState(bootSetup.spawned.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true, boot_verify_started_at: null });
+    } finally { bootSetup.context.dispose(); }
+  }, 30_000);
+
+  it("P0 boot: a Working transition with a partial payload tail remains pending", async () => {
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    // A cropped footer leaves the active Working row and partial composer
+    // visible; the parser can still report working rather than draft_pending.
+    const splitFrame = (text: string) => `OpenAI Codex\nWorking (1s • esc to interrupt)\n${codexRows(text.slice(-18))}`;
+    const bootSetup = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft,
+      after: splitFrame },
+      "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500);
+    try {
+      expect(parseScreen(splitFrame(bootSetup.pane.text)).status).toBe("working");
+      expect(bootSetup.pane.submitted).toHaveLength(1);
+      expect(bootSetup.spawned).toMatchObject({ spawn_state: "pending_verify", boot_prompt_delivered: false,
+        boot_prompt_receipt: { delivery_state: "pending_verify", submit_dispatched: true, submit_verified: null } });
+      const deliveryId = bootSetup.spawned.boot_prompt_receipt.delivery_id;
+      bootSetup.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
+      await bootSetup.engine.verifyPendingDeliveries();
+      expect(parseToolResult(await bootSetup.server._registeredTools.wait_for.handler({ delivery_id: deliveryId, timeout_ms: 100 }, {})))
+        .toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    } finally { bootSetup.context.dispose(); }
+  }, 30_000);
+
+  it.each([false, true])("P0 boot: dispatched-error recovery preserves attempt proof (registry write fails=%s)", async failRegistryWrite => {
+    const dispatchFault: BootDispatchFault = { failRegistryWrite };
+    const draft = (text: string) => `OpenAI Codex\n${codexRows(text)}\n GPT-6-Sol medium · ~/scratch`;
+    const bootSetup = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"), draft, after: draft },
+      "Read and follow /tmp/synthetic-spawn-p0.md", 0, "codex", false, undefined, 500, false, dispatchFault);
+    try {
+      expect(dispatchFault.submitDispatched).toBe(true);
+      if (failRegistryWrite) expect(dispatchFault.registryWriteFailed).toBe(true);
+      expect(bootSetup.spawned).toMatchObject({ spawn_state: "pending_verify",
+        boot_prompt_receipt: { delivery_state: "pending_verify", submit_dispatched: true } });
+      const deliveryId = bootSetup.spawned.boot_prompt_receipt.delivery_id;
+      expect.soft(deliveryId).toBe(dispatchFault.originalDeliveryId);
+      expect.soft(bootSetup.context.deliveryPreTypeScreens.get(deliveryId)).toBe(dispatchFault.preTypeScreen);
+      expect.soft(bootSetup.engine.getDeliveryReceipt(deliveryId)?.text).toBe(dispatchFault.deliveryText);
+      bootSetup.pane.frames.after = text => fixture("idle-submitted-working").replace(`› ${PONG}`, codexRows(text));
+      await bootSetup.engine.verifyPendingDeliveries();
+      expect(parseToolResult(await bootSetup.server._registeredTools.wait_for.handler({ delivery_id: deliveryId, timeout_ms: 100 }, {})))
+        .toMatchObject({ delivery_state: "submitted", submit_verified: true, terminal: true });
+    } finally { bootSetup.context.dispose(); }
   }, 30_000);
 
   it("boot: a lost Return is retried, and only the transcript row verifies it", async () => {
