@@ -55,8 +55,7 @@ jobs:
           hdiutil attach "$RUNNER_TEMP/cmux.dmg" -nobrowse -mountpoint "$RUNNER_TEMP/cmux-mount"
           trap 'hdiutil detach "$RUNNER_TEMP/cmux-mount"' EXIT
           ditto "$RUNNER_TEMP/cmux-mount/$CAPABILITY_APP" "$RUNNER_TEMP/$CAPABILITY_APP"
-          xcrun stapler validate "$RUNNER_TEMP/$CAPABILITY_APP"
-          spctl -a --type execute "$RUNNER_TEMP/$CAPABILITY_APP"
+          bash scripts/verify-cmux-capability-app.sh "$RUNNER_TEMP/$CAPABILITY_APP" "$RUNNER_TEMP/notarization-assessment.txt"
       - name: Shell capability (fail closed)
         shell: bash
         run: |
@@ -73,4 +72,5 @@ jobs:
             ${{ runner.temp }}/capability.json
             ${{ runner.temp }}/capability.md
             ${{ runner.temp }}/gui-session.txt
+            ${{ runner.temp }}/notarization-assessment.txt
           if-no-files-found: error
