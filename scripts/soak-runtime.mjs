@@ -12,7 +12,7 @@ import { createScenarioRepo } from "./xmac/scenario-repo.mjs";
 import { launcherCwdStartup, launchRecords } from "./xmac/launch-cwd.mjs";
 import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, normalizeProcessIdentity } from "./cmux-session-guard.mjs";
 import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-preferences.mjs";
-import { installFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
+import { installFixtureLaunchers, verifyFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -246,6 +246,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
     if (opts.fixtureMode) {
       receipt.fixtures = installFixtureLaunchers(env, opts, scratch, scenarioRepo.path);
+      verifyFixtureLaunchers(receipt.fixtures, env);
       receipt.expected_launchers = receipt.fixtures.launchers;
     } else if (opts.launcherMode && opts.target === "m1-gate") {
       if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
@@ -301,6 +302,7 @@ export async function startSoakRuntime(opts, outputRoot) {
       receipt.probe_seen = true;
     }
     // Start the installed daemon explicitly, so teardown never guesses which PID it owns.
+    if (opts.fixtureMode) verifyFixtureLaunchers(receipt.fixtures, env);
     const child = spawn("/opt/homebrew/opt/node/bin/node", [build?.daemon ?? "/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js"],
       { env, cwd: scenarioRepo.path, stdio: ["ignore", "ignore", "inherit"] });
     let spawnError;
