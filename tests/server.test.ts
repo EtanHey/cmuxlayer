@@ -6172,7 +6172,7 @@ describe("tool handler integration", () => {
         const result = await runWithFakeTimers(
           () =>
             tool.handler(
-              {
+              { verbose: true,
                 repo: "cmuxlayer",
                 model: "gpt-5.5",
                 cli: "codex", effort: "medium",
@@ -6959,7 +6959,7 @@ describe("tool handler integration", () => {
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
-            {
+            { verbose: true,
               repo: "cmuxlayer",
               model: "gpt-5.5",
               cli: "codex", effort: "medium",
@@ -8235,7 +8235,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("boot prompt leaves a long boot prompt pending when only generic Working appears", async () => {
+  it("boot prompt verifies fresh Working after observing the complete long payload before Return", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-long-retry.md");
     const prompt = "long boot prompt ".repeat(40);
@@ -8295,14 +8295,15 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(false);
+    expect(parsed.boot_prompt_delivered).toBe(true);
     expect(parsed.boot_prompt_receipt).toMatchObject({
-      delivered: false,
-      terminal: false,
+      delivered: true,
+      terminal: true,
       typed: true,
       submit_attempted: true,
-      submit_verified: null,
-      delivery_state: "pending_verify",
+      submit_verified: true,
+      submit_evidence: "status_only",
+      delivery_state: "submitted",
       retry_count: 0,
     });
     expect(sendCalls).toHaveLength(1);

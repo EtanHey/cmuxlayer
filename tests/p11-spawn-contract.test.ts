@@ -318,6 +318,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       () =>
         tool.handler(
           {
+            verbose: true, // Contract diagnostics are requested explicitly.
             repo: "brainlayer",
             model: "sonnet",
             cli: "claude",
@@ -4180,7 +4181,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(writes[0]!.length).toBeLessThan(BOOT_INJECTION_CHUNK_THRESHOLD);
   });
 
-  it("P11b R4: an unwritable contract file falls back to inline WITHOUT emitting a dangling pointer", async () => {
+  it.each([false, true])("P11b R4: an unwritable contract file falls back to inline WITHOUT emitting a dangling pointer (verbose=%s)", async (verbose) => {
     // The adversarial case: if the write fails, the boot prompt must not point
     // at a file that does not exist. The inline-mode test reaches the same
     // OUTCOME by a different route, so this branch needs its own pin -- a
@@ -4209,6 +4210,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
             "spawn_agent"
           ].handler(
             {
+              verbose,
               repo: "brainlayer",
               model: "sonnet",
               cli: "claude",
@@ -4231,9 +4233,16 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       expect(wire).not.toContain("Read and follow");
       expect(wire).toContain("cmuxlayer mailbox contract for");
       // And the receipt says the lead must relay.
-      expect(parsed.coordination_footer_delivered).toBe(false);
-      expect(parsed.coordination_footer_note).toMatch(/not_wired/);
-      expect(parsed.coordination_footer_note).toMatch(/LEAD must relay/i);
+      const note = verbose ? parsed.coordination_footer_note : parsed.warning;
+      expect(note).toMatch(/not_wired/);
+      expect(note).toMatch(/LEAD must relay/i);
+      if (verbose) expect(parsed.coordination_footer_delivered).toBe(false);
+      else {
+        const contract = issueCoordinationContract(parsed.agent_id, { baseDir: blockedBase });
+        expect(note).toContain(contract.report_path);
+        expect(note).toContain(contract.done_marker);
+        expect(Object.keys(parsed)).toHaveLength(6);
+      }
     } finally {
       rmSync(blockedBase, { recursive: true, force: true });
       rmSync(blockedStateDir, { recursive: true, force: true });
@@ -4302,6 +4311,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         () =>
           rawServer._registeredTools["spawn_agent"].handler(
             {
+              verbose: true,
               repo: "brainlayer",
               cli: "claude",
               role: "worker",
