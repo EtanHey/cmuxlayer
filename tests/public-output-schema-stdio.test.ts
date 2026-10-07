@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 const validArguments: Record<string, Record<string, unknown>> = {
-  spawn_agent: { type: "terminal" },
+  spawn_agent: { repo: "cmuxlayer", cli: "codex", effort: "medium" },
   report_to_parent: { blocker: "schema probe" },
   send_to: {
     mode: "surface",
@@ -72,7 +72,7 @@ describe("public tool output schemas over stdio", () => {
         });
       }
       const declaredFields: Record<string, string[]> = {
-        spawn_agent: ["type", "cwd", "title", "cwd_receipt", "spawn_state",
+        spawn_agent: ["state", "delivered", "warning", "type", "cwd", "title", "cwd_receipt", "spawn_state",
           "next_action", "delivered_chars"],
         report_to_parent: [
           "child_agent_id",
@@ -149,29 +149,30 @@ describe("public tool output schemas over stdio", () => {
           name: toolName,
           arguments: validArguments[toolName],
         });
-        expect(result.structuredContent, toolName).toMatchObject({
-          ok: true,
-          retry_count: 0,
-          stdio_contract_probe: toolName,
-        });
-        if (toolName === "spawn_agent") {
-          expect(result.structuredContent).toMatchObject({
-            spawn_state: "boot_unsubmitted", next_action: expect.stringContaining("read_screen"),
+        if (toolName !== "spawn_agent") {
+          expect(result.structuredContent, toolName).toMatchObject({
+            ok: true, retry_count: 0, stdio_contract_probe: toolName,
+          });
+        } else {
+          expect(result.structuredContent).toEqual({ ok: true,
+            state: "boot_unsubmitted", delivered: false,
             agent_id: "cmuxlayerCodex-test", surface_id: "surface:test",
-            workspace_id: "workspace:test", delivered_chars: 42,
-            boot_prompt_receipt: { submit_verified: false } });
-          // #793: the fixture has no attributed caller, so no key Return.
-          expect(String(result.structuredContent?.next_action)).not.toContain(
-            'mode:"key"',
-          );
-          expect(String(result.structuredContent?.next_action)).toMatch(
-            /Boot prompt submission was not verified/i,
-          );
-          expect(String(result.structuredContent?.next_action)).not.toMatch(
-            /retr(?:y|ies).*exhausted/i,
-          );
+            warning: expect.stringContaining("read_screen") });
+          // No caller owns the draft: compact recovery must not advise key Return.
+          expect(result.structuredContent?.warning).not.toContain('mode:"key"');
         }
       }
+      const verbose = await client.callTool({ name: "spawn_agent",
+        arguments: { ...validArguments.spawn_agent, verbose: true } });
+      expect(verbose.structuredContent).toMatchObject({ retry_count: 0,
+        spawn_state: "boot_unsubmitted", workspace_id: "workspace:test",
+        delivered_chars: 42, contract_path: "/tmp/synthetic-contract.md",
+        report_path: "/tmp/synthetic-report.md", done_marker: "DONE_SYNTHETIC",
+        boot_prompt_receipt: { submit_verified: false } });
+      const terminal = await client.callTool({ name: "spawn_agent",
+        arguments: { type: "terminal" } });
+      expect(terminal.structuredContent).toEqual({ ok: true, agent_id: null,
+        surface_id: "surface:test", state: "started", delivered: false });
     } finally {
       await client.close();
     }

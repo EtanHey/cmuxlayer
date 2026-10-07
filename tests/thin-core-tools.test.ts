@@ -175,6 +175,19 @@ describe("thin-core tool palette", () => {
     }
   });
 
+  it("advertises compact spawn receipts and the verbose contract escape hatch", () => {
+    const server = createServer({ exec: makeExec(), disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0 }) as any;
+    const tool = server._registeredTools.spawn_agent;
+    expect(tool.inputSchema.parse({}).verbose).toBe(false);
+    expect(tool.inputSchema.parse({ verbose: true }).verbose).toBe(true);
+    expect(tool.description).toContain("at most six fields");
+    for (const field of ["contract_path", "report_path", "done_marker"]) {
+      expect(tool.description).toContain(field);
+    }
+    expect(tool.description).toContain("verbose:true");
+  });
+
   it("accepts the string worktree shorthand in the spawn_agent schema", () => {
     const server = createServer({
       exec: makeExec(),
@@ -508,6 +521,10 @@ describe("legacy-name drift", () => {
       expect(body, `${relativePath} contains a retired tool name`).not.toMatch(
         legacyName,
       );
+      if (relativePath.endsWith("agent-routing-and-handling.md")) {
+        expect(body).toContain("at most six fields");
+        expect(body).toContain("verbose:true");
+      }
     }
   });
 });

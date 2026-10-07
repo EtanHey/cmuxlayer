@@ -19,6 +19,13 @@ This path keeps pane, tab, and surface refs as transport details. Surface refs
 can change after respawns, moves, reconnects, or stale terminal cleanup; an
 `agent_id` is the routing handle.
 
+After spawning, `state:"pending_verify"` in the default lean receipt means boot
+submission remains unproven. Keep the agent and follow `warning`'s
+`wait_for({delivery_id})` guidance (`verbose:true` exposes `spawn_state` and the
+boot receipt's ID). A queued boot has no submission ID because no payload was sent;
+inspect the existing pane before sending work. `boot_unsubmitted` identifies a
+boot whose Return was never dispatched, with recovery scoped to the draft owner.
+
 ## Tool Choice
 
 | Need | Use | Avoid |
@@ -31,6 +38,20 @@ can change after respawns, moves, reconnects, or stale terminal cleanup; an
 | Launch or resume with an exact shell command | `send_to(mode:"command")` | Separate text and key sends |
 | Operate a raw terminal/shell | `send_to(mode:"surface"|"command"|"key")` | Agent mode without an `agent_id` |
 | Close or recover a stuck pane | `read_screen`, `close_surface`, then `spawn_agent` for managed agents | Absorbing the worker task into the caller |
+
+## Spawn Receipts
+
+`spawn_agent` successes return at most six fields: `ok`, `agent_id`,
+`surface_id`, `state`, `delivered`, and optional `warning`. `state` is the spawn
+outcome, such as `started` or `boot_unsubmitted`; `delivered` is true only when
+the boot prompt was verified delivered. A raw terminal has `agent_id:null`
+and `delivered:false`. Follow any recovery warning on the existing pane.
+If the coordination contract was not delivered, `warning` carries its note and the exact contract pointer to relay, or the issued report path and done marker when no contract file exists. On resume, relay only if the restored session lost its contract context.
+
+Request `verbose:true` on the spawn call to include `contract_path`,
+`report_path`, `done_marker`, coordination notes, transport, worktree, and
+timings. The issued contract file already contains `report_path` and
+`done_marker`. Failures keep full detail regardless of `verbose`.
 
 ## Handling Existing Agents
 

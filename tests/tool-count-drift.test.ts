@@ -161,6 +161,12 @@ describe("tool-count drift guard", () => {
       (match) => match[1],
     );
     expect(tableNames).toEqual(names);
+    const spawnRow = toolsSection.split("\n").find((line) => line.startsWith("| `spawn_agent` |"));
+    expect(spawnRow).toContain("at most six fields");
+    expect(spawnRow).toContain("verbose:true");
+    for (const field of ["ok", "agent_id", "surface_id", "state", "delivered", "warning"]) {
+      expect(spawnRow).toContain(`\`${field}\``);
+    }
     expect(toolsSection).toContain(
       "setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered",
     );
