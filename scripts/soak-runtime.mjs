@@ -46,6 +46,17 @@ export function targetEnvironment(parent, scratch, opts, home = homedir()) {
   return env;
 }
 
+export function appLaunchEnvironment(env, opts, scratch, app, socketPath) {
+  const launch = Object.fromEntries(Object.entries(env).filter(([key]) =>
+    /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key)));
+  if (opts.privateAppHome) {
+    // Shell .zshenv restores target CLI auth HOME; app-owned pointers stay private.
+    const privateEnv = isolatedEnvironment({}, scratch, app, socketPath);
+    for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) launch[key] = privateEnv[key];
+  }
+  return launch;
+}
+
 export function assertProcessIdentity(saved, observed) {
   if (!saved || !observed || saved !== observed) throw new Error("PID identity/start-time mismatch");
 }
@@ -84,7 +95,7 @@ export async function stopOwnedProcess({ pid, saved, target = "nightly", app = f
 
 export function rpc(socketPath, method, params = {}) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath); let buffer = "", settled = false;
+    const socket = net.createConnection(socketPath); socket.setEncoding("utf8"); let buffer = "", settled = false;
     const finish = (error, result) => {
       if (settled) return; settled = true; clearTimeout(timer); socket.destroy();
       error ? reject(error) : resolve(result);
@@ -118,6 +129,7 @@ export function socketIsLive(path) {
 }
 
 export async function startSoakRuntime(opts, outputRoot) {
+  opts = { ...opts, privateAppHome: opts.privateAppHome || opts.target === "m1-gate", launcherMode: opts.launcherMode || opts.target === "m1-gate" && !opts.dryRun };
   const app = opts.app, socketPath = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
   const token = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
@@ -141,7 +153,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     process.off("SIGTERM", onSignal); process.off("SIGINT", onSignal);
     return receipt;
   })();
-  const onSignal = () => { receipt.error = "soak interrupted"; void close().finally(() => process.exit(1)); };
+  const onSignal = () => { receipt.error = "soak interrupted"; void (opts.onSignal?.(close) ?? close()).finally(() => process.exit(1)); };
   process.once("SIGTERM", onSignal); process.once("SIGINT", onSignal);
   try {
     // Refuse stale production routing too, before starting an app or a model.
@@ -185,14 +197,18 @@ export async function startSoakRuntime(opts, outputRoot) {
     writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
     if (opts.launcherMode && opts.target === "m1-gate") {
       if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
+      const { resolveLauncherNameFromRegistry } = await import("../dist/launcher-registry.js");
+      receipt.expected_launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli,
+        resolveLauncherNameFromRegistry(opts.repo ?? "cmuxlayer", cli, { sourcePath: env.CMUXLAYER_LAUNCHER_REGISTRY_PATH })]));
+      if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
     } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
     // App-created shells must use the same private environment, with no personal zsh startup files.
     writeFileSync(join(scratch, "zdot/.zshenv"), Object.entries(env).filter(([key]) =>
       /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key))
       .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n" +
       (opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\n` : ""), { mode: 0o600 });
-    const launchEnv = Object.fromEntries(Object.entries(env).filter(([key]) =>
-      /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key)));
+    const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
+    if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
       "--args", "--soak-launch-token", token]);
     const deadline = Date.now() + 10_000;
@@ -233,9 +249,10 @@ export async function startSoakRuntime(opts, outputRoot) {
       { env, cwd: join(scratch, "repo"), stdio: ["ignore", "ignore", "inherit"] });
     let spawnError;
     child.on("error", error => { spawnError = error; });
+    // Capture ownership before the first async readiness wait (including interrupts).
+    if (child.pid) daemon = { pid: child.pid, saved: identity(child.pid) };
     const daemonDeadline = Date.now() + 10_000;
     while (!existsSync(env.CMUXLAYER_DAEMON_SOCKET) && !spawnError && child.exitCode === null && Date.now() < daemonDeadline) await pause(100);
-    if (child.pid) daemon = { pid: child.pid, saved: identity(child.pid) };
     if (spawnError || !daemon?.saved || !existsSync(env.CMUXLAYER_DAEMON_SOCKET)) throw new Error("private installed daemon not ready");
     receipt.daemon = daemon;
     return { env, workspace: workspace.workspace_id, cwd: join(scratch, "repo"), receiptPath, receipt, close };

@@ -22,7 +22,7 @@ function cheapSpawn(opts) {
 }
 
 /** @returns {import('./ctx.d.mjs').ScenarioContext} */
-export function createContext({ driver, evidenceDir, parseScreen, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
+export function createContext({ driver, evidenceDir, parseScreen, onScreen = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
   const owned = new Set();
   let sequence = 0;
   const artifact = async (name, data) => {
@@ -72,6 +72,7 @@ export function createContext({ driver, evidenceDir, parseScreen, sleep = ms => 
     readScreen: async surface => {
       const raw = await driver.readScreen(surface);
       if (typeof raw.text !== "string") throw new Error("raw socket screen text missing");
+      await onScreen(surface, raw);
       return { text: raw.text, parsed: parseScreen(raw.text), column: raw.column ?? null, column_count: raw.column_count ?? null };
     },
     waitScreen: async (surface, predicate, ms) => {

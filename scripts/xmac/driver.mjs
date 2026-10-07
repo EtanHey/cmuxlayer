@@ -65,7 +65,7 @@ export function prepareBuild(opts, sha, cwd) {
   const root = execTarget(NODE, ["-e", "const fs=require('node:fs'),os=require('node:os'),path=require('node:path');process.stdout.write(fs.mkdtempSync(path.join(os.tmpdir(),process.argv[1])))", `cmux-xmac-replay-${randomUUID()}-`]);
   if (!/^\/[^\r\n]+\/cmux-xmac-replay-[A-Za-z0-9-]+$/.test(root)) throw new Error("unsafe target build prefix");
   execTarget("/usr/bin/tar", ["-x", "-C", root], archive);
-  execTarget("/opt/homebrew/bin/bun", ["install", "--frozen-lockfile", "--ignore-scripts", "--cwd", root]);
+  execTarget("/usr/bin/env", [`BUN_INSTALL_CACHE_DIR=${root}/.cache/bun`, "/opt/homebrew/bin/bun", "install", "--frozen-lockfile", "--ignore-scripts", "--cwd", root]);
   execTarget("/opt/homebrew/bin/bun", ["run", "--cwd", root, "build"]);
   execTarget(NODE, ["-e", "require('node:fs').writeFileSync(process.argv[1],JSON.stringify({sha:process.argv[2]}),{mode:0o600,flag:'wx'})", `${root}/xmac-build.json`, sha]);
   return { root, sha };
