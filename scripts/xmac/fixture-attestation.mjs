@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 
 export const fileDigest = path => createHash("sha256").update(readFileSync(path)).digest("hex");
 function file(path, privateFile = false) {
@@ -32,4 +33,24 @@ export function attestFixtureInstall(receipt, env) {
       env.PATH !== receipt.attestation.path || env.CMUX_CUSTOM_CODEX_PATH !== receipt.binaries.codex ||
       env.CMUX_CUSTOM_CLAUDE_PATH !== receipt.binaries.claude)) throw new Error("fixture registry enforcement/routing changed");
   if (existsSync(join(receipt.root, "model-trap.log"))) throw new Error("raw model fallback trap hit");
+}
+
+export function attestFixtureProcess(receipt, binding, env, observe = pid => {
+  const read = field => execFileSync("/bin/ps", ["-ww", "-p", String(pid), "-o", `${field}=`],
+    { encoding: "utf8", timeout: 3000, env: { ...process.env, LC_ALL: "C" } }).trim();
+  return { pid, start: read("lstart"), executable: read("comm"), argv: read("args") };
+}) {
+  attestFixtureInstall(receipt, env);
+  file(receipt.events, true);
+  const event = JSON.parse(readFileSync(receipt.events, "utf8"));
+  const { files } = receipt.attestation;
+  if (!Number.isSafeInteger(event.pid) || event.pid <= 1 || binding.pid && binding.pid !== event.pid ||
+      event.row !== receipt.row || event.surface !== binding.surface || event.workspace !== binding.workspace ||
+      !/^[a-f0-9-]{36}$/i.test(binding.surface ?? "") || !/^[a-f0-9-]{36}$/i.test(binding.workspace ?? "") ||
+      event.argv?.length !== 4 || realpathSync(event.argv[0]) !== files.node.path || event.argv[1] !== files.tui.path ||
+      event.argv[2] !== receipt.row || event.argv[3] !== receipt.events) throw new Error("fixture event/process binding changed");
+  const current = observe(event.pid);
+  if (current.pid !== event.pid || !current.start || binding.start && current.start !== binding.start ||
+      realpathSync(current.executable) !== files.node.path || current.argv !== event.argv.join(" ")) throw new Error("fixture PID/start/argv identity changed");
+  return { ...current, surface: event.surface, workspace: event.workspace };
 }
