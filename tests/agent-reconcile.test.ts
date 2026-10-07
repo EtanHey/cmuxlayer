@@ -10,6 +10,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  utimesSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -3169,6 +3170,219 @@ describe("Agent reconcile", () => {
       "done",
       expect.objectContaining({ agent_id: "done-worker" }),
     );
+  });
+
+  describe("contracted child report completion episodes", () => {
+    const childId = "report-episode-child";
+    const readyScreen = "Claude Code\nWhat can I help you with?\n❯ ";
+    const reportPath = join(TEST_DIR, "episode-report.md");
+    const doneCalls = () => mockClient.notifyLifecycleEvent.mock.calls.filter(
+      ([event]) => event === "done",
+    );
+    const persist = (patch: Partial<AgentRecord>) => {
+      const record = { ...stateMgr.readState(childId)!, ...patch };
+      stateMgr.writeState(record);
+      engine.getRegistry().set(childId, record);
+    };
+    const screen = (text: string) => mockClient.readScreen.mockImplementation(
+      async (surface: string) => ({ surface, text, lines: 20, scrollback_used: false }),
+    );
+    const setup = async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: childId, parent_agent_id: "lead-report-parent", cli: "claude",
+        report_path: reportPath, done_marker: "DONE_REPORT_EPISODE",
+        state: "creating",
+      }));
+      stateMgr.transition(childId, "booting");
+      stateMgr.transition(childId, "ready");
+      stateMgr.transition(childId, "working");
+      liveSurfaces = [makeSurface("surface:42")];
+      writeHeartbeat(childId, inboxOpts);
+      await engine.getRegistry().reconstitute();
+      screen("Claude Code\n✻ Thinking… (esc to interrupt)");
+      await engine.runSweep();
+      mockClient.notifyLifecycleEvent.mockClear();
+    };
+    const finish = async (text = "Complete\nDONE_REPORT_EPISODE\n") => {
+      writeFileSync(reportPath, text);
+      persist({ state: "done", task_done_detected_at: new Date().toISOString() });
+      screen(readyScreen);
+      await engine.runSweep();
+    };
+
+
+    it.each([
+      "Partial work\n", "DONE_REPORT_EPISODE\nMore work\n", "Complete\nDONE_WRONG\n",
+    ])("rejects partial, body, and wrong final markers: %s", async (text) => {
+      await setup();
+      await finish(text);
+      expect(doneCalls()).toHaveLength(0);
+    });
+
+    it("rejects a stale report and a wrong report path", async () => {
+      await setup();
+      await finish("Partial\n");
+      writeFileSync(reportPath, "Complete\nDONE_REPORT_EPISODE\n");
+      utimesSync(reportPath, new Date(0), new Date(0));
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+      persist({ report_path: join(TEST_DIR, "missing-report.md") });
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+    });
+
+
+    it("re-arms only after a verified reopen and requires a newly written report", async () => {
+      await setup();
+      await finish();
+      expect(doneCalls()).toHaveLength(1);
+      // Viewing or requesting a reopen without actual work must not re-arm.
+      const initialEpisode = stateMgr.readState(childId)!.report_episode_key;
+      persist({ reopen_pending_at: new Date().toISOString() });
+      await engine.runSweep();
+      expect(stateMgr.readState(childId)!.report_episode_key).toBe(initialEpisode);
+      expect(doneCalls()).toHaveLength(1);
+      persist({ reopen_pending_at: new Date().toISOString() });
+      screen("Claude Code\n✻ Thinking… (esc to interrupt)");
+      await engine.runSweep();
+      expect(stateMgr.readState(childId)?.state).toBe("working");
+      persist({ state: "done" });
+      screen(readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(1);
+      writeFileSync(reportPath, "Second completion\nDONE_REPORT_EPISODE\n");
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(2);
+      stateMgr.reopenForResume(childId);
+      stateMgr.transition(childId, "booting");
+      stateMgr.transition(childId, "ready");
+      const resumed = stateMgr.transition(childId, "working");
+      engine.getRegistry().set(childId, resumed);
+      screen("Claude Code\n✻ Thinking… (esc to interrupt)");
+      await engine.runSweep();
+      persist({ state: "done" });
+      screen(readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(2);
+      writeFileSync(reportPath, "Resumed completion\nDONE_REPORT_EPISODE\n");
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(3);
+    });
+
+    it.each([
+      { blocked_on_prompt: true }, { paused: true }, { user_killed: true },
+      { deletion_intent: true }, { state: "error" as const, error: "failed" },
+    ])("never reports success for blocked/paused/stopped/failed: %j", async (patch) => {
+      await setup();
+      writeFileSync(reportPath, "Complete\nDONE_REPORT_EPISODE\n");
+      persist({ state: "done", ...patch });
+      screen("blocked_on_prompt" in patch
+        ? readFileSync(new URL("./fixtures/painpoints/claude-permission-confirmation.txt", import.meta.url), "utf8")
+        : "paused" in patch
+          ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nGoal paused (/goal resume)\ncodex>"
+          : readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+    });
+
+    it("retries a failed delivery within the same episode", async () => {
+      await setup();
+      mockClient.notifyLifecycleEvent.mockRejectedValueOnce(new Error("unavailable"));
+      await finish();
+      await engine.runSweep();
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(2);
+    });
+
+    it("rejects live input requests and unreadable panes even with valid DONE", async () => {
+      await setup();
+      writeFileSync(reportPath, "Complete\nDONE_REPORT_EPISODE\n");
+      persist({ state: "done" });
+      screen(readFileSync(new URL("./fixtures/painpoints/claude-ask-user-question-overlay.txt", import.meta.url), "utf8"));
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+      mockClient.readScreen.mockRejectedValue(new Error("unreadable pane"));
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+    });
+
+    it.each(["DONE_REPORT_EPISODE", "BLOCKED_REPORT_EPISODE_CHILD"])("baselines an undelivered historical %s on restart", async (marker) => {
+      await setup();
+      writeFileSync(reportPath, `Complete\n${marker}\n`);
+      persist({ state: "done" });
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+      screen(readyScreen);
+      await engine.runSweep();
+      writeFileSync(reportPath, `Historical edit\n${marker}\n`);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+      expect(mockClient.notifyLifecycleEvent.mock.calls.filter(([event]) => event === "blocked")).toHaveLength(0);
+    });
+
+    it("does not apply a startup baseline to a newly booted episode", async () => {
+      await setup();
+      writeFileSync(reportPath, "Historical\nDONE_REPORT_EPISODE\n");
+      persist({ state: "done" });
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+      stateMgr.reopenForResume(childId);
+      stateMgr.transition(childId, "booting");
+      const done = stateMgr.transition(childId, "done");
+      engine.getRegistry().set(childId, done);
+      writeFileSync(reportPath, "Fast resumed completion\nDONE_REPORT_EPISODE\n");
+      screen(readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(1);
+    });
+
+    it("reports fast boot completion without any observed working sweep", async () => {
+      stateMgr.writeState(makeRecord({ agent_id: childId, parent_agent_id: "lead-report-parent",
+        state: "creating", cli: "claude", report_path: reportPath, done_marker: "DONE_REPORT_EPISODE" }));
+      stateMgr.transition(childId, "booting");
+      stateMgr.transition(childId, "done");
+      writeFileSync(reportPath, "Fast completion\nDONE_REPORT_EPISODE\n");
+      liveSurfaces = [makeSurface("surface:42")];
+      await engine.getRegistry().reconstitute();
+      screen(readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(1);
+    });
+
+    it.each(["KEPT_OPEN: reviewer\nowner: lead\nnext check: review\n", "PR_DELIVERABLE: true\n"])(
+      "reports valid DONE without implying closure: %s", async (policy) => {
+        await setup();
+        await finish(`${policy}DONE_REPORT_EPISODE\n`);
+        expect(engine.assessHarvestability(stateMgr.readState(childId)!).closeable).toBe(false);
+        expect(doneCalls()).toHaveLength(1);
+      },
+    );
+
+    it("reports one child-bound BLOCKED and one DONE with distinct durable delivery ids", async () => {
+      await setup();
+      const blocked = () => mockClient.notifyLifecycleEvent.mock.calls.filter(([event]) => event === "blocked");
+      const marker = "BLOCKED_REPORT_EPISODE_CHILD";
+      await finish(`${marker}\nStill working\n`);
+      expect(blocked()).toHaveLength(0);
+      await finish("BLOCKED_OTHER_CHILD\n");
+      expect(blocked()).toHaveLength(0);
+      writeFileSync(reportPath, `${marker}\n`);
+      utimesSync(reportPath, new Date(0), new Date(0));
+      await engine.runSweep();
+      expect(blocked()).toHaveLength(0);
+      await finish(`${marker}\n`);
+      expect(engine.assessHarvestability(stateMgr.readState(childId)!).closeable).toBe(false);
+      expect(blocked()).toHaveLength(1);
+      const episode = stateMgr.readState(childId)!;
+      expect(episode.report_blocked_delivery_id).toBeTruthy();
+      expect(episode.report_done_delivery_id).toBeTruthy();
+      expect(episode.report_blocked_delivery_id).not.toBe(episode.report_done_delivery_id);
+      await engine.runSweep();
+      await finish(`${marker}\n`);
+      expect(blocked()).toHaveLength(1);
+      await finish();
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(1);
+      expect(blocked()).toHaveLength(1);
+    });
   });
 
   it("refreshes sidebar status when an unchanged agent moves workspace", async () => {

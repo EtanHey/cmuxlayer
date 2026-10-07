@@ -527,7 +527,7 @@ export interface RolePlacementReconcileSummary {
   }>;
 }
 
-export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
+export type AgentLifecycleEvent = "spawned" | "done" | "blocked" | "errored" | "health";
 
 export const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 
@@ -936,6 +936,7 @@ export const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> 
 export const LIFECYCLE_LOGS = {
   spawned: { message: "spawned", level: "info" },
   done: { message: "done", level: "success" },
+  blocked: { message: "blocked", level: "warning" },
   errored: { message: "errored", level: "error" },
   health: { message: "health", level: "warning" },
 } as const;
