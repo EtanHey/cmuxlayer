@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, symlinkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error Plain-JS runner helper.
 import { productionSnapshot, productionChanges } from "../scripts/ratchet-production-guard.mjs";
@@ -29,6 +30,97 @@ function nightlyFixture() {
   mkdirSync(app, { recursive: true });
   return { ...f, app, env: { ...f.env, HOME: f.home, RUNNER_TEMP: scratch } };
 }
+
+describe("NIGHTLY snapshot marker locality", () => {
+  const beforeValue = "/synthetic-before.sock\n", afterValue = "/tmp/cmux-nightly.sock\n";
+  function linked(kind: string, dangling = false) {
+    const f = nightlyFixture(), outside = temporary(), external = join(outside, "nightly-last-socket-path");
+    const link = join(f.home, kind === "marker" ? nightlyMarker : ".local/state/cmux");
+    if (!dangling) writeFileSync(external, beforeValue);
+    rmSync(link, { recursive: true, force: true });
+    symlinkSync(dangling ? join(outside, "missing") : kind === "marker" ? external : outside, link);
+    return { ...f, outside, external, link, kind };
+  }
+  function changes(f: ReturnType<typeof nightlyFixture>, before: unknown, after = productionSnapshot(f.home)) {
+    const runnerLocal: { path: string }[] = [];
+    const violations = productionChanges(before, after, [token], [], [], { capability: true, nightly: true, app: f.app, env: f.env, runnerLocal });
+    return { violations, nightlyReceipts: runnerLocal.filter(row => row.path === nightlyMarker) };
+  }
+  it.each(["marker", "parent"])("retains attribution for an external %s symlink", kind => {
+    const f = linked(kind), before = productionSnapshot(f.home);
+    writeFileSync(f.external, afterValue);
+    expect(changes(f, before)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+  });
+  it.each(["marker", "parent"])("uses the captured before location after an external %s link is retargeted inside", kind => {
+    const f = linked(kind), before = productionSnapshot(f.home);
+    rmSync(f.link); if (kind === "parent") mkdirSync(f.link);
+    writeFileSync(join(f.home, nightlyMarker), afterValue);
+    const after = productionSnapshot(f.home);
+    expect(changes(f, before, after)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+    expect(before.nightly_marker_location.path).toBe(realpathSync(f.external));
+    expect(after.nightly_marker_location.path).toBe(realpathSync(join(f.home, nightlyMarker)));
+  });
+  it.each(["marker", "parent"])("retains attribution when an internal %s path is retargeted outside", kind => {
+    const f = nightlyFixture(); writeFileSync(join(f.home, nightlyMarker), beforeValue);
+    const before = productionSnapshot(f.home), outside = temporary(), external = join(outside, "nightly-last-socket-path");
+    writeFileSync(external, afterValue);
+    const link = join(f.home, kind === "marker" ? nightlyMarker : ".local/state/cmux");
+    rmSync(link, { recursive: true }); symlinkSync(kind === "marker" ? external : outside, link);
+    expect(changes(f, before)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+  });
+  it.each(["marker", "parent"])("does not exempt an ambiguous dangling %s link in the before snapshot", kind => {
+    const f = linked(kind, true), before = productionSnapshot(f.home);
+    rmSync(f.link); if (kind === "parent") mkdirSync(f.link);
+    writeFileSync(join(f.home, nightlyMarker), afterValue);
+    expect(changes(f, before)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+    expect(before.nightly_marker_location).toMatchObject({ error: "ENOENT" });
+  });
+  it("captures the existing ancestor when marker and intermediate parent are absent", () => {
+    const f = nightlyFixture(); rmSync(join(f.home, ".local/state/cmux"), { recursive: true });
+    const before = productionSnapshot(f.home);
+    expect(before.nightly_marker_location).toMatchObject({ home: realpathSync(f.home),
+      path: join(realpathSync(f.home), nightlyMarker), existing_parent: realpathSync(join(f.home, ".local/state")) });
+    mkdirSync(join(f.home, ".local/state/cmux")); writeFileSync(join(f.home, nightlyMarker), afterValue);
+    expect(changes(f, before)).toEqual({ violations: [], nightlyReceipts: [{ path: nightlyMarker, before: null, after: afterValue }] });
+  });
+  it("captures an escaping existing parent even when the marker is absent", () => {
+    const f = linked("parent"); rmSync(f.external);
+    const before = productionSnapshot(f.home); rmSync(f.link); mkdirSync(f.link);
+    writeFileSync(join(f.home, nightlyMarker), afterValue);
+    expect(changes(f, before)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+    expect(before.nightly_marker_location).toMatchObject({ path: join(realpathSync(f.outside), "nightly-last-socket-path"), existing_parent: realpathSync(f.outside) });
+  });
+  it.each(["before", "after"])("requires location evidence from the %s snapshot", side => {
+    const f = nightlyFixture(); writeFileSync(join(f.home, nightlyMarker), beforeValue);
+    const before = productionSnapshot(f.home); writeFileSync(join(f.home, nightlyMarker), afterValue);
+    const after = productionSnapshot(f.home);
+    delete (side === "before" ? before : after).nightly_marker_location;
+    expect(changes(f, before, after)).toEqual({ violations: [nightlyMarker], nightlyReceipts: [] });
+  });
+  it("denies the exemption when a captured parent disappears into a dangling link", () => {
+    const f = nightlyFixture(); writeFileSync(join(f.home, nightlyMarker), beforeValue);
+    const before = productionSnapshot(f.home), parent = join(f.home, ".local/state/cmux");
+    rmSync(parent, { recursive: true }); symlinkSync(join(temporary(), "missing"), parent);
+    const after = productionSnapshot(f.home);
+    expect(after.nightly_marker_location).toMatchObject({ error: "ENOENT" });
+    expect(changes(f, before, after).nightlyReceipts).toEqual([]);
+  });
+  it("fails closed if the marker is retargeted during the snapshot read", async () => {
+    const f = nightlyFixture(), outside = temporary(), external = join(outside, "nightly-last-socket-path");
+    writeFileSync(join(f.home, nightlyMarker), beforeValue); writeFileSync(external, afterValue);
+    const read = 'return readFileSync(join(home, path), "utf8");';
+    const source = readFileSync("scripts/ratchet-production-guard.mjs", "utf8");
+    expect(source.split(read)).toHaveLength(2);
+    // Inject one private filesystem retarget immediately after the real read.
+    // Exercise snapshot refusal, without modifying tracked source or launching anything.
+    const injected = 'import { rmSync, symlinkSync } from "node:fs";\n' + source
+      .replace('"./ratchet-app-guard.mjs"', JSON.stringify(pathToFileURL(resolve("scripts/ratchet-app-guard.mjs")).href))
+      .replace(read, `const value = readFileSync(join(home, path), "utf8");
+        if (path === pointers[1]) { rmSync(join(home, path)); symlinkSync(${JSON.stringify(external)}, join(home, path)); } return value;`);
+    const api = await import(/* @vite-ignore */ "data:text/javascript;base64," + Buffer.from(injected).toString("base64"));
+    expect(() => api.productionSnapshot(f.home)).toThrow("NIGHTLY marker location changed during snapshot");
+  });
+});
 
 describe("hosted capability marker attribution", () => {
   it("records the captured NIGHTLY boundary with raw marker values, keeping other writes attributed", () => {

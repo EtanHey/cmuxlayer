@@ -74,7 +74,10 @@ M1, self-hosted and replay runs keep the production attribution rules. All other
 watched logs, tickets and agents remain guarded on hosted runs too. A verified
 NIGHTLY capability app may also record only `nightly-last-socket-path`, provided
 both canonical snapshot HOMEs equal the runner HOME and canonical `RUNNER_TEMP`
-is strictly beneath it. Here HOME means the ephemeral runner account, not the
+is strictly beneath it. Both snapshots must also capture the canonical marker
+location within that HOME, resolving the nearest existing parent if absent;
+escaping, dangling or missing location evidence retains ordinary attribution.
+Here HOME means the ephemeral runner account, not the
 private HOME passed to the app; missing, mismatched or unreadable qualification
 stays strict or fails closed. The marker retains raw before/after values.
 

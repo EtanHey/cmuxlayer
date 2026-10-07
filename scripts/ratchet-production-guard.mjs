@@ -1,11 +1,23 @@
-import { statSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync, realpathSync } from "node:fs";
-import { join, sep } from "node:path";
+import { statSync, lstatSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync, realpathSync } from "node:fs";
+import { join, resolve, dirname, basename, sep } from "node:path";
 import { isHostedCapabilityTarget } from "./ratchet-app-guard.mjs";
 
 const pointers = [".local/state/cmux/last-socket-path", ".local/state/cmux/nightly-last-socket-path"];
 const missing = fn => { try { return fn(); } catch (error) { if (error.code !== "ENOENT") throw error; return null; } };
+// Resolve the marker, or its nearest existing ancestor when absent. lstat is
+// deliberate: a dangling link is ambiguous, not an absent ordinary directory.
+function nightlyMarkerLocation(home) {
+  try {
+    const marker = resolve(home, pointers[1]), tail = []; let existing = marker;
+    while (!missing(() => lstatSync(existing))) { tail.unshift(basename(existing)); existing = dirname(existing); }
+    const canonical = realpathSync(existing);
+    if (tail.length && !statSync(existing).isDirectory()) throw new Error("marker ancestor is not a directory");
+    return { home: realpathSync(home), path: join(canonical, ...tail),
+      existing_parent: tail.length ? canonical : realpathSync(dirname(marker)) };
+  } catch (error) { return { error: error.code ?? "AMBIGUOUS" }; }
+}
 export function productionSnapshot(home) {
-  const files = {}, socket_pointers = {};
+  const files = {}, socket_pointers = {}, nightly_marker_location = nightlyMarkerLocation(home);
   for (const [dir, select] of [[".local/state/cmuxlayer", () => true], [".cmuxlayer/tickets", () => true], [".local/state/cmux", name => /^cmuxlayer-daemon-.*\.log(?:\.\d+)?$/.test(name)]]) {
     for (const name of missing(() => readdirSync(join(home, dir))) ?? []) {
       if (!select(name)) continue;
@@ -17,7 +29,8 @@ export function productionSnapshot(home) {
     if (statSync(join(home, path)).size > 8192) throw new Error("socket pointer exceeds guard limit");
     return readFileSync(join(home, path), "utf8");
   });
-  return { home, files, socket_pointers, agents: missing(() => readdirSync(join(home, ".cmux/agents"))) ?? [] };
+  if (JSON.stringify(nightly_marker_location) !== JSON.stringify(nightlyMarkerLocation(home))) throw new Error("NIGHTLY marker location changed during snapshot");
+  return { home, files, socket_pointers, nightly_marker_location, agents: missing(() => readdirSync(join(home, ".cmux/agents"))) ?? [] };
 }
 
 // Read only appended bytes; retain no production content in a receipt.
@@ -29,10 +42,15 @@ export function productionChanges(before, after, identifiers, agentIds, reads = 
   const runnerLocal = isHostedCapabilityTarget(context.app, context);
   const env = context.env ?? process.env;
   const nightlyHome = runnerLocal && context.nightly === true && env.HOME ? realpathSync(env.HOME) : null;
+  const markerLocal = snapshot => {
+    const location = snapshot.nightly_marker_location;
+    return location && !location.error && location.home === nightlyHome && typeof location.path === "string" && location.path.startsWith(nightlyHome + sep) &&
+      typeof location.existing_parent === "string" && (location.existing_parent === nightlyHome || location.existing_parent.startsWith(nightlyHome + sep));
+  };
   const nightlyRunnerLocal = nightlyHome && realpathSync(before.home) === nightlyHome && realpathSync(after.home) === nightlyHome &&
-    realpathSync(env.RUNNER_TEMP).startsWith(nightlyHome + sep);
+    realpathSync(env.RUNNER_TEMP).startsWith(nightlyHome + sep) && markerLocal(before) && markerLocal(after);
   for (const path of pointers) {
-    // NIGHTLY additionally requires the snapshot HOME to own runner scratch.
+    // NIGHTLY requires runner scratch and both captured marker locations in HOME.
     // Keep both actual snapshots and all other production attribution intact.
     if ((runnerLocal && path === ".local/state/cmux/last-socket-path") || (nightlyRunnerLocal && path === ".local/state/cmux/nightly-last-socket-path")) {
       if (!context.runnerLocal) throw new Error("hosted marker receipt missing");
