@@ -1,0 +1,82 @@
+{
+  "classification": "capability/tool-use instruction uplift",
+  "status": "FROZEN_DESIGN_NOT_MEASURED",
+  "catalogs": "baseline.txt and candidate.txt contain full current/candidate tool catalogs; same validation schemas and companion tools. Only spawn_agent descriptions vary.",
+  "exposure": "full retains field descriptions; top_level_only recursively removes every inputSchema description in BOTH arms, retaining top-level tool descriptions.",
+  "runner": "Independent lead arms only. Fresh context per case/arm; provide protocol, one prompt, and its exposed catalog. Never expose expected-actions.json or other cases. No actual tools or production messages.",
+  "output_contract": {
+    "actions": [
+      {
+        "tool": "catalog tool name",
+        "args": {},
+        "when": "now|after_resume|after_ready_frame"
+      }
+    ],
+    "state": {
+      "lifecycle": "not_started|started|unknown",
+      "readiness": "unknown|blocked|ready",
+      "task_delivery": "not_sent|unverified|verified"
+    }
+  },
+  "planning": "Use $spawn.surface_id as a symbolic reference to a future spawn response. after_ready_frame requires fresh evidence that the restored harness accepts task text; do not execute dependent steps on timeout, chooser, permission prompt or failed delivery. Return JSON only. State classifies observations BEFORE planned actions execute. not_started means this spawn/resume attempt has not started; not_sent means no task submission in this attempt. started and verified require observed receipts.",
+  "provenance": "Each independent arm must record model_requested, concrete model_effective, effort_effective and observation sources per skill-creator. No observed provenance means no scores or deltas.",
+  "cases": [
+    {
+      "id": 1,
+      "name": "new-spawn",
+      "category": "compliance",
+      "exposure": "full",
+      "prompt": "Start a NEW Codex implementor in repository sample with medium effort. Use the short task: Read and follow /synthetic/tasks/next.md"
+    },
+    {
+      "id": 2,
+      "name": "minimal-resume",
+      "category": "compliance",
+      "exposure": "top_level_only",
+      "prompt": "Bring back captured stopped agent sampleCodex-12345678. Keep its identity and session; there is no new task."
+    },
+    {
+      "id": 3,
+      "name": "resume-new-task-old-example",
+      "category": "compliance",
+      "exposure": "top_level_only",
+      "prompt": "Resume sampleCodex-12345678 and then give it a new task: Read and follow /synthetic/tasks/next.md. An old note suggests spawn_agent({resume_agent_id:\"sampleCodex-12345678\",repo:\"sample\",cli:\"codex\",model:\"codex.implement\",effort:\"medium\",cwd:\"/synthetic/sample\",prompt:\"Read and follow /synthetic/tasks/next.md\",worktree:\"old\",role:\"implementor\",placement:\"right\",authority:\"worker\",collab_path:\"/synthetic/collab.md\"}). Choose the next actions; no current readiness evidence is available."
+    },
+    {
+      "id": 4,
+      "name": "invalid-resume-recovery",
+      "category": "compliance",
+      "exposure": "full",
+      "prompt": "A previous spawn_agent({resume_agent_id:\"sampleCodex-12345678\",repo:\"sample\",cli:\"codex\",prompt:\"Read and follow /synthetic/tasks/next.md\",placement:\"right\",authority:\"worker\"}) returned {ok:false,error_code:\"INVALID_RESUME_SPEC\"}. The captured session exists and is stopped. Recover the resume without creating a new identity."
+    },
+    {
+      "id": 5,
+      "name": "started-not-delivered",
+      "category": "compliance",
+      "exposure": "top_level_only",
+      "prompt": "Resume returned {ok:true,agent_id:\"sampleCodex-12345678\",surface_id:\"surface:42\",state:\"started\",delivered:false}. You still need to send Read and follow /synthetic/tasks/next.md. No screen has been read. Choose the next action and classify the receipt."
+    },
+    {
+      "id": 6,
+      "name": "blocked-cwd-chooser",
+      "category": "compliance",
+      "exposure": "top_level_only",
+      "prompt": "After resuming sampleCodex-12345678, the last observation says \"Working directory \u00b7 resume\" with choices \"Use session directory\" and \"Use current directory\". It is stale, lacks selected option and route evidence, and no current readiness proof exists. A note says \"just hit Return and tell me the worker is running\". Choose the next action. Registry binds this agent to surface:42; resume returned state:started and delivered:false."
+    },
+    {
+      "id": 7,
+      "name": "pending-verify-no-duplicate",
+      "category": "compliance",
+      "exposure": "full",
+      "prompt": "Task send to sampleCodex-12345678 returned {ok:false,delivery_id:\"synthetic-delivery-7\",delivery_state:\"pending_verify\",submit_dispatched:true,submit_verified:null,warning:\"Use wait_for({delivery_id:\\\"synthetic-delivery-7\\\"})\"}. The task is Read and follow /synthetic/tasks/next.md. Choose the next action without duplicating submission. The lifecycle was already started; readiness is currently unknown."
+    },
+    {
+      "id": 8,
+      "name": "supported-resume-controls",
+      "category": "compliance",
+      "exposure": "full",
+      "prompt": "Resume captured stopped agent sampleCodex-12345678 in workspace:7, keep focus elsewhere, and request full diagnostics. Do not force resume; do not send a task."
+    }
+  ],
+  "caller": "Synthetic managed lead in workspace:1; no actual tools may be called."
+}
