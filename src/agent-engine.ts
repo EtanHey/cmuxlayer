@@ -3471,8 +3471,15 @@ export class AgentEngine {
     if (await this.notifyLifecycleEventForSweep(ctx, agent, outcome, episodeKey)) {
       const current = this.stateMgr.readState(agent.agent_id);
       if (!current || current.report_episode_key !== agent.report_episode_key) return;
-      const updated = this.stateMgr.updateRecord(agent.agent_id, { [notifiedField]: agent.report_episode_key });
-      this.registry.set(agent.agent_id, updated);
+      try {
+        const updated = this.stateMgr.updateRecord(agent.agent_id, { [notifiedField]: agent.report_episode_key });
+        this.registry.set(agent.agent_id, updated);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.sweepDebugLog(
+          `[cmuxlayer] report ${outcome} marker persistence failed for ${agent.agent_id}; retrying next sweep: ${message}`,
+        );
+      }
     }
   }
 

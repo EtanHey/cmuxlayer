@@ -3212,6 +3212,104 @@ describe("Agent reconcile", () => {
     };
 
 
+    describe("report marker-write ratchets", () => {
+      const outcomes = ["done", "blocked"] as const;
+      const markerFor = (outcome: typeof outcomes[number]) => outcome === "done"
+        ? "report_done_notified_episode" : "report_blocked_notified_episode";
+      const reportFor = (outcome: typeof outcomes[number]) => outcome === "done"
+        ? "Complete\nDONE_REPORT_EPISODE\n" : "Blocked\nBLOCKED_REPORT_EPISODE_CHILD\n";
+      const callsFor = (outcome: typeof outcomes[number]) => mockClient.notifyLifecycleEvent.mock.calls.filter(
+        ([event, child]) => event === outcome && child.agent_id === childId,
+      );
+
+      it.each(outcomes)("marker-write failure after %s delivery preserves later-agent reconciliation and retry", async (outcome) => {
+        await setup();
+        const laterId = "later-report-child";
+        const laterReport = join(TEST_DIR, "later-report.md");
+        stateMgr.writeState(makeRecord({ agent_id: laterId, parent_agent_id: "lead-report-parent",
+          cli: "claude", surface_id: "surface:43", state: "creating",
+          report_path: laterReport, done_marker: "DONE_LATER_REPORT" }));
+        stateMgr.transition(laterId, "booting");
+        const later = stateMgr.transition(laterId, "done");
+        engine.getRegistry().set(laterId, later);
+        liveSurfaces.push(makeSurface("surface:43"));
+        writeHeartbeat(laterId, inboxOpts);
+        writeFileSync(laterReport, "Complete\nDONE_LATER_REPORT\n");
+        expect(engine.getRegistry().list().map((agent) => agent.agent_id)).toEqual([childId, laterId]);
+
+        const marker = markerFor(outcome);
+        const updateRecord = stateMgr.updateRecord.bind(stateMgr);
+        let failedWrites = 0;
+        const writeSpy = vi.spyOn(stateMgr, "updateRecord").mockImplementation((id, patch) => {
+          if (id === childId && patch[marker] && failedWrites < 2) {
+            // Fail only AFTER this outcome has reached the parent client.
+            expect(callsFor(outcome)).toHaveLength(1);
+            failedWrites++;
+            throw new Error("injected report marker write failure");
+          }
+          return updateRecord(id, patch);
+        });
+        await expect(finish(reportFor(outcome))).resolves.toBeUndefined();
+        expect(failedWrites).toBe(1);
+        expect(stateMgr.readState(childId)![marker] ?? null).toBeNull();
+        expect(engine.getRegistry().get(childId)![marker] ?? null).toBeNull();
+        expect(mockClient.notifyLifecycleEvent.mock.calls.filter(
+          ([event, child]) => event === "done" && child.agent_id === laterId,
+        )).toHaveLength(1);
+        expect(stateMgr.readState(laterId)!.report_done_notified_episode).toBe(later.report_episode_key);
+        expect(sweepDebugLogs.some((line) => line.includes("injected report marker write failure"))).toBe(true);
+        await engine.runSweep(); // Retry persistence without replaying the in-memory notification.
+        expect(failedWrites).toBe(2);
+        expect(callsFor(outcome)).toHaveLength(1);
+        expect(engine.getRegistry().get(childId)![marker] ?? null).toBeNull();
+        writeSpy.mockRestore();
+        const attemptedId = callsFor(outcome)[0]![1][outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"];
+        engine.dispose();
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        await engine.runSweep(); // Disk still has no ACK; restart retries with the same identity.
+        expect(callsFor(outcome)).toHaveLength(2);
+        expect(callsFor(outcome)[1]![1][outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"]).toBe(attemptedId);
+        expect(stateMgr.readState(childId)![marker]).toBe(stateMgr.readState(childId)!.report_episode_key);
+        expect(engine.getRegistry().get(childId)![marker]).toBe(stateMgr.readState(childId)![marker]);
+        await engine.runSweep();
+        expect(callsFor(outcome)).toHaveLength(2);
+      });
+
+      it.each(outcomes)("successful %s marker persistence stays quiet across sweeps and restart", async (outcome) => {
+        await setup();
+        await finish(reportFor(outcome));
+        const marker = markerFor(outcome);
+        const episode = stateMgr.readState(childId)!.report_episode_key;
+        expect(stateMgr.readState(childId)![marker]).toBe(episode);
+        expect(engine.getRegistry().get(childId)![marker]).toBe(episode);
+        await engine.runSweep();
+        engine.dispose();
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        await engine.runSweep();
+        expect(callsFor(outcome)).toHaveLength(1);
+      });
+
+      it.each(outcomes)("%s episode drift during delivery cannot mark the replacement episode", async (outcome) => {
+        await setup();
+        const episode = stateMgr.readState(childId)!.report_episode_key;
+        mockClient.notifyLifecycleEvent.mockImplementationOnce(async () => {
+          stateMgr.reopenForResume(childId);
+          stateMgr.transition(childId, "booting");
+          const replacement = stateMgr.transition(childId, "done");
+          engine.getRegistry().set(childId, replacement);
+        });
+        const writeSpy = vi.spyOn(stateMgr, "updateRecord");
+        await finish(reportFor(outcome));
+        const marker = markerFor(outcome);
+        expect(callsFor(outcome)).toHaveLength(1);
+        expect(stateMgr.readState(childId)!.report_episode_key).not.toBe(episode);
+        expect(stateMgr.readState(childId)![marker] ?? null).toBeNull();
+        expect(engine.getRegistry().get(childId)![marker] ?? null).toBeNull();
+        expect(writeSpy.mock.calls.some(([id, patch]) => id === childId && patch[marker])).toBe(false);
+        writeSpy.mockRestore();
+      });
+    });
+
     describe("F1 iteration ratchets", () => {
       const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
       const input = (id: string) => engine.acceptPendingVerify({

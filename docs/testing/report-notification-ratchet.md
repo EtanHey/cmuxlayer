@@ -70,3 +70,17 @@ Also retain the initial+A+B-before-sweep control, F1-P2/Q3, and R2 B1–B3/N1.
 The separately dispositioned DONE/BLOCKED semantics remain unchanged. Unbounded
 receipt-history growth is an explicit follow-up risk; this correction does not
 redesign indexing, storage or retention. All rows remain synthetic, not live proof.
+
+## Post-delivery marker-write correction
+
+Replay `report marker-write ratchets` in `tests/agent-reconcile.test.ts` on
+immutable `e949469f0388f2d0b74193b27d9d17d91114b116` before the additive repair.
+Injected DONE/BLOCKED marker persistence failures after parent delivery must
+leave the marker unset and allow the later child to reconcile. Successful writes,
+episode drift, same-engine retries and restart identity preservation are controls.
+The `relays fast spawned` captured MCP fixture additionally verifies that a
+persisted submitted relay receipt suppresses another transport send after restart.
+Removing the marker-write catch must fail both engine rows and the relay row.
+Seal exact hashes, RED/GREEN, mutation and strict-admission receipts under the
+lane's `marker-write/` packet. This is fixture evidence, not general exactly-once
+delivery or real-client/native proof. Retain every prior completion-loss control.

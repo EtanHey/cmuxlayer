@@ -4530,7 +4530,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.report_path).toBe(override);
   });
 
-  it("relays fast spawned BLOCKED then DONE once each and preserves public change watches", async () => {
+  it.each(["normal", "marker-write failure"])("relays fast spawned BLOCKED then DONE once each and preserves public change watches (%s)", async (mode) => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -4605,8 +4605,38 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     engine = engineForTests(server);
     useCapturedTransport();
     childSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
+    const updateRecord = engine.stateMgr.updateRecord.bind(engine.stateMgr);
+    const markerWrite = vi.spyOn(engine.stateMgr, "updateRecord").mockImplementation((id, patch) => {
+      if (mode === "marker-write failure" && id === child.agent_id && patch.report_done_notified_episode) {
+        expect(pings()).toHaveLength(1); // The real in-process relay has already submitted.
+        throw new Error("injected relay report marker write failure");
+      }
+      return updateRecord(id, patch);
+    });
     await engine.runSweep();
     expect(pings()).toHaveLength(1);
+    if (mode === "marker-write failure") {
+      const pending = engine.stateMgr.readState(child.agent_id)!;
+      expect(pending.report_done_notified_episode ?? null).toBeNull();
+      expect(engine.getRegistry().get(child.agent_id)!.report_done_notified_episode ?? null).toBeNull();
+      const receipt = engine.getDeliveryReceipt(pending.report_done_delivery_id!)!;
+      expect(receipt.agent_id).toBe(parent.agent_id);
+      expect(receipt.text).toBe(`[report] ${child.agent_id} done — read ${reportPath}`);
+      expect(receipt.delivery_state).toBe("submitted");
+      await engine.runSweep();
+      expect(pings()).toHaveLength(1); // In-memory delivery dedupe; persistence still fails.
+      markerWrite.mockRestore();
+      await server.close();
+      server = createServer(options);
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      engine = engineForTests(server);
+      useCapturedTransport();
+      await engine.runSweep(); // Persistent relay receipt suppresses the retransmission.
+      expect(pings()).toHaveLength(1);
+      expect(engine.stateMgr.readState(child.agent_id)!.report_done_delivery_id).toBe(pending.report_done_delivery_id);
+    } else {
+      markerWrite.mockRestore();
+    }
     const episode = engine.stateMgr.readState(child.agent_id)!;
     expect(episode.report_done_notified_episode).toBe(episode.report_episode_key);
     await engine.sweepWatchesBestEffort();
