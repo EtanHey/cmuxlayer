@@ -14,6 +14,7 @@ import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, n
 import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-preferences.mjs";
 import { installFixtureLaunchers, verifyFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
 import { verifyFixtureShell } from "./xmac/fixture-shell.mjs";
+import { admitAppStart } from "./xmac/app-admission.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -123,13 +124,18 @@ export async function stopOwnedProcess({ pid, saved, target = "nightly", app = f
   throw new Error(`owned process did not exit: ${pid}`);
 }
 
-export async function prepareM1AppMutation(opts, receipt, operation = "launch", sessions = observeCmuxSessions, stop = stopOwnedProcess) {
+export function preflightM1Session(opts, receipt, sessions = observeCmuxSessions) {
   if (hostname() !== opts.gateHost || hostname() === "MacBook-Pro.local" || !opts.gateHost) throw new Error("requires designated dedicated M1 host");
   receipt.host ??= hostname();
   if (receipt.host !== hostname()) throw new Error("M1 run receipt host mismatch");
   const approval = parseHumanSessionApproval(opts.humanSessionQuitApproved);
   if (approval) receipt.human_session_quit_approval = { ...approval, value: opts.humanSessionQuitApproved, applied: false };
   const classified = assertM1CmuxMutation(sessions(), receipt, "quit");
+  return classified;
+}
+
+export async function prepareM1AppMutation(opts, receipt, operation = "launch", sessions = observeCmuxSessions, stop = stopOwnedProcess) {
+  const classified = preflightM1Session(opts, receipt, sessions);
   for (const row of classified.filter(row => row.provenance === "human_session" && row.quit_approved)) {
     await stop({ pid: row.pid, saved: row.identity, app: true, target: "m1-gate", runReceipt: receipt }, receipt.processes);
     receipt.human_session_quit_approval.consumed = true;
@@ -185,7 +191,7 @@ export async function startSoakRuntime(opts, outputRoot) {
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
   const receipt = { status: "FAIL", launch_token: token, target: opts.target, release_gate: opts.target === "m1-gate" && !opts.dryRun && !opts.buildRoot, dry_run: opts.dryRun, host: hostname(), processes: [], violations: [], production_start: production(),
     production_pid_11224_start: identity(11224) };
-  let lockOwned = false, nightly, daemon, scenarioRepo;
+  let lockOwned = false, nightly, daemon, scenarioRepo, build, scratch, env, shellOpts, launchEnv;
   mkdirSync(outputRoot, { recursive: true });
   let closing;
   const close = () => closing ??= (async () => {
@@ -210,74 +216,94 @@ export async function startSoakRuntime(opts, outputRoot) {
   const onSignal = () => { receipt.error = "soak interrupted"; void (opts.onSignal?.(close) ?? close()).finally(() => process.exit(1)); };
   process.once("SIGTERM", onSignal); process.once("SIGINT", onSignal);
   try {
-    if (opts.target === "m1-gate") {
-      await prepareM1AppMutation(opts, receipt);
-      receipt.production_baseline = production();
-    }
-    // Refuse stale production routing too, before starting an app or a model.
-    receipt.app_target = assertAppTarget(app, { target: opts.target, gateHost: opts.gateHost, hostname: hostname(), socketPath });
-    if (opts.target === "m1-gate") {
-      const digest = createHash("sha256").update(readFileSync(opts.dmg)).digest("hex");
-      if (digest !== PINNED_DMG_SHA256) throw new Error("pinned 0.64.22 DMG digest mismatch");
-      receipt.dmg_sha256 = digest;
-      const version = JSON.parse(readFileSync("/opt/homebrew/opt/cmuxlayer/libexec/package.json", "utf8")).version;
-      if (!opts.dryRun && !opts.buildRoot && version !== "0.4.101") throw new Error("M1 gate requires installed cmuxlayer 0.4.101");
-      receipt.installed_cmuxlayer_version = version;
-    }
-    const build = opts.buildRoot ? privateBuild(opts.buildRoot, opts.sha) : null;
-    if (!build && realpathSync(opts.entry) !== realpathSync(INSTALLED_ENTRY)) throw new Error("soak requires the installed cmuxlayer entry");
-    receipt.build = build ?? { entry: realpathSync(INSTALLED_ENTRY), kind: "installed" };
-    acquireNightlyLock(lockPath, token); lockOwned = true;
-    if (opts.target === "m1-gate") assertM1CmuxMutation(observeCmuxSessions(), receipt, "launch");
-    if (processes().some(line => line.includes(`${app}/Contents/MacOS/`)) || await socketIsLive(socketPath)) {
-      throw new Error("app or socket busy; operator cleanup required");
-    }
-    if (existsSync(socketPath)) {
-      const stat = lstatSync(socketPath);
-      if (!stat.isSocket() || stat.uid !== process.getuid()) throw new Error("unsafe stale socket path");
-      receipt.stale_socket_at_launch = true; // Only the app handles its stale socket; never unlink it here.
-    }
-    const scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
-    for (const dir of ["home", "zdot", "state", "inbox"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
-    const env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
-    if (opts.privateHome && opts.target !== "m1-gate" && !opts.fixtureMode) {
-      const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
-      if (home === ownHome || statSync(home).uid !== process.getuid() || (statSync(home).mode & 0o077)) throw new Error("private auth HOME must be separate, owned, and mode 0700");
-      for (const dir of [".codex", ".claude", ".config", ".local", ".cache"]) {
-        const path = join(home, dir);
-        if (existsSync(path) && !realpathSync(path).startsWith(home + sep)) throw new Error("private auth HOME cannot redirect to production state");
-      }
-      for (const key of ["HOME", "CMUXLAYER_HARNESS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
-        env[key] = env[key].replace(join(scratch, "home"), home);
-      }
-    }
-    writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
-    scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
-    if (opts.fixtureMode) {
-      receipt.fixtures = installFixtureLaunchers(env, opts, scratch, scenarioRepo.path);
-      verifyFixtureLaunchers(receipt.fixtures, env);
-      receipt.expected_launchers = receipt.fixtures.launchers;
-    } else if (opts.launcherMode && opts.target === "m1-gate") {
-      if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
-      const { resolveLauncherNameFromRegistry } = await import("../dist/launcher-registry.js");
-      receipt.expected_launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli,
-        resolveLauncherNameFromRegistry(opts.repo ?? "cmuxlayer", cli, { sourcePath: env.CMUXLAYER_LAUNCHER_REGISTRY_PATH })]));
-      if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
-    } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
-    receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
-    const shellOpts = { ...opts, launchCwd: scenarioRepo.path, launchers: receipt.expected_launchers, launchReceipt: join(scratch, "launches.jsonl") };
-    // App-created shells use only the private startup, including the final cwd wrapper.
-    writeShellStartup(env, shellOpts);
-    receipt.launch_receipt_path = shellOpts.launchReceipt;
-    receipt.argv_preflight = opts.fixtureMode ? null : checkLauncherArgv(env, shellOpts, receipt.expected_launchers);
-    receipt.preflight_launches = launchRecords(shellOpts.launchReceipt);
-    writeFileSync(shellOpts.launchReceipt, "", { mode: 0o600 });
-    const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
-    if (opts.fixtureMode) receipt.close_preferences = verifyClosePreferences();
-    if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
-    if (receipt.fixtures?.row) receipt.shell_preflight = verifyFixtureShell(receipt.fixtures, env);
-    run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
-      "--args", "--soak-launch-token", token, ...(opts.fixtureMode ? closePreferenceArgs() : [])]);
+    await admitAppStart({
+      lock: () => { acquireNightlyLock(lockPath, token); lockOwned = true; },
+      session: () => { if (opts.target === "m1-gate") preflightM1Session(opts, receipt); },
+      config: async () => {
+        if (await socketIsLive(socketPath)) throw new Error("app or socket busy; operator cleanup required");
+        if (existsSync(socketPath)) {
+          const stat = lstatSync(socketPath);
+          if (!stat.isSocket() || stat.uid !== process.getuid()) throw new Error("unsafe stale socket path");
+          receipt.stale_socket_at_launch = true; // Only the app handles its stale socket; never unlink it here.
+        }
+        scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
+        for (const dir of ["home", "zdot", "state", "inbox"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
+        env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
+        if (opts.privateHome && opts.target !== "m1-gate" && !opts.fixtureMode) {
+          const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
+          if (home === ownHome || statSync(home).uid !== process.getuid() || (statSync(home).mode & 0o077)) throw new Error("private auth HOME must be separate, owned, and mode 0700");
+          for (const dir of [".codex", ".claude", ".config", ".local", ".cache"]) {
+            const path = join(home, dir);
+            if (existsSync(path) && !realpathSync(path).startsWith(home + sep)) throw new Error("private auth HOME cannot redirect to production state");
+          }
+          for (const key of ["HOME", "CMUXLAYER_HARNESS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
+            env[key] = env[key].replace(join(scratch, "home"), home);
+          }
+        }
+        writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
+        scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
+      },
+      app: () => {
+        // Refuse stale production routing too, before starting an app or a model.
+        receipt.app_target = assertAppTarget(app, { target: opts.target, gateHost: opts.gateHost, hostname: hostname(), socketPath });
+      },
+      dmg: () => {
+        if (opts.target === "m1-gate") {
+          const digest = createHash("sha256").update(readFileSync(opts.dmg)).digest("hex");
+          if (digest !== PINNED_DMG_SHA256) throw new Error("pinned 0.64.22 DMG digest mismatch");
+          receipt.dmg_sha256 = digest;
+          const version = JSON.parse(readFileSync("/opt/homebrew/opt/cmuxlayer/libexec/package.json", "utf8")).version;
+          if (!opts.dryRun && !opts.buildRoot && version !== "0.4.101") throw new Error("M1 gate requires installed cmuxlayer 0.4.101");
+          receipt.installed_cmuxlayer_version = version;
+        }
+        build = opts.buildRoot ? privateBuild(opts.buildRoot, opts.sha) : null;
+        if (!build && realpathSync(opts.entry) !== realpathSync(INSTALLED_ENTRY)) throw new Error("soak requires the installed cmuxlayer entry");
+        receipt.build = build ?? { entry: realpathSync(INSTALLED_ENTRY), kind: "installed" };
+      },
+      fixture: async () => {
+        if (opts.fixtureMode) {
+          receipt.fixtures = installFixtureLaunchers(env, opts, scratch, scenarioRepo.path);
+          verifyFixtureLaunchers(receipt.fixtures, env);
+          receipt.expected_launchers = receipt.fixtures.launchers;
+        } else if (opts.launcherMode && opts.target === "m1-gate") {
+          if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
+          const { resolveLauncherNameFromRegistry } = await import("../dist/launcher-registry.js");
+          receipt.expected_launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli,
+            resolveLauncherNameFromRegistry(opts.repo ?? "cmuxlayer", cli, { sourcePath: env.CMUXLAYER_LAUNCHER_REGISTRY_PATH })]));
+          if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
+        } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
+      },
+      environment: () => {
+        receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
+        shellOpts = { ...opts, launchCwd: scenarioRepo.path, launchers: receipt.expected_launchers, launchReceipt: join(scratch, "launches.jsonl") };
+        // App-created shells use only the private startup, including the final cwd wrapper.
+        writeShellStartup(env, shellOpts);
+        receipt.launch_receipt_path = shellOpts.launchReceipt;
+        receipt.argv_preflight = opts.fixtureMode ? null : checkLauncherArgv(env, shellOpts, receipt.expected_launchers);
+        receipt.preflight_launches = launchRecords(shellOpts.launchReceipt);
+        writeFileSync(shellOpts.launchReceipt, "", { mode: 0o600 });
+        if (opts.fixtureMode) verifyFixtureLaunchers(receipt.fixtures, env);
+      },
+      shell: () => { if (receipt.fixtures?.row) receipt.shell_preflight = verifyFixtureShell(receipt.fixtures, env); },
+      preferences: () => {
+        launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
+        if (opts.fixtureMode) receipt.close_preferences = verifyClosePreferences();
+        if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
+      },
+      refreshAndQuit: async () => {
+        if (opts.target === "m1-gate") {
+          await prepareM1AppMutation(opts, receipt);
+          receipt.production_baseline = production();
+        }
+        if (processes().some(line => line.includes(`${app}/Contents/MacOS/`)) || await socketIsLive(socketPath)) {
+          throw new Error("app or socket busy; operator cleanup required");
+        }
+      },
+      launch: () => {
+        run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+          "--args", "--soak-launch-token", token, ...(opts.fixtureMode ? closePreferenceArgs() : [])]);
+      },
+    });
     const deadline = Date.now() + 10_000;
     while (!nightly && Date.now() < deadline) {
       for (const line of processes().filter(line => line.includes(`${app}/Contents/MacOS/cmux`))) {

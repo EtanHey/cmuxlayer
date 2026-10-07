@@ -165,22 +165,23 @@ it("replay stops on a human-session refusal without trying a fix or another scen
   expect(sample).toHaveBeenCalledTimes(1);
 });
 
-it("approved startup quits that exact synthetic PID, then preserves the DMG guard and post-quit baseline", async () => {
+it.each(["dmg", "version"])("approved startup refuses a bad %s without quitting the synthetic human PID", async fault => {
   const dir = mkdtempSync(join(tmpdir(), "approved-cmux-test-")); dirs.push(dir);
   const app = join(dir, "cmux.app"), dmg = join(dir, "fake.dmg"), output = join(dir, "receipts");
   mkdirSync(join(app, "Contents/MacOS"), { recursive: true }); writeFileSync(join(app, "Contents/MacOS/cmux"), "synthetic"); writeFileSync(dmg, "wrong");
   let alive = true; vi.mocked(hostname).mockReturnValue("M1.local");
   const kill = vi.spyOn(process, "kill").mockImplementation(() => { alive = false; return true; });
   vi.mocked(execFileSync).mockImplementation(((cmd: string, args: string[]) => {
-    if (cmd.endsWith("PlistBuddy")) return args[1].includes("ShortVersion") ? "0.64.22" : "com.cmuxterm.app";
+    if (cmd.endsWith("PlistBuddy")) return args[1].includes("ShortVersion") ? (fault === "version" ? "0.65.0" : "0.64.22") : "com.cmuxterm.app";
     if (cmd === "ps" && args.includes("-axo")) return alive ? (args.includes("pid=,comm=") ? `20248 ${app}/Contents/MacOS/cmux` : `20248 1 ${start} ${executable}`) : "";
     if (cmd === "ps" && args.includes("11224")) return "unrelated";
     if (cmd === "ps" && alive) return args.includes("comm=") ? executable : `20248 ${start}     ${executable}`;
     throw new Error("synthetic process absent");
   }) as typeof execFileSync);
-  await expect(startSoakRuntime({ app, dmg, target: "m1-gate", gateHost: "M1.local", humanSessionQuitApproved: approval }, output)).rejects.toThrow(/digest mismatch/);
-  expect(kill).toHaveBeenCalledExactlyOnceWith(20248, "SIGTERM");
+  await expect(startSoakRuntime({ app, dmg, target: "m1-gate", gateHost: "M1.local", humanSessionQuitApproved: approval }, output)).rejects.toThrow(fault === "version" ? /0.64.22/ : /digest mismatch/);
+  expect(kill).not.toHaveBeenCalled();
   const receipt = JSON.parse(readFileSync(join(output, readdirSync(output)[0]), "utf8"));
-  expect(receipt).toMatchObject({ human_session_quit_approval: { value: approval, applied: true, consumed: true }, production_baseline: [], production_end: [], violations: [] });
+  expect(receipt.human_session_quit_approval?.applied).not.toBe(true);
+  expect(receipt.production_end).toEqual(receipt.production_start); expect(receipt.processes).toEqual([]);
   expect(receipt.production_start).toHaveLength(1); expect(spawn).not.toHaveBeenCalled();
 });
