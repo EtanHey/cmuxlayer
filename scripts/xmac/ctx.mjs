@@ -24,6 +24,7 @@ function cheapSpawn(opts) {
 /** @returns {import('./ctx.d.mjs').ScenarioContext} */
 export function createContext({ driver, evidenceDir, parseScreen, onScreen = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
   const owned = new Set();
+  let launchPrecondition;
   let sequence = 0;
   const artifact = async (name, data) => {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name) || name.includes("..")) throw new Error("unsafe artifact name");
@@ -41,7 +42,9 @@ export function createContext({ driver, evidenceDir, parseScreen, onScreen = () 
       }
       args = cheapSpawn(args);
     }
-    const result = await driver.call(name, args);
+    let result;
+    try { result = await driver.call(name, args); }
+    catch (error) { if (error.precondition?.kind === "launch_overlay") launchPrecondition = error.precondition; throw error; }
     // Error envelopes can still identify a partially-created seat: own it before decoding.
     const partial = result?.structuredContent;
     if (name === "spawn_agent" && partial?.agent_id) owned.add(partial.agent_id);
@@ -50,6 +53,7 @@ export function createContext({ driver, evidenceDir, parseScreen, onScreen = () 
     return value;
   };
   const ctx = {
+    get launchPrecondition() { return launchPrecondition; },
     target: driver.target, call, artifact,
     spawnLeadSeat: async (opts = {}) => {
       const args = { ...cheapSpawn({ ...opts, cli: "claude", model: "haiku" }), role: "implementor", authority: "lead", placement: "left", verbose: true };

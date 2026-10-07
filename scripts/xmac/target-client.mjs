@@ -10,6 +10,7 @@ import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 import { checkLauncherRoots } from "./launcher-preflight.mjs";
 import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
+import { guardLaunch } from "./launch-overlay.mjs";
 
 
 export function boundedSpawn(args, defaults) {
@@ -47,7 +48,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
   runtime.receipt.launcher_preflight = launcherPreflight;
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
   const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
-  const agents = new Map(), leads = new Set(), owned = new Set();
+  const agents = new Map(), leads = new Set(), owned = new Set(), ownedSurfaces = new Set();
   const defaults = { repo: opts.repo ?? "soak", cwd: runtime.cwd, workspace: runtime.workspace };
   let finished;
   const call = async (name, args = {}) => {
@@ -60,14 +61,30 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       const child = await inspect(args.agent_id);
       if (child?.surface_id) { owned.add(args.agent_id); agents.set(args.agent_id, { surface: child.surface_uuid ?? child.surface_id }); }
     }
-    const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 90_000 });
-    const value = result.structuredContent ?? (() => { try { return unwrap(result); } catch { return {}; } })();
-    if (name === "spawn_agent" && value.agent_id) {
-      owned.add(value.agent_id);
-      agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
-      if (opts.target === "m1-gate") requireLauncherMode(JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8")), runtime.receipt.expected_launchers[args.cli]);
+    const before = name === "spawn_agent" ? new Set((await surfaceList()).flatMap(row => [row.id, row.ref]).filter(Boolean)) : null;
+    const invoke = async () => {
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 90_000 });
+      const value = result.structuredContent ?? (() => { try { return unwrap(result); } catch { return {}; } })();
+      if (name === "spawn_agent" && value.agent_id) {
+        owned.add(value.agent_id);
+        agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
+        if (opts.target === "m1-gate") requireLauncherMode(JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8")), runtime.receipt.expected_launchers[args.cli]);
+      }
+      return result;
+    };
+    try {
+      return before ? await guardLaunch(invoke, { frames: async () => {
+        const fresh = (await surfaceList()).filter(row => ![row.id, row.ref].some(ref => ref && before.has(ref)));
+        return Promise.all(fresh.map(async row => {
+          const surface = row.id ?? row.ref;
+          for (const ref of [row.id, row.ref].filter(Boolean)) ownedSurfaces.add(ref);
+          return { surface, text: (await socket("surface.read_text", { surface_id: surface })).text ?? "" };
+        }));
+      } }) : await invoke();
+    } catch (error) {
+      if (error.precondition?.kind === "launch_overlay") runtime.receipt.launch_overlay = error.precondition;
+      throw error;
     }
-    return result;
   };
   const inspect = async id => unwrap(await call("list_agents", { agent_ids: [id], detail: "full" })).agents?.[0];
   const surfaceList = async () => {
@@ -138,7 +155,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       const errors = [];
       try { await sweepChildren(); } catch (error) { errors.push(String(error)); }
       try {
-        runtime.receipt.surface_cleanup = await closeSurfaces(new Set([...agents.values()].map(agent => agent.surface).filter(Boolean)));
+        runtime.receipt.surface_cleanup = await closeSurfaces(new Set([...ownedSurfaces, ...[...agents.values()].map(agent => agent.surface).filter(Boolean)]));
       } catch (error) { errors.push(String(error)); }
       try { await client.close(); } catch (error) { errors.push(String(error)); }
       const lifecycle = await runtime.close();

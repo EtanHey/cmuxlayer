@@ -8,6 +8,7 @@ import { privateBuild, launcherEnvironment } from "./xmac/target.mjs";
 import { randomUUID, createHash } from "node:crypto";
 import { assertAppTarget, assertProcessTarget, processBundleId } from "./soak-app-guard.mjs";
 import { checkLauncherArgv } from "./xmac/argv-preflight.mjs";
+import { createScenarioRepo } from "./xmac/scenario-repo.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -144,7 +145,7 @@ export async function startSoakRuntime(opts, outputRoot) {
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
   const receipt = { status: "FAIL", launch_token: token, target: opts.target, release_gate: opts.target === "m1-gate" && !opts.dryRun && !opts.buildRoot, dry_run: opts.dryRun, host: hostname(), processes: [], violations: [], production_start: production(),
     production_pid_11224_start: identity(11224) };
-  let lockOwned = false, nightly, daemon;
+  let lockOwned = false, nightly, daemon, scenarioRepo;
   mkdirSync(outputRoot, { recursive: true });
   let closing;
   const close = () => closing ??= (async () => {
@@ -152,6 +153,8 @@ export async function startSoakRuntime(opts, outputRoot) {
       try { if (owned) await stopOwnedProcess(owned, receipt.processes); }
       catch (error) { receipt.violations.push(String(error)); }
     }
+    try { if (scenarioRepo) { scenarioRepo.close(); receipt.scenario_repo.cleaned = !!scenarioRepo.run_dir; } }
+    catch (error) { receipt.violations.push(String(error)); }
     try { receipt.production_end = production(); } catch (error) { receipt.violations.push(String(error)); }
     receipt.production_pid_11224_end = identity(11224);
     if (JSON.stringify(receipt.production_start) !== JSON.stringify(receipt.production_end) ||
@@ -190,7 +193,7 @@ export async function startSoakRuntime(opts, outputRoot) {
       receipt.stale_socket_at_launch = true; // Only the app handles its stale socket; never unlink it here.
     }
     const scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
-    for (const dir of ["home", "zdot", "state", "inbox", "repo"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
+    for (const dir of ["home", "zdot", "state", "inbox"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
     const env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
     if (opts.privateHome && opts.target !== "m1-gate") {
       const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
@@ -214,6 +217,8 @@ export async function startSoakRuntime(opts, outputRoot) {
     // App-created shells must use the same private environment, with no personal zsh startup files.
     writeFileSync(join(scratch, "zdot/.zshenv"), shellStartup(env, opts), { mode: 0o600 });
     receipt.argv_preflight = checkLauncherArgv(env, opts, receipt.expected_launchers);
+    scenarioRepo = createScenarioRepo(env, opts, scratch, token);
+    receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
     if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
@@ -238,7 +243,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     if (!ready) throw new Error("NIGHTLY socket not ready");
     // Confirm socket ownership; a responding socket by itself cannot establish app identity.
     if (!run("lsof", ["-n", "-U", "-a", "-p", String(nightly.pid)]).includes(socketPath)) throw new Error("NIGHTLY socket PID ownership unverified");
-    const workspace = await rpc(socketPath, "workspace.create", { cwd: join(scratch, "repo"), initial_command: opts.dryRun ? `/bin/sh -c 'printf SOAK_DRY_${token}; exec /bin/cat'` : "/bin/zsh -l" });
+    const workspace = await rpc(socketPath, "workspace.create", { cwd: scenarioRepo.path, initial_command: opts.dryRun ? `/bin/sh -c 'printf SOAK_DRY_${token}; exec /bin/cat'` : "/bin/zsh -l" });
     if (!workspace.workspace_id) throw new Error("NIGHTLY workspace identity missing");
     receipt.workspace = workspace;
     if (opts.dryRun) {
@@ -253,7 +258,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     }
     // Start the installed daemon explicitly, so teardown never guesses which PID it owns.
     const child = spawn("/opt/homebrew/opt/node/bin/node", [build?.daemon ?? "/opt/homebrew/opt/cmuxlayer/libexec/dist/daemon.js"],
-      { env, cwd: join(scratch, "repo"), stdio: ["ignore", "ignore", "inherit"] });
+      { env, cwd: scenarioRepo.path, stdio: ["ignore", "ignore", "inherit"] });
     let spawnError;
     child.on("error", error => { spawnError = error; });
     // Capture ownership before the first async readiness wait (including interrupts).
@@ -262,7 +267,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     while (!existsSync(env.CMUXLAYER_DAEMON_SOCKET) && !spawnError && child.exitCode === null && Date.now() < daemonDeadline) await pause(100);
     if (spawnError || !daemon?.saved || !existsSync(env.CMUXLAYER_DAEMON_SOCKET)) throw new Error("private installed daemon not ready");
     receipt.daemon = daemon;
-    return { env, workspace: workspace.workspace_id, cwd: join(scratch, "repo"), receiptPath, receipt, close };
+    return { env, workspace: workspace.workspace_id, cwd: scenarioRepo.path, receiptPath, receipt, close };
   } catch (error) {
     if (error.precondition) receipt.precondition = error.precondition;
     receipt.error = String(error); await close();

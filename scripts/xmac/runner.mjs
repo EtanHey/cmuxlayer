@@ -31,21 +31,27 @@ export async function runScenarios({ scenarios, driver, evidenceDir, parseScreen
       const supported = scenario.targets.includes(`${driver.target.host}:${driver.target.cmux}`);
       try {
         result = supported ? await scenario.run(ctx) : { status: "PRECONDITION_ABSENT", evidence: {}, notes: ["unsupported target"] };
+        if (ctx.launchPrecondition) result = { ...result, status: "PRECONDITION_ABSENT", precondition: ctx.launchPrecondition };
         if (!["PASS", "FAIL", "PRECONDITION_ABSENT"].includes(result.status)) throw new Error("invalid scenario status");
         if (result.status !== "PRECONDITION_ABSENT" && (!result.evidence?.receipt || !frames(result.evidence.screenAfter).some(frame => frame.text.trim() && observed.includes(frame.text)))) {
           throw new Error("independent receipt/screen evidence missing");
         }
-      } catch (caught) { error = String(caught); }
+      } catch (caught) {
+        if (ctx.launchPrecondition) result = { status: "PRECONDITION_ABSENT", evidence: {}, notes: [String(caught)], precondition: ctx.launchPrecondition };
+        else error = String(caught);
+      }
       finally { try { await ctx.dispose(); } catch (caught) { error = `${error ?? ""} cleanup: ${caught}`; } }
       const row = { id: scenario.id, host: driver.target.host, cmux: driver.target.cmux, cmux_version: driver.target.cmuxVersion,
         cmuxlayer_sha: driver.target.cmuxlayerSha, phase, bug: scenario.bug, fix: scenario.fix?.sha ? scenario.fix : { ...scenario.fix, sha: null, status: "pending" },
-        status: error ? "FAIL" : result.status, failure_kind: error || infrastructure(result?.notes) ? "infrastructure" : result?.status === "FAIL" ? "behavior" : null,
+        status: error ? "FAIL" : result.status, precondition: result?.precondition ?? null,
+        failure_kind: error || result?.precondition || infrastructure(result?.notes) ? "infrastructure" : result?.status === "FAIL" ? "behavior" : null,
         notes: [...(result?.notes ?? []), ...(error ? [error] : [])], evidence_path: join(dir, "runner-result.json"),
         authoritative_coverage: scenario.id === "send_under_codex_overlays" ? { row: "send_under_codex_banner", bug: "7f26603f", fix: "64260ba3", hooks_fixture: "codex-hooks-review.txt" } : null };
       const code = scenario.bug?.failure_code ?? knownDefects[scenario.id];
       row.expected_defect = row.failure_kind === "behavior" && !!code && row.notes.some(note => String(note).includes(code));
       payloads.set(row.id, { result, error });
       rows.push(row);
+      if (row.precondition?.kind === "launch_overlay") break;
     }
   } catch (error) { lifecycleErrors.push(String(error)); }
   finally {

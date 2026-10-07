@@ -34,6 +34,20 @@ export function options(argv) {
   if (!opts.dryRun && !opts.prepareDriver && !opts.driverRoot) throw new Error("reviewed --driver-root or --prepare-driver required");
   return opts;
 }
+export async function replaySamples(scenarios, sample, resolveSha = value => value) {
+  const ratchets = [];
+  for (const scenario of scenarios) {
+    const bug = await sample([scenario], resolveSha(scenario.bug.sha), "bug", true);
+    if (bug.rows.some(row => row.precondition?.kind === "launch_overlay")) {
+      ratchets.push({ name: scenario.id, baseline: bug.rows[0], candidate: "not run: launch_overlay", delta: "stopped at precondition", ceiling: 0, status: "UNPROVEN" });
+      break;
+    }
+    const fixed = scenario.fix?.sha ? await sample([scenario], resolveSha(scenario.fix.sha), "fix", true) : null;
+    ratchets.push({ name: scenario.id, baseline: bug.rows[0], candidate: fixed?.rows[0] ?? "fix: pending", delta: fixed ? "bug → fix" : "pending", ceiling: 0, status: ratchetProof(bug.rows[0], fixed?.rows[0]) });
+    if (fixed?.rows.some(row => row.precondition?.kind === "launch_overlay")) break;
+  }
+  return ratchets;
+}
 export async function main(argv) {
   const opts = options(argv), harnessSha = shaFor("HEAD");
   const scenarios = await Promise.all(opts.scenarios.map(async path => (await import(pathToFileURL(resolve(path)).href)).default));
@@ -67,11 +81,7 @@ export async function main(argv) {
     samples.push(result); return result;
   };
   if (opts.replay) {
-    for (const scenario of scenarios) {
-      const bug = await sample([scenario], shaFor(scenario.bug.sha), "bug", true);
-      const fixed = scenario.fix?.sha ? await sample([scenario], shaFor(scenario.fix.sha), "fix", true) : null;
-      ratchets.push({ name: scenario.id, baseline: bug.rows[0], candidate: fixed?.rows[0] ?? "fix: pending", delta: fixed ? "bug → fix" : "pending", ceiling: 0, status: ratchetProof(bug.rows[0], fixed?.rows[0]) });
-    }
+    ratchets.push(...await replaySamples(scenarios, sample, shaFor));
   } else await sample(scenarios, shaFor(opts.sha ?? "HEAD"), "installed", false);
   const result = { ...plan, status: samples.every(sample => sample.status === "PASS") ? "PASS" : "FAIL", early_warning_only: opts.cmux === "nightly", rows: samples.flatMap(sample => sample.rows), ratchets, samples };
   if (opts.replay) result.status = ratchets.length && ratchets.every(row => row.status === "PROVEN") ? "PASS" : "FAIL";
