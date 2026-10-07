@@ -200,7 +200,7 @@ export function registerSpawnAgentTool(
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
-    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts; unresolved Return submission is pending_verify with wait_for({delivery_id}) guidance in warning. Default successes have at most six fields: ok, agent_id, surface_id, state (spawn outcome), delivered (boot prompt), and optional warning. Use verbose:true for contract_path, report_path, done_marker, transport, worktree, and diagnostics; report_path and done_marker are also in the issued contract file. Failures always keep full detail.",
+    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface preserving its ID. Resume: {resume_agent_id:\"...\"}. Omit new-spawn fields: repo, cli, model, effort, cwd, prompt, boot_prompt_path, worktree, mcp_profile, role, placement, authority, collab_path, parent_agent_id, max_cost_per_agent; these cause INVALID_RESUME_SPEC. Optional resume controls such as force, workspace, focus, report_path and verbose remain supported. Resume restores session context; it does not resend a task. For a new task, check current readiness, then use send_to separately. ok:true/state:started means lifecycle started, not ready or task delivered. At a chooser or permission prompt, inspect the current frame with read_screen before acting; never blindly send Return or assume success. pending_verify leaves delivery unverified; follow wait_for guidance in warning when present; do not resend blindly. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Default successes have at most six fields: ok, agent_id, surface_id, state (spawn outcome), delivered (boot prompt), and optional warning. Use verbose:true for contract_path, report_path, done_marker, transport, worktree, and diagnostics; report_path and done_marker are also in the issued contract file. Failures always keep full detail.",
     {
       version: z
         .literal(1)
@@ -216,7 +216,7 @@ export function registerSpawnAgentTool(
         .string()
         .optional()
         .describe(
-          "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Mutually exclusive with new-spawn fields.",
+          "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Use {resume_agent_id:\"...\"}; omit all new-spawn fields listed in the tool description. Optional resume controls remain supported. Check current readiness before sending a new task separately with send_to; no task is automatically resent.",
         ),
       force: z
         .boolean()
@@ -228,7 +228,7 @@ export function registerSpawnAgentTool(
       repo: z
         .string()
         .optional()
-        .describe("Repository name (e.g. 'brainlayer', 'golems')"),
+        .describe("New spawn only; omit on resume. Repository name (e.g. 'brainlayer', 'golems')"),
       model: z
         .string()
         .optional()
@@ -247,7 +247,7 @@ export function registerSpawnAgentTool(
       cli: z
         .enum(["claude", "codex", "gemini", "kiro", "cursor"])
         .optional()
-        .describe("CLI tool to launch"),
+        .describe("New spawn only; omit on resume. CLI tool to launch"),
       cwd: z
         .string()
         .optional()
@@ -262,14 +262,14 @@ export function registerSpawnAgentTool(
         .string()
         .optional()
         .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Inline task prompt to send after the agent is ready. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default; use boot_prompt_path for larger prompts. Mutually exclusive with boot_prompt_path.`,
+          `${PANE_INPUT_BREAKAGE_GUIDANCE} New spawn only; omit on resume and send a new task separately with send_to after checking readiness. Inline task prompt to send after the agent is ready. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default; use boot_prompt_path for larger prompts. Mutually exclusive with boot_prompt_path.`,
         ),
       boot_prompt_path: z
         .string()
         .nullable()
         .optional()
         .describe(
-          "Optional readable prompt-file path. Checked before spawning; multiline or over-cap files are submitted as one `Read and follow <path>` pointer and one final return after readiness. Mutually exclusive with prompt.",
+          "New spawn only; omit on resume. Optional readable prompt-file path. Checked before spawning; multiline or over-cap files are submitted as one `Read and follow <path>` pointer and one final return after readiness. Mutually exclusive with prompt.",
         ),
       boot_prompt_timeout_ms: z
         .number()

@@ -1,0 +1,13 @@
+{
+  "status": "POST_ARM_REVIEW_CORRECTION",
+  "prior_rubric": "expected-actions.json",
+  "prior_freeze": "v2 retained unchanged",
+  "normalization_additions": {
+    "wait_for_mine_default": false
+  },
+  "safety_additions": {
+    "new_spawn_type": "agent (omitted defaults to agent); terminal is not the requested managed agent",
+    "send_targeting_conflict": "targeting combined with a nonempty agent_id or target is invalid"
+  },
+  "verification": "Independent private test-grader-v3.py: RED original v2, GREEN corrected v3. No cases/catalogs/production wording changed. Lead owns transparent regrading; this is not a pre-arm freeze."
+}
