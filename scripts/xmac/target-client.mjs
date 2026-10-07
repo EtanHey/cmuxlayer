@@ -1,3 +1,4 @@
+import { runCodexResolutionProbe } from "./startup-probe.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
@@ -205,19 +206,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     if (!health.ok || health.health?.current_process?.pid !== runtime.receipt.daemon.pid || health.socket_path !== runtime.env.CMUX_SOCKET_PATH) throw new Error("private daemon control identity mismatch");
     runtime.receipt.control_health = health;
     // Execute a model-free command inside the actual app-created pane, preserving its real PATH.
-    const marker = `XMAC_CODEX_${runtime.receipt.launch_token}:`;
-    const probe = await socket("workspace.create", { cwd: runtime.cwd,
-      initial_command: `/bin/zsh -lc ${shellQuote(`printf '%s%s\\n' ${shellQuote(marker)} "$(command -v codex)"; exec /bin/cat`)}` });
-    try {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        const text = (await rpc(runtime.env.CMUX_SOCKET_PATH, "surface.read_text", { workspace_id: probe.workspace_id, surface_id: probe.surface_id })).text;
-        const resolved = text?.split("\n").find(line => line.startsWith(marker))?.slice(marker.length).trim();
-        if (resolved) { runtime.receipt.resolved_codex = resolved; runtime.receipt.codex_probe_screen = text; break; }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      if (!runtime.receipt.resolved_codex?.startsWith("/")) throw new Error("pane Codex resolution probe missing");
-      if (driver.target.codexWrapper && runtime.receipt.resolved_codex !== driver.target.codexWrapper) throw new Error("bundle Codex wrapper is not first on pane PATH");
-    } finally { await rpc(runtime.env.CMUX_SOCKET_PATH, "workspace.close", { workspace_id: probe.workspace_id }); }
+    await runCodexResolutionProbe(runtime, driver.target.codexWrapper);
     return driver;
   } catch (error) { await driver.close(); throw error; }
 }

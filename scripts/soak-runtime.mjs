@@ -11,6 +11,7 @@ import { checkLauncherArgv } from "./xmac/argv-preflight.mjs";
 import { createScenarioRepo } from "./xmac/scenario-repo.mjs";
 import { launcherCwdStartup, launchRecords } from "./xmac/launch-cwd.mjs";
 import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, normalizeProcessIdentity } from "./cmux-session-guard.mjs";
+import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-preferences.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -257,9 +258,10 @@ export async function startSoakRuntime(opts, outputRoot) {
     receipt.preflight_launches = launchRecords(shellOpts.launchReceipt);
     writeFileSync(shellOpts.launchReceipt, "", { mode: 0o600 });
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
+    if (opts.fixtureMode) receipt.close_preferences = verifyClosePreferences();
     if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
-      "--args", "--soak-launch-token", token]);
+      "--args", "--soak-launch-token", token, ...(opts.fixtureMode ? closePreferenceArgs() : [])]);
     const deadline = Date.now() + 10_000;
     while (!nightly && Date.now() < deadline) {
       for (const line of processes().filter(line => line.includes(`${app}/Contents/MacOS/cmux`))) {
