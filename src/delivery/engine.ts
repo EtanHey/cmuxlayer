@@ -768,6 +768,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   // A boot token also belongs to one boot instance once spawn binds it; a
   // newer boot of the same agent cannot inherit the draft or its settle.
   const bootTokenInstanceCurrent = (token: TypedDraftOwner): boolean => {
+    if (token.bootAgentId && Date.now() - token.at >= 5 * 60_000) return false;
     if (!token.bootAgentId || !token.bootInstanceId) return true;
     return stateMgr.readState(token.bootAgentId)?.boot_instance_id === token.bootInstanceId;
   };
@@ -1998,11 +1999,28 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const beforeKeyMutation = (ownedBoot || (targetCli === "claude" && ownedSubmitText))
         ? async () => {
             await opts.beforeMutation?.();
+            if (ownedBoot && stateMgr.readState(ownedBoot.agentId)?.boot_instance_id !== ownedBoot.instanceId) {
+              throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
+            }
+            if (ownedBoot && targetCli !== "claude") {
+              const latest = await readSafeInput();
+              const current = typedDraftOwners.get(ownerKey);
+              const region = latest ? extractComposerInputRegion(latest.text, undefined, targetCli, true) : null;
+              if (!latest || isPickerOrMenuScreen(latest.text, targetCli) ||
+                  latest.parsed.control_state === "permission_prompt" || !current || current.caller !== caller ||
+                  !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
+                  !bootTokenInstanceCurrent(current) || region === null ||
+                  (!composerRegionMatchesPayload(region, ownedSubmitText, targetCli, latest.text) &&
+                    !(region === "" && countVisibleOwnedQueuedInputs(latest.text, [ownedSubmitText]) > 0 &&
+                      countVisibleCodexQueuedInputs(latest.text) === countVisibleOwnedQueuedInputs(latest.text, [ownedSubmitText])))) {
+                throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline!.parsed);
+              }
+            }
             if (targetCli === "claude" && ownedSubmitText) {
               const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
               const current = typedDraftOwners.get(ownerKey);
               const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
-              if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
+              if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) || !bootTokenInstanceCurrent(current) ||
                   region === null || !composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) ||
                   screenTranscriptContainsText(latest.text, ownedSubmitText)) {
                 throw new DeliverySafetyGateError("draft_ownership_unverified", latest?.parsed ?? submitBaseline?.parsed ?? parseScreen(""));
@@ -2044,6 +2062,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         }));
       }
       if (verification.submit_verified === true) {
+        if (ownedBoot && owner) {
+          const engine = context.lifecycleSweepEngine;
+          for (const id of owner.deliveryIds ?? []) {
+            const bootReceipt = engine?.getDeliveryReceipt(id);
+            if (bootReceipt?.boot_instance_id === ownedBoot.instanceId &&
+                bootReceipt.agent_id === ownedBoot.agentId && bootReceipt.text === ownedSubmitText) {
+              engine?.resolveDelivery({ ...bootReceipt, delivery_state: "submitted", terminal: true,
+                press_enter: true, submit_dispatched: true, submit_verified: true,
+                rpc_methods: [...new Set([...(bootReceipt.rpc_methods ?? []), ...rpcMethods])] });
+            }
+          }
+        }
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
       }
