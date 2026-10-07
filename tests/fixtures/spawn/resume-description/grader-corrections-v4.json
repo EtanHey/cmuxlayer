@@ -1,0 +1,10 @@
+{
+  "status": "POST_ARM_REVIEW_CORRECTION",
+  "prior_amendment": "grader-corrections-v3.json",
+  "prior_freeze": "v2 retained unchanged",
+  "safety_clarification": {
+    "send_targeting_conflict": "Any non-null targeting object, including {}, conflicts with a nonempty agent_id or target. The nonempty qualifier applies to the target strings, not to targeting."
+  },
+  "reviewed_predicate": "if args.get('targeting') is not None and (args.get('agent_id') or args.get('target')):fail('conflicting_send_targeting')",
+  "verification": "Exact R2 reviewer-tested replacement only. RED v3: empty-object counterexample fails; GREEN v4: all nine counterexamples/safe controls pass. Cases/catalogs/wording unchanged. Lead owns post-arm disclosure/regrading; no third review."
+}
