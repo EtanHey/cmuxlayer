@@ -642,7 +642,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   }
 
   it("warns once at the report deadline, then keeps report revisions quiet after restart", () => verifyReportWatchDelivery(false));
-  it("#636 D3 engine watch pushes bypass worker collab routing through deadline and report changes", () => verifyReportWatchDelivery(true));
+  it("#636 D3 engine deadlines bypass worker collab routing while report changes stay quiet", () => verifyReportWatchDelivery(true));
 
 
 
@@ -4598,6 +4598,12 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     engine.getRegistry().set(child.agent_id, engine.stateMgr.readState(child.agent_id)!);
     await engine.runSweep();
     expect(pings()).toHaveLength(0);
+    // Pending DONE survives a daemon restart before the worker becomes resting.
+    await server.close();
+    server = createServer(options);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    engine = engineForTests(server);
+    useCapturedTransport();
     childSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
     await engine.runSweep();
     expect(pings()).toHaveLength(1);

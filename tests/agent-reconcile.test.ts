@@ -3211,6 +3211,80 @@ describe("Agent reconcile", () => {
     };
 
 
+    describe("R2 review repros", () => {
+      const thinking = "Claude Code\n✻ Thinking… (esc to interrupt)";
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+      const markers = ["DONE_REPORT_EPISODE", "BLOCKED_REPORT_EPISODE_CHILD"];
+      const outcomeCalls = (marker: string) => mockClient.notifyLifecycleEvent.mock.calls.filter(
+        ([event]) => event === (marker.startsWith("DONE_") ? "done" : "blocked"),
+      );
+
+      it.each(markers)("R2-A fast verified follow-up %s finished between sweeps", async (marker) => {
+        await setup();
+        await finish();
+        const before = outcomeCalls(marker).length;
+        const episode = stateMgr.readState(childId)!.report_episode_key;
+        engine.markAgentWorking(childId, { verifiedDelivery: true });
+        const deliveryAt = stateMgr.readState(childId)!.reopen_pending_at;
+        await tick();
+        writeFileSync(reportPath, `Follow-up\n${marker}\n`);
+        screen(readyScreen);
+        await engine.runSweep();
+        await engine.runSweep();
+        expect(outcomeCalls(marker)).toHaveLength(before + 1);
+        expect(stateMgr.readState(childId)!.report_episode_key).not.toBe(episode);
+        expect(stateMgr.readState(childId)!.report_episode_started_at).toBe(deliveryAt);
+      });
+
+      it("R2-B report written before observed reopened work stays eligible", async () => {
+        await setup();
+        await finish();
+        engine.markAgentWorking(childId, { verifiedDelivery: true });
+        const deliveryAt = stateMgr.readState(childId)!.reopen_pending_at;
+        await tick();
+        writeFileSync(reportPath, "Follow-up\nDONE_REPORT_EPISODE\n");
+        await tick();
+        screen(thinking);
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(1);
+        expect(stateMgr.readState(childId)?.state).toBe("working");
+        persist({ state: "done" });
+        screen(readyScreen);
+        await engine.runSweep();
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2);
+        expect(stateMgr.readState(childId)!.report_episode_started_at).toBe(deliveryAt);
+      });
+
+      it.each(markers)("R2-C1 pending busy %s survives restart", async (marker) => {
+        await setup();
+        writeFileSync(reportPath, `Complete\n${marker}\n`);
+        screen(thinking);
+        await engine.runSweep();
+        expect(outcomeCalls(marker)).toHaveLength(0);
+        persist({ state: "done" });
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        screen(readyScreen);
+        await engine.runSweep();
+        await engine.runSweep();
+        expect(outcomeCalls(marker)).toHaveLength(1);
+      });
+
+      it.each(markers)("R2-C2 failed %s delivery retries across restart", async (marker) => {
+        await setup();
+        mockClient.notifyLifecycleEvent.mockRejectedValueOnce(new Error("parent unavailable"));
+        await finish(`Complete\n${marker}\n`);
+        expect(outcomeCalls(marker)).toHaveLength(1);
+        const notified = marker.startsWith("DONE_") ? "report_done_notified_episode" : "report_blocked_notified_episode";
+        expect(stateMgr.readState(childId)![notified] ?? null).toBeNull();
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        screen(readyScreen);
+        await engine.runSweep();
+        await engine.runSweep();
+        expect(outcomeCalls(marker)).toHaveLength(2);
+      });
+    });
+
     it.each([
       "Partial work\n", "DONE_REPORT_EPISODE\nMore work\n", "Complete\nDONE_WRONG\n",
     ])("rejects partial, body, and wrong final markers: %s", async (text) => {
@@ -3238,11 +3312,11 @@ describe("Agent reconcile", () => {
       expect(doneCalls()).toHaveLength(1);
       // Viewing or requesting a reopen without actual work must not re-arm.
       const initialEpisode = stateMgr.readState(childId)!.report_episode_key;
-      persist({ reopen_pending_at: new Date().toISOString() });
+      engine.markAgentWorking(childId, { verifiedDelivery: true });
       await engine.runSweep();
       expect(stateMgr.readState(childId)!.report_episode_key).toBe(initialEpisode);
       expect(doneCalls()).toHaveLength(1);
-      persist({ reopen_pending_at: new Date().toISOString() });
+      engine.markAgentWorking(childId, { verifiedDelivery: true });
       screen("Claude Code\n✻ Thinking… (esc to interrupt)");
       await engine.runSweep();
       expect(stateMgr.readState(childId)?.state).toBe("working");
@@ -3306,7 +3380,18 @@ describe("Agent reconcile", () => {
       expect(doneCalls()).toHaveLength(0);
     });
 
-    it.each(["DONE_REPORT_EPISODE", "BLOCKED_REPORT_EPISODE_CHILD"])("baselines an undelivered historical %s on restart", async (marker) => {
+    it("does not replay untracked legacy artifacts on startup", async () => {
+      await setup();
+      writeFileSync(reportPath, "Historical\nDONE_REPORT_EPISODE\n");
+      persist({ state: "done", report_episode_key: null, report_done_delivery_id: null,
+        report_blocked_delivery_id: null });
+      engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+      screen(readyScreen);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(0);
+    });
+
+    it.each(["DONE_REPORT_EPISODE", "BLOCKED_REPORT_EPISODE_CHILD"])("delivers an undelivered tracked %s once after restart", async (marker) => {
       await setup();
       writeFileSync(reportPath, `Complete\n${marker}\n`);
       persist({ state: "done" });
@@ -3315,11 +3400,11 @@ describe("Agent reconcile", () => {
       await engine.runSweep();
       writeFileSync(reportPath, `Historical edit\n${marker}\n`);
       await engine.runSweep();
-      expect(doneCalls()).toHaveLength(0);
-      expect(mockClient.notifyLifecycleEvent.mock.calls.filter(([event]) => event === "blocked")).toHaveLength(0);
+      expect(doneCalls()).toHaveLength(marker.startsWith("DONE_") ? 1 : 0);
+      expect(mockClient.notifyLifecycleEvent.mock.calls.filter(([event]) => event === "blocked")).toHaveLength(marker.startsWith("BLOCKED_") ? 1 : 0);
     });
 
-    it("does not apply a startup baseline to a newly booted episode", async () => {
+    it("delivers a newly booted episode after restart", async () => {
       await setup();
       writeFileSync(reportPath, "Historical\nDONE_REPORT_EPISODE\n");
       persist({ state: "done" });

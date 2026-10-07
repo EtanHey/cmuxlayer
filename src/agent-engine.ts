@@ -9,7 +9,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
 import {
   resolveClosureState,
   coordinationBlockedMarker,
@@ -460,7 +459,7 @@ export class AgentEngine {
   private haltProcessSnapshot?: () => string | Promise<string>;
   private sweepBackgroundProcessSnapshot: Promise<string | null> | null = null;
   private backgroundChildCpuTimes = new Map<string, Map<number, string>>();
-  private startupReportOutcomes = new Map<string, { episodeKey: string; outcome: "done" | "blocked" }>();
+  private reportOutcomeNotifications: boolean;
   constructor(
     stateMgr: StateManager,
     registry: AgentRegistry,
@@ -468,11 +467,7 @@ export class AgentEngine {
     opts?: AgentEngineOptions,
   ) {
     this.stateMgr = stateMgr;
-    // Baseline historical terminal artifacts; never replay them on discovery.
-    for (const agent of stateMgr.listStates()) {
-      const outcome = this.reportReadyOutcome(agent);
-      if (outcome) this.startupReportOutcomes.set(agent.agent_id, { episodeKey: agent.report_episode_key!, outcome });
-    }
+    this.reportOutcomeNotifications = opts?.reportOutcomeNotifications !== false;
     this.lifecycleLockAcquireTimeoutMs = Math.max(
       0,
       opts?.lifecycleLockAcquireTimeoutMs ??
@@ -3322,27 +3317,21 @@ export class AgentEngine {
     return harvestability.closeable;
   }
 
-  private observeReportEpisode(agent: AgentRecord, screenText?: string): AgentRecord {
-    if (!agent.parent_agent_id || !agent.report_path || !agent.done_marker ||
-        screenText === undefined) return agent;
-    const parsed = parseScreen(screenText);
-    if (!isLiveActive(resolveLiveAgentState(agent, parsed)) ||
-        parsed.status === "draft_pending" || agent.user_killed || agent.deletion_intent ||
-        parsed.control_state === "permission_prompt" || parsed.paused) return agent;
-    this.startupReportOutcomes.delete(agent.agent_id);
-    const key = `${agent.boot_instance_id ?? agent.created_at}:${agent.reopen_count ?? 0}`;
-    if (agent.report_episode_key === key || !agent.reopened_at || !agent.reopen_count) return agent;
-    const startedAt = Math.max(...[agent.created_at, agent.report_episode_started_at,
-      agent.reopened_at, agent.boot_resumed_at].map((at) => Date.parse(at ?? "")).filter(Number.isFinite));
-    if (!Number.isFinite(startedAt)) return agent;
-    const updated = this.stateMgr.updateRecord(agent.agent_id, {
-      report_episode_key: key,
-      report_episode_started_at: new Date(startedAt).toISOString(),
-      report_done_delivery_id: randomUUID(),
-      report_blocked_delivery_id: randomUUID(),
-    });
-    this.registry.set(agent.agent_id, updated);
-    return updated;
+  /** A fresh terminal artifact proves follow-up work even between sweeps. */
+  private hasFreshReopenReport(agent: AgentRecord): boolean {
+    if (!agent.reopen_pending_at || !agent.report_path) return false;
+    const deliveredAt = Date.parse(agent.reopen_pending_at);
+    const mtime = safeMtimeMs(agent.report_path);
+    if (!Number.isFinite(deliveredAt) || mtime < deliveredAt ||
+        (agent.reopen_report_mtime_ms != null && mtime <= agent.reopen_report_mtime_ms)) return false;
+    return this.reportTerminalOutcome(agent) !== null;
+  }
+
+  private reportTerminalOutcome(agent: AgentRecord): "done" | "blocked" | null {
+    if (!agent.parent_agent_id || !agent.report_path || !agent.done_marker) return null;
+    const finalLine = this.extractFinalNonEmptyLine(this.readTextFile(agent.report_path) ?? "");
+    if (finalLine === agent.done_marker) return "done";
+    return finalLine === coordinationBlockedMarker(agent.agent_id) ? "blocked" : null;
   }
 
   /** Report readiness is independent of KEPT_OPEN and PR-loop closure policy. */
@@ -3351,10 +3340,10 @@ export class AgentEngine {
         !agent.report_episode_key || agent.report_episode_key !==
           `${agent.boot_instance_id ?? agent.created_at}:${agent.reopen_count ?? 0}`) return null;
     const startedAt = Date.parse(agent.report_episode_started_at ?? "");
-    if (!Number.isFinite(startedAt) || safeMtimeMs(agent.report_path) < startedAt) return null;
-    const finalLine = this.extractFinalNonEmptyLine(this.readTextFile(agent.report_path) ?? "");
-    if (finalLine === agent.done_marker) return "done";
-    return finalLine === coordinationBlockedMarker(agent.agent_id) ? "blocked" : null;
+    const mtime = safeMtimeMs(agent.report_path);
+    if (!Number.isFinite(startedAt) || mtime < startedAt ||
+        (agent.reopen_report_mtime_ms != null && mtime <= agent.reopen_report_mtime_ms)) return null;
+    return this.reportTerminalOutcome(agent);
   }
 
   private async maybeNotifyReportOutcome(
@@ -3363,15 +3352,7 @@ export class AgentEngine {
     screenText?: string,
   ): Promise<void> {
     const episodeKey = agent.report_episode_key;
-    if (!episodeKey || !this.assertSweepInputCurrent(ctx)) return;
-    const baseline = this.startupReportOutcomes.get(agent.agent_id);
-    if (baseline && baseline.episodeKey === episodeKey) {
-      agent = this.stateMgr.updateRecord(agent.agent_id, {
-        [baseline.outcome === "done" ? "report_done_notified_episode" : "report_blocked_notified_episode"]: agent.report_episode_key,
-      });
-      this.registry.set(agent.agent_id, agent);
-    }
-    this.startupReportOutcomes.delete(agent.agent_id);
+    if (!this.reportOutcomeNotifications || !episodeKey || !this.assertSweepInputCurrent(ctx)) return;
     const outcome = this.reportReadyOutcome(agent);
     const notifiedField = outcome === "done" ? "report_done_notified_episode" : "report_blocked_notified_episode";
     if (!outcome || agent[notifiedField] === agent.report_episode_key || screenText === undefined ||
@@ -3600,7 +3581,7 @@ export class AgentEngine {
       maybeMarkCliExited: (...args) => engine.maybeMarkCliExited(...args),
       maybeMarkTaskDone: (...args) => engine.maybeMarkTaskDone(...args),
       maybeNotifyLeadMonitorDeath: (...args) => engine.maybeNotifyLeadMonitorDeath(...args),
-      observeReportEpisode: (...args) => engine.observeReportEpisode(...args),
+      hasFreshReopenReport: (...args) => engine.hasFreshReopenReport(...args),
       maybeNotifyReportOutcome: (...args) => engine.maybeNotifyReportOutcome(...args),
       notifyLifecycleEventForSweep: (...args) => engine.notifyLifecycleEventForSweep(...args),
       publishSweepStatus: (...args) => engine.publishSweepStatus(...args),
@@ -4983,6 +4964,7 @@ export class AgentEngine {
     ) {
       const armed = this.stateMgr.updateRecord(agentId, {
         reopen_pending_at: new Date().toISOString(),
+        reopen_report_mtime_ms: current.report_path ? safeMtimeMs(current.report_path) : null,
       });
       this.registry.set(agentId, armed);
       return armed;

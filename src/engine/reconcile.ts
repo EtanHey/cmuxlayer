@@ -52,7 +52,7 @@ export interface ReconcileHost {
   maybeMarkCliExited: AgentEngine["maybeMarkCliExited"];
   maybeMarkTaskDone: AgentEngine["maybeMarkTaskDone"];
   maybeNotifyLeadMonitorDeath: AgentEngine["maybeNotifyLeadMonitorDeath"];
-  observeReportEpisode: AgentEngine["observeReportEpisode"];
+  hasFreshReopenReport: AgentEngine["hasFreshReopenReport"];
   maybeNotifyReportOutcome: AgentEngine["maybeNotifyReportOutcome"];
   notifyLifecycleEventForSweep: AgentEngine["notifyLifecycleEventForSweep"];
   publishSweepStatus: AgentEngine["publishSweepStatus"];
@@ -363,15 +363,15 @@ export async function reconcileAgents(
       this.clearAgentLifecycleMemory(initialAgentId);
       continue;
     }
-    if (agent.state === "done" && agent.user_killed !== true &&
+    if (agent.state === "done" && agent.user_killed !== true && !agent.deletion_intent &&
         agent.reopen_pending_at && sweepScreenText !== undefined &&
-        isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText)))) {
+        (isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText))) ||
+          this.hasFreshReopenReport(agent))) {
       if (!this.assertSweepInputCurrent(sweepCtx)) return;
       agent = this.stateMgr.reopenAfterVerifiedDelivery(agent.agent_id);
       this.registry.set(agent.agent_id, agent);
     }
     if (!this.assertSweepInputCurrent(sweepCtx)) return;
-    agent = this.observeReportEpisode(agent, sweepScreenText);
     let haltScreenText = taskDoneResult.screenText;
     if (haltScreenText === undefined) {
       try {

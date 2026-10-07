@@ -377,6 +377,8 @@ export type CodexModelListRunner = (
 ) => Promise<{ stdout: string; stderr?: string }>;
 
 export interface AgentEngineOptions {
+  /** Disable on observer-only runtimes that have no parent report relay. */
+  reportOutcomeNotifications?: boolean;
   /** Debug-only sweep phase timings. Defaults to stderr-safe console.debug. */
   sweepDebugLog?: (message: string) => void;
   spawnPreflight?: (

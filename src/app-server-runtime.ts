@@ -393,6 +393,8 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         notifyLifecycleEvent: async () => {},
       },
       {
+        // The MCP daemon owns report delivery; this runtime has no relay.
+        reportOutcomeNotifications: false,
         launchCommandSender: async ({ surface, workspace, command }) => {
           const agentId = this.findLaunchingAgentId(surface, workspace);
           if (!agentId) {
