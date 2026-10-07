@@ -1336,6 +1336,7 @@ describe("CmuxLayerDaemon", () => {
       const response = await rawToolCall(path, {
         name: "spawn_agent",
         arguments: {
+          verbose: true,
           repo: "brainlayer",
           model: "gpt-5.5",
           cli: "codex", effort: "medium",
@@ -1419,6 +1420,7 @@ describe("CmuxLayerDaemon", () => {
         rawToolCall(path, {
           name: "spawn_agent",
           arguments: {
+            verbose: true,
             repo: "brainlayer",
             model: "gpt-5.5",
             cli: "codex", effort: "medium",
@@ -1434,6 +1436,7 @@ describe("CmuxLayerDaemon", () => {
         rawToolCall(path, {
           name: "spawn_agent",
           arguments: {
+            verbose: true,
             repo: "voicelayer",
             model: "gpt-5.5",
             cli: "codex", effort: "medium",

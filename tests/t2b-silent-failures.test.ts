@@ -612,7 +612,7 @@ describe("#485 — close_surface(scope:agent) must close the surface or say it d
       ).toBe(true);
 
       const resumedResult = (await getTool(server, "spawn_agent").handler(
-        { resume_agent_id: sessionId, workspace: "workspace:1" },
+        { verbose: true, resume_agent_id: sessionId, workspace: "workspace:1" },
         {},
       )) as ToolCallResult;
       const resumed = payload(resumedResult);
