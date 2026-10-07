@@ -72,7 +72,8 @@ it.each([true, false])("M1 refuses before open/spawn when an unowned stable proc
   vi.mocked(hostname).mockReturnValue("M1.local");
   vi.mocked(execFileSync).mockImplementation(((cmd: string, args: string[]) => {
     if (cmd.endsWith("PlistBuddy")) return args[1].includes("ShortVersion") ? "0.64.22" : "com.cmuxterm.app";
-    if (cmd === "ps") return args.includes("-axo") ? (existing ? `77 ${binary}` : "") : "77 synthetic-start";
+    if (cmd === "ps") return args.includes("-axo") ? (existing ? (args.includes("pid=,ppid=,lstart=,comm=") ?
+      `77 1 Wed Oct  7 14:02:52 2026 ${binary}` : `77 ${binary}`) : "") : "77 synthetic-start";
     throw new Error(`unexpected executable: ${cmd}`);
   }) as typeof execFileSync);
   await expect(startSoakRuntime({ app, target: "m1-gate", gateHost: "M1.local", dmg }, join(dir, "receipts")))

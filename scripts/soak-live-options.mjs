@@ -1,3 +1,4 @@
+import { humanSessionApprovalArgument } from "./cmux-session-guard.mjs";
 function assertRange(value, minimum, maximum, message) {
   if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(message);
 }
@@ -14,12 +15,14 @@ export function options(argv) {
     "--codex-effort": "codexEffort", "--pool": "pool", "--fresh-every": "freshEvery", "--cases": "cases",
     "--queue-deadline-ms": "queueDeadlineMs", "--long-turn-minutes": "longTurnMinutes" };
   for (let i = 0; i < argv.length; i += 2) {
+    if (humanSessionApprovalArgument(argv[i], opts)) { i--; continue; }
     const field = fields[argv[i]];
     if (!field || !argv[i + 1]) throw new Error(`unknown or incomplete argument: ${argv[i]}`);
     opts[field] = ["cycles", "concurrency", "timeoutMs", "durationMinutes", "pool", "freshEvery", "queueDeadlineMs", "longTurnMinutes"].includes(field)
       ? Number(argv[i + 1]) : argv[i + 1];
   }
   if (!["nightly", "m1-gate"].includes(opts.target)) throw new Error("target must be nightly or m1-gate");
+  if (opts.humanSessionQuitApproved && opts.target !== "m1-gate") throw new Error("human-session approval is M1 only");
   if (![false, "true", "false"].includes(opts.dryRun)) throw new Error("dry-run must be true or false");
   opts.dryRun = opts.dryRun === "true";
   if (!/^[A-Za-z0-9_-]+$/u.test(opts.agentId)) throw new Error("--agent-id is required");

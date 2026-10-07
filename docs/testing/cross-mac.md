@@ -27,6 +27,21 @@ The daemon socket, state, inbox, app pointer HOME and MCP config are private.
 Shell startup restores the target CLI HOME; no auth files move between Macs.
 On NIGHTLY, `--private-home` must name a separate owned mode-0700 auth HOME.
 The target must have the required CLI binaries and reviewed launcher setup.
+Every existing M1 cmux app is a `human_session` unless its PID, exact start,
+executable identity and launch token match this run's app receipt. Startup,
+teardown and bundle replacement refuse with `PRECONDITION_ABSENT` kind
+`human_cmux_session`; the receipt retains PID/start and the observed parent
+(live PPID, not proof of the human or LaunchServices requester).
+After Etan explicitly approves quitting one current instance, the lead may add
+`"--human-session-quit-approved=<pid>:<exact ps lstart time>"` to this run or
+`scripts/soak-live.mjs`. Approval is M1-only, consumed after that exact quit and
+recorded in the receipt; it cannot approve other/reused PIDs. Replacing a bundle
+requires every cmux instance to have exited, even with quit approval. The guarded
+M1 installer is `node scripts/xmac/install-app.mjs --source /verified/cmux.app
+--backup /private/cmux-backup.app --receipt /private/install-receipt.json` (one
+shell command). It checks signing/notarization and guards install and rollback.
+Never use an ad-hoc TERM/ditto sequence. Approval for an old PID/start or for a
+prior run is not permission to quit the current human session.
 Before M1 app or seat launch, the driver reads the target's launcher registry
 and checks each required launcher's registered root is a directory. A missing
 root produces `PRECONDITION_ABSENT` with the exact target path and a failed run;

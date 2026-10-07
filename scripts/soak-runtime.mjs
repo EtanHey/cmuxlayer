@@ -10,13 +10,14 @@ import { assertAppTarget, assertProcessTarget, processBundleId } from "./soak-ap
 import { checkLauncherArgv } from "./xmac/argv-preflight.mjs";
 import { createScenarioRepo } from "./xmac/scenario-repo.mjs";
 import { launcherCwdStartup, launchRecords } from "./xmac/launch-cwd.mjs";
+import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, normalizeProcessIdentity } from "./cmux-session-guard.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
 export const PINNED_DMG_SHA256 = "fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25";
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000 }).trim();
+const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, env: { ...process.env, LC_ALL: "C" } }).trim();
 
 export function isolatedEnvironment(parent, scratch, app = "/Applications/cmux NIGHTLY.app", socketPath = NIGHTLY_SOCKET) {
   const clean = Object.fromEntries(Object.entries(parent).filter(([key, value]) => typeof value === "string" &&
@@ -80,7 +81,7 @@ export function releaseNightlyLock(path, token) {
   unlinkSync(path);
 }
 const identity = pid => {
-  try { return run("ps", ["-p", String(pid), "-o", "pid=,lstart=,comm="]); }
+  try { return normalizeProcessIdentity(run("ps", ["-p", String(pid), "-o", "pid=,lstart=,comm="])); }
   catch { return null; }
 };
 const processes = () => run("ps", ["-axo", "pid=,comm="]).split("\n");
@@ -89,19 +90,45 @@ const production = () => processes().filter(line => {
   return /\.app\/Contents\/MacOS\/[^/]+$/u.test(executable) && processBundleId(executable) === "com.cmuxterm.app";
 }).map(line => identity(Number(line.trim().split(/\s/u)[0]))).sort();
 
-export async function stopOwnedProcess({ pid, saved, target = "nightly", app = false }, receipt, observe = identity,
-  signal = (id, sig) => process.kill(id, sig), sleep = pause) {
+export async function stopOwnedProcess({ pid, saved, target = "nightly", app = false, runReceipt }, receipt, observe = identity,
+  signal = (id, sig) => process.kill(id, sig), sleep = pause, sessions = observeCmuxSessions) {
   if (!pid || !observe(pid)) return;
   for (const sig of ["SIGTERM", "SIGKILL"]) {
+    if (app && target === "m1-gate") {
+      const classified = assertM1CmuxMutation(sessions(), runReceipt);
+      if (runReceipt?.host !== hostname() || hostname() === "MacBook-Pro.local") throw new Error("cmux quit requires this run's dedicated M1 host receipt");
+      if (!classified.some(row => row.pid === pid && row.identity === saved)) throw new Error("cmux PID identity/start-time mismatch");
+    }
     assertProcessIdentity(saved, observe(pid));
     if (app) assertProcessTarget(run("ps", ["-p", String(pid), "-o", "comm="]), target);
     signal(pid, sig); receipt.push({ pid, signal: sig });
+    if (app && target === "m1-gate" && runReceipt?.human_session_quit_approval?.pid === pid) runReceipt.human_session_quit_approval.applied = true;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (!observe(pid)) { receipt.push({ pid, exited: true }); return; }
       await sleep(100);
     }
   }
   throw new Error(`owned process did not exit: ${pid}`);
+}
+
+export async function prepareM1AppMutation(opts, receipt, operation = "launch", sessions = observeCmuxSessions, stop = stopOwnedProcess) {
+  if (hostname() !== opts.gateHost || hostname() === "MacBook-Pro.local" || !opts.gateHost) throw new Error("requires designated dedicated M1 host");
+  receipt.host ??= hostname();
+  if (receipt.host !== hostname()) throw new Error("M1 run receipt host mismatch");
+  const approval = parseHumanSessionApproval(opts.humanSessionQuitApproved);
+  if (approval) receipt.human_session_quit_approval = { ...approval, value: opts.humanSessionQuitApproved, applied: false };
+  const classified = assertM1CmuxMutation(sessions(), receipt, "quit");
+  for (const row of classified.filter(row => row.provenance === "human_session" && row.quit_approved)) {
+    await stop({ pid: row.pid, saved: row.identity, app: true, target: "m1-gate", runReceipt: receipt }, receipt.processes);
+    receipt.human_session_quit_approval.consumed = true;
+  }
+  assertM1CmuxMutation(sessions(), receipt, operation);
+}
+
+export async function guardedM1AppReplacement(opts, receipt, replace, sessions = observeCmuxSessions, stop = stopOwnedProcess) {
+  await prepareM1AppMutation(opts, receipt, "replace", sessions, stop);
+  assertM1CmuxMutation(sessions(), receipt, "replace"); // Re-observe after the awaited quit, immediately before swap.
+  return replace();
 }
 
 export function rpc(socketPath, method, params = {}) {
@@ -151,8 +178,8 @@ export async function startSoakRuntime(opts, outputRoot) {
   let closing;
   const close = () => closing ??= (async () => {
     for (const owned of [daemon, nightly]) {
-      try { if (owned) await stopOwnedProcess(owned, receipt.processes); }
-      catch (error) { receipt.violations.push(String(error)); }
+      try { if (owned) await stopOwnedProcess({ ...owned, runReceipt: receipt }, receipt.processes); }
+      catch (error) { receipt.precondition ??= error.precondition; receipt.violations.push(String(error)); }
     }
     try { if (receipt.launch_receipt_path) receipt.launches = launchRecords(receipt.launch_receipt_path); }
     catch (error) { receipt.violations.push(`launch receipts: ${error}`); }
@@ -160,7 +187,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     catch (error) { receipt.violations.push(String(error)); }
     try { receipt.production_end = production(); } catch (error) { receipt.violations.push(String(error)); }
     receipt.production_pid_11224_end = identity(11224);
-    if (JSON.stringify(receipt.production_start) !== JSON.stringify(receipt.production_end) ||
+    if (JSON.stringify(receipt.production_baseline ?? receipt.production_start) !== JSON.stringify(receipt.production_end) ||
       receipt.production_pid_11224_start !== receipt.production_pid_11224_end) receipt.violations.push("production PID/start-time changed");
     try { if (lockOwned) releaseNightlyLock(lockPath, token); } catch (error) { receipt.violations.push(String(error)); }
     receipt.status = receipt.error || receipt.violations.length ? "FAIL" : "PASS";
@@ -171,10 +198,13 @@ export async function startSoakRuntime(opts, outputRoot) {
   const onSignal = () => { receipt.error = "soak interrupted"; void (opts.onSignal?.(close) ?? close()).finally(() => process.exit(1)); };
   process.once("SIGTERM", onSignal); process.once("SIGINT", onSignal);
   try {
+    if (opts.target === "m1-gate") {
+      await prepareM1AppMutation(opts, receipt);
+      receipt.production_baseline = production();
+    }
     // Refuse stale production routing too, before starting an app or a model.
     receipt.app_target = assertAppTarget(app, { target: opts.target, gateHost: opts.gateHost, hostname: hostname(), socketPath });
     if (opts.target === "m1-gate") {
-      if (receipt.production_start.length) throw new Error("M1 gate refused: an existing stable cmux process is running");
       const digest = createHash("sha256").update(readFileSync(opts.dmg)).digest("hex");
       if (digest !== PINNED_DMG_SHA256) throw new Error("pinned 0.64.22 DMG digest mismatch");
       receipt.dmg_sha256 = digest;
@@ -186,7 +216,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     if (!build && realpathSync(opts.entry) !== realpathSync(INSTALLED_ENTRY)) throw new Error("soak requires the installed cmuxlayer entry");
     receipt.build = build ?? { entry: realpathSync(INSTALLED_ENTRY), kind: "installed" };
     acquireNightlyLock(lockPath, token); lockOwned = true;
-    if (opts.target === "m1-gate" && production().length) throw new Error("M1 gate refused: existing stable cmux process");
+    if (opts.target === "m1-gate") assertM1CmuxMutation(observeCmuxSessions(), receipt, "launch");
     if (processes().some(line => line.includes(`${app}/Contents/MacOS/`)) || await socketIsLive(socketPath)) {
       throw new Error("app or socket busy; operator cleanup required");
     }
@@ -236,7 +266,7 @@ export async function startSoakRuntime(opts, outputRoot) {
         const pid = Number(line.trim().split(/\s/u)[0]);
         if (run("ps", ["-p", String(pid), "-o", "args="]).includes(token)) {
           assertProcessTarget(run("ps", ["-p", String(pid), "-o", "comm="]), opts.target);
-          nightly = { pid, saved: identity(pid), app: true, target: opts.target }; break;
+          nightly = { pid, saved: identity(pid), start_time: run("ps", ["-p", String(pid), "-o", "lstart="]), launch_token: token, app: true, target: opts.target }; break;
         }
       }
       if (!nightly) await pause(100);
