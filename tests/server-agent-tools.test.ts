@@ -141,7 +141,7 @@ function makeLifecycleExec(opts?: {
   let surfaceLive = true;
   let promptPending = false;
   let pendingText = "";
-  let activeCli: "claude" | "codex" | "cursor" | "gemini" = "claude";
+  let activeCli: "claude" | "codex" | "cursor" | "gemini" | "kiro" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
   let promptReturns = 0;
@@ -202,8 +202,8 @@ function makeLifecycleExec(opts?: {
             ? // #905: real Codex keeps the message as a `› ` user row above
               // an empty composer.
               `>_ OpenAI Codex\n${codexUserRows(pendingText)}\n\n${workingText()}\n\n› \n\n  gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
-            : activeCli === "cursor"
-              ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
+            : activeCli === "cursor" || activeCli === "kiro"
+              ? `${activeCli === "kiro" ? "Kiro" : "Cursor Agent"}\n${pendingText}\nWorking (1s • esc to interrupt)\n${activeCli}> `
               : `Claude Code\n${pendingText}\n✻ Working\n❯`;
         promptPending = false;
         pendingText = "";
@@ -221,6 +221,11 @@ function makeLifecycleExec(opts?: {
         activeCli = "claude";
         readyText = "Claude Code\nWhat can I help you with?\n>";
       }
+      const isKiroLaunch = /\bkiro-cli(?:\s|$)/.test(text);
+      if (isKiroLaunch) {
+        activeCli = "kiro";
+        readyText = "Kiro\nkiro> ";
+      }
       if (text.includes("Gemini")) {
         activeCli = "gemini";
         readyText = "Gemini CLI\n> ";
@@ -231,6 +236,7 @@ function makeLifecycleExec(opts?: {
       }
       if (
         launcherText.trim() &&
+        !isKiroLaunch &&
         !/^\s*(?:[A-Z_]+=\S+\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
           launcherText,
         )
@@ -244,8 +250,8 @@ function makeLifecycleExec(opts?: {
             codexUserRows(text),
             "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
           ].join("\n");
-        } else if (activeCli === "cursor") {
-          readyText = `Cursor Agent\ncursor> ${text}\nAuto`;
+        } else if (activeCli === "cursor" || activeCli === "kiro") {
+          readyText = `${activeCli === "kiro" ? "Kiro" : "Cursor Agent"}\n${activeCli}> ${text}\nAuto`;
         } else {
           readyText = `Claude Code\n❯ ${text}`;
         }
@@ -1008,6 +1014,112 @@ describe("lean spawn tool responses", () => {
     expect(screen.content).toContain(`› ${prompt}`);
     expect(screen.content.split("\n").filter((row: string) => row.startsWith("›")).at(-1)).toBe("› ");
   }, 10_000);
+
+  it.each([
+    ["claude", "lead"], ["codex", "lead"], ["cursor", "lead"],
+    ["gemini", "lead"], ["kiro", "lead"], ["claude", undefined],
+  ] as const)(
+    "PR-e: lead spawning %s authority=%s with omitted role creates a worker on the right",
+    async (cli, authority) => {
+      const exec = makeLifecycleExec();
+      const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+      const engine = engineForTests(server);
+      const lead = makeServerAgentRecord({
+        agent_id: "lead-default-role", surface_id: "surface:lead-caller",
+        workspace_id: "workspace:1", state: "working", role: "orchestrator",
+        authority, repo: "cmuxlayer", cli: "claude", task_done_detected_at: null,
+      });
+      engine.stateMgr.writeState(lead);
+      engine.getRegistry().set(lead.agent_id, lead);
+      const spawn = registeredTestTool(server, "spawn_agent");
+      const result = parseToolResult(await runWithCallerContext(
+        { workspaceId: lead.workspace_id!, surfaceId: lead.surface_id },
+        () => spawn.handler(spawn.inputSchema.parse({
+          repo: "cmuxlayer", cli, ...(cli === "codex" ? { effort: "medium" } : {}), force_new: true,
+          boot_prompt_timeout_ms: 2_000, verbose: true,
+        }), {}),
+      ));
+
+      expect(result, JSON.stringify(result)).toMatchObject({
+        ok: true, role: "implementor", authority: "worker", placement: "right",
+        parent_agent_id: lead.agent_id,
+      });
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        cli, role: "worker", function: "implementor", authority: "worker",
+        placement: "right", parent_agent_id: lead.agent_id, spawn_depth: 1,
+      });
+      expect(exec.mock.calls).toEqual(expect.arrayContaining([
+        expect.arrayContaining([expect.anything(), expect.arrayContaining([
+          "new-split", "right", "--workspace", "workspace:1",
+        ])]),
+      ]));
+    }, 10_000,
+  );
+
+  it.each([
+    ["claude", "reviewer", "reviewer", "worker", "right"],
+    ["codex", "gatherer", "gatherer", "worker", "right"],
+    ["claude", "orchestrator", "implementor", "lead", "left"],
+    ["codex", "orchestrator", "implementor", "lead", "left"],
+  ] as const)(
+    "PR-e: lead spawning %s preserves explicit %s role",
+    async (cli, role, job, authority, placement) => {
+      const exec = makeLifecycleExec();
+      const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+      const engine = engineForTests(server);
+      const lead = makeServerAgentRecord({
+        agent_id: "lead-explicit-role", surface_id: "surface:lead-caller",
+        workspace_id: "workspace:1", state: "working", role: "orchestrator",
+        authority: "lead", repo: "cmuxlayer", cli: "claude", task_done_detected_at: null,
+      });
+      engine.stateMgr.writeState(lead);
+      engine.getRegistry().set(lead.agent_id, lead);
+      const spawn = registeredTestTool(server, "spawn_agent");
+      const result = parseToolResult(await runWithCallerContext(
+        { workspaceId: lead.workspace_id!, surfaceId: lead.surface_id },
+        () => spawn.handler(spawn.inputSchema.parse({
+          repo: "cmuxlayer", cli, role, ...(cli === "codex" ? { effort: "medium" } : {}), force_new: true,
+          boot_prompt_timeout_ms: 2_000, verbose: true,
+        }), {}),
+      ));
+
+      expect(result, JSON.stringify(result)).toMatchObject({
+        ok: true, role: job, authority, placement,
+      });
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        role: authority === "lead" ? "orchestrator" : "worker",
+        function: job, authority, placement, parent_agent_id: lead.agent_id,
+      });
+      const creation = exec.mock.calls.find(([, args]) =>
+        args.includes("new-split") || args.includes("new-surface"));
+      expect(creation?.[1]).toEqual(expect.arrayContaining(
+        placement === "right" ? ["new-split", "right"] : ["new-surface", "--pane", "pane:1"],
+      ));
+    }, 10_000,
+  );
+
+  it("PR-e: an explicit lead parent does not grant an unknown caller the role default", async () => {
+    const exec = makeLifecycleExec();
+    const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+    const engine = engineForTests(server);
+    const lead = makeServerAgentRecord({
+      agent_id: "lead-parent-only", surface_id: "surface:lead-caller",
+      workspace_id: "workspace:1", repo: "cmuxlayer", state: "working",
+      role: "orchestrator", authority: "lead", task_done_detected_at: null,
+    });
+    engine.stateMgr.writeState(lead);
+    engine.getRegistry().set(lead.agent_id, lead);
+    const spawn = registeredTestTool(server, "spawn_agent");
+    const result = parseToolResult(await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: "surface:unknown-caller" },
+      () => spawn.handler(spawn.inputSchema.parse({
+        repo: "cmuxlayer", cli: "claude", parent_agent_id: lead.agent_id,
+      }), {}),
+    ));
+    expect(result).toMatchObject({ ok: false, error_code: "ROLE_REQUIRED" });
+    expect(exec.mock.calls.some(([, args]) =>
+      args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();

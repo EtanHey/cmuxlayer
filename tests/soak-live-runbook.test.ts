@@ -8,5 +8,7 @@ it("runs the soak script from a source checkout against the installed executable
   expect(command).not.toBeNull();
   expect(existsSync(fileURLToPath(new URL(`../${command![1]}`, import.meta.url)))).toBe(true);
   expect(runbook).toMatch(/source checkout/i);
-  expect(runbook).toMatch(/installed\s+`cmuxlayer` executable on `PATH`/i);
+  expect(runbook).toMatch(/installed `\/opt\/homebrew\/opt\/cmuxlayer\/bin\/cmuxlayer` executable/i);
+  expect(runbook).toMatch(/early-warning only/);
+  expect(runbook).toMatch(/pinned cmux 0\.64\.22 on the dedicated M1/);
 });
