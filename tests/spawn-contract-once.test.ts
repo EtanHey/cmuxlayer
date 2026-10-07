@@ -474,10 +474,6 @@ describe("Predispatch persistence ratchet", () => {
       await t.engine.verifyPendingDeliveries(); await t.engine.verifyPendingDeliveries();
       const receipts = t.engine.listDeliveryReceipts();
       const record = t.engine.getAgentState(boot.agent_id)!;
-      console.log("PREDISPATCH_WITNESS", JSON.stringify({ fault, afterWrite, failed, sent,
-        returns: t.pane.returns - beforeReturns, transport_invocations: t.pane.returnInvocations - beforeInvocations,
-        afterFailure, receipts, boot_pending: record.boot_prompt_pending,
-        boot_submit_dispatched: record.boot_submit_dispatched, prompt_delivered: record.prompt_delivered }));
       expect(failed).toBe(true); expect(sent!).toMatchObject({ ok: false });
       expect(JSON.stringify(sent!)).toContain(primary);
       expect(t.pane.returns).toBe(beforeReturns); expect(t.pane.submitted).toEqual([]);
