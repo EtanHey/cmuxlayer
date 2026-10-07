@@ -340,7 +340,7 @@ async function main() {
     const spawn = await call("spawn_agent", { repo: "soak", cwd: runtime.cwd, worktree: false, workspace: WORKSPACE,
       cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
         : opts.claudeModel ? { model: opts.claudeModel } : {}),
-      role: "worker", authority: "worker", placement: "right", force_new: true,
+      role: "worker", authority: "worker", placement: "right", force_new: true, verbose: true,
       mcp_profile: "sterile", prompt: `Reply exactly ${marker} then stop.` }, cycle);
     const seat = { agentId: spawn.agent_id, surface: spawn.surface_id ?? spawn.surface,
       surfaceUuid: spawn.surface_uuid ?? null, cli };

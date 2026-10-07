@@ -565,6 +565,7 @@ async function main() {
           boot_prompt_path: spec.goal,
           mcp_profile: config.mcpProfile,
           report_path: spec.coordinationReport,
+          verbose: true,
         },
         config.waitTimeoutMs,
       );
