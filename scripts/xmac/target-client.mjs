@@ -12,9 +12,11 @@ import { checkLauncherRoots } from "./launcher-preflight.mjs";
 import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
 import { guardLaunch } from "./launch-overlay.mjs";
 import { launchRecords } from "./launch-cwd.mjs";
+import { captureSpawnIdentity, resumeArgs } from "./resume-identity.mjs";
 
 
-export function boundedSpawn(args, defaults) {
+export function boundedSpawn(args, defaults, identities = new Map()) {
+  if (args.resume_agent_id) return { ...resumeArgs(args, identities), workspace: defaults.workspace };
   const cli = args.cli ?? "codex", model = cli === "codex" ? "gpt-6-luna" : "haiku";
   if (!["codex", "claude"].includes(cli) || args.model && args.model !== model || cli === "codex" && args.effort && args.effort !== "low") throw new Error("cheapest models only");
   return { ...args, repo: defaults.repo, cwd: defaults.cwd, workspace: defaults.workspace, worktree: false,
@@ -49,14 +51,13 @@ export async function startTarget(input, { launcherRegistry } = {}) {
   runtime.receipt.launcher_preflight = launcherPreflight;
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
   const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
-  const agents = new Map(), leads = new Set(), owned = new Set(), ownedSurfaces = new Set();
+  const identities = new Map(), agents = new Map(), leads = new Set(), owned = new Set(), ownedSurfaces = new Set();
   const defaults = { repo: opts.repo ?? "soak", cwd: runtime.cwd, workspace: runtime.workspace };
   let finished;
   const call = async (name, args = {}) => {
     if (name === "spawn_agent") {
-      if (args.resume_agent_id && !args.cli) args = { ...args, cli: (await inspect(args.resume_agent_id))?.cli };
-      args = boundedSpawn(args, defaults);
-      checkCliAuth(args.cli, runtime.env);
+      args = boundedSpawn(args, defaults, identities);
+      checkCliAuth(args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli, runtime.env);
       (runtime.receipt.normalized_spawn_args ??= []).push(args);
     }
     if (name === "close_surface" && args.agent_id && !agents.has(args.agent_id)) {
@@ -70,9 +71,10 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       if (name === "spawn_agent" && value.agent_id) {
         owned.add(value.agent_id);
         agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
+        if (!result.isError && !args.resume_agent_id) await captureSpawnIdentity(identities, value, inspect);
         if (opts.target === "m1-gate") {
           const state = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8"));
-          requireLauncherMode(state, runtime.receipt.expected_launchers[args.cli]);
+          requireLauncherMode(state, runtime.receipt.expected_launchers[args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli]);
           (runtime.receipt.engine_launch_cwds ??= []).push({ agent_id: value.agent_id, launch_cwd: state.launch_cwd, worktree_path: state.worktree_path });
         }
       }
