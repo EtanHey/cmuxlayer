@@ -1,0 +1,5 @@
+{
+  "run": 37627602346, "job": 112813306647, "artifact_sha256": "fde2a585ed0e6562ba1eebad0187b835df0c014b1f37b58e4494ee50525b1296",
+  "status": "FAIL", "mode": "capability", "bundle_id": "com.cmuxterm.app.nightly", "socket": "/tmp/cmux-nightly.sock", "row_status": "PASS",
+  "production_guard": {"read_ranges": [], "runner_local_state": [{"path": ".local/state/cmux/last-socket-path", "before": null, "after": null}], "violations": [".local/state/cmux/nightly-last-socket-path"], "status": "FAIL"}
+}

@@ -24,7 +24,48 @@ function fixture() {
   return { root, home, app, log, before, env };
 }
 
+function nightlyFixture() {
+  const f = fixture(), scratch = join(f.home, "work/_temp"), app = join(scratch, "cmux NIGHTLY.app");
+  mkdirSync(app, { recursive: true });
+  return { ...f, app, env: { ...f.env, HOME: f.home, RUNNER_TEMP: scratch } };
+}
+
 describe("hosted capability marker attribution", () => {
+  it("records the captured NIGHTLY boundary with raw marker values, keeping other writes attributed", () => {
+    const captured = JSON.parse(readFileSync("tests/fixtures/hosted-nightly-marker.json", "utf8"));
+    expect(captured).toMatchObject({ status: "FAIL", row_status: "PASS", bundle_id: "com.cmuxterm.app.nightly",
+      production_guard: { status: "FAIL", violations: [nightlyMarker] } });
+    const f = nightlyFixture(); writeFileSync(join(f.home, nightlyMarker), "/synthetic-before.sock\n");
+    const before = productionSnapshot(f.home);
+    writeFileSync(join(f.home, nightlyMarker), captured.socket + "\n");
+    appendFileSync(f.log, token); mkdirSync(join(f.home, ".cmux/agents/ratchet-private"));
+    mkdirSync(join(f.home, ".cmuxlayer/tickets"), { recursive: true });
+    writeFileSync(join(f.home, ".cmuxlayer/tickets/private.json"), token);
+    const after = productionSnapshot(f.home), snapshots = JSON.stringify([before, after]), runnerLocal: unknown[] = [];
+    const context = { capability: true, nightly: true, app: f.app, env: f.env, runnerLocal };
+    expect(productionChanges(before, after, [token], [], [], context))
+      .toEqual([".cmux/agents/ratchet-private", ".cmuxlayer/tickets/private.json", ".local/state/cmuxlayer/daemon.log"].sort());
+    expect(runnerLocal).toContainEqual({ path: nightlyMarker, before: "/synthetic-before.sock\n", after: captured.socket + "\n" });
+    expect(JSON.stringify([before, after])).toBe(snapshots);
+    const unchanged: unknown[] = [];
+    productionChanges(after, after, [token], [], [], { ...context, runnerLocal: unchanged });
+    expect(unchanged).toContainEqual({ path: nightlyMarker, before: captured.socket + "\n", after: captured.socket + "\n" });
+  });
+  it("keeps NIGHTLY strict for local/self-hosted/outside-scratch or ambiguous HOME contexts", () => {
+    const f = nightlyFixture(), before = productionSnapshot(f.home), outside = temporary();
+    writeFileSync(join(f.home, nightlyMarker), "/tmp/cmux-nightly.sock\n");
+    const after = productionSnapshot(f.home), context = { capability: true, nightly: true, app: f.app, env: f.env };
+    const escape = join(f.env.RUNNER_TEMP, "escape.app"); symlinkSync(outside, escape);
+    const contexts = [ { ...context, nightly: false }, { ...context, nightly: "true" }, { ...context, capability: false },
+      ...[{}, { ...f.env, RUNNER_ENVIRONMENT: "self-hosted" }, { ...f.env, RUNNER_OS: "Linux" },
+        { ...f.env, GITHUB_ACTIONS: "false" }, { ...f.env, HOME: "" }, { ...f.env, HOME: outside },
+        { ...f.env, HOME: "/" }, { ...f.env, RUNNER_TEMP: f.home }].map(env => ({ ...context, env })),
+      { ...context, app: f.home }, { ...context, app: escape } ];
+    for (const c of contexts) expect(productionChanges(before, after, [token], [], [], { ...c, runnerLocal: [] })).toEqual([nightlyMarker]);
+    expect(productionChanges(before, { ...after, home: outside }, [token], [], [], { ...context, runnerLocal: [] })).toEqual([nightlyMarker]);
+    expect(productionChanges({ ...before, home: outside }, after, [token], [], [], { ...context, runnerLocal: [] })).toEqual([nightlyMarker]);
+    expect(() => productionChanges(before, after, [token], [], [], { ...context, env: { ...f.env, HOME: join(outside, "missing") }, runnerLocal: [] })).toThrow();
+  });
   it("records the runner-local marker before/after without mutating either snapshot", () => {
     const f = fixture(), after = productionSnapshot(f.home), runnerLocal: unknown[] = [];
     expect(productionChanges(f.before, after, [token], [], [], { capability: true, app: f.app, env: f.env, runnerLocal })).toEqual([]);
@@ -65,11 +106,12 @@ describe("hosted capability marker attribution", () => {
     const f = fixture(); writeFileSync(join(f.home, marker), "x".repeat(8193));
     expect(() => productionSnapshot(f.home)).toThrow("socket pointer exceeds guard limit");
   });
-  it.each([true, false])("the runner receipts marker attribution in hosted=%s capability mode", (hosted) => {
-    const f = fixture(), output = join(f.root, "receipt.json");
+  it.each([[true, false], [false, true], [true, true]])("the runner receipts markers in hosted=%s NIGHTLY=%s capability mode", (hosted, nightly) => {
+    const f = hosted && nightly ? nightlyFixture() : fixture(), output = join(f.root, "receipt.json");
+    const activeMarker = nightly ? nightlyMarker : marker;
     mkdirSync(join(f.app, "Contents/MacOS"), { recursive: true });
     writeFileSync(join(f.app, "Contents/MacOS/cmux"), "synthetic; never execute");
-    const id = hosted ? "com.cmuxterm.app" : "com.cmuxterm.app.nightly";
+    const id = nightly ? "com.cmuxterm.app.nightly" : "com.cmuxterm.app";
     writeFileSync(join(f.app, "Contents/Info.plist"), `<plist><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleShortVersionString</key><string>0.64.22</string></dict></plist>`);
     const plist = join(f.root, "plist.mjs");
     writeFileSync(plist, `#!${process.execPath}\nimport { readFileSync } from "node:fs";\nconst key = process.argv[3].split(":")[1];\nconsole.log(readFileSync(process.argv[4], "utf8").match(new RegExp("<key>" + key + "</key><string>([^<]+)</string>"))[1]);\n`, { mode: 0o700 });
@@ -80,22 +122,23 @@ describe("hosted capability marker attribution", () => {
     // Stop at the launch boundary: this fixture has no app launch, real process
     // enumeration, daemon, pane, model or signal. Only its private marker writes.
     source = source.replace(processes!, "function processes() { return []; }")
-      .replace(launch!, `writeFileSync(join(productionHome, ${JSON.stringify(marker)}), cmuxSocket); throw new Error("synthetic launch boundary");`);
+      .replace(launch!, `writeFileSync(join(productionHome, ${JSON.stringify(activeMarker)}), cmuxSocket); throw new Error("synthetic launch boundary");`);
     for (const helper of ["ratchet-production-guard.mjs", "ratchet-app-guard.mjs"]) {
       writeFileSync(join(f.root, helper), readFileSync(join("scripts", helper), "utf8").replace('"/usr/libexec/PlistBuddy"', JSON.stringify(plist)));
     }
     // Make this run change the marker, rather than inheriting fixture()'s value.
-    writeFileSync(join(f.home, marker), "/synthetic-before.sock");
+    writeFileSync(join(f.home, activeMarker), "/synthetic-before.sock");
     const runner = join(f.root, "runner.mjs"); writeFileSync(runner, source);
     const clean = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(CMUX|GITHUB_|RUNNER_)/.test(key)));
-    const result = spawnSync(process.execPath, [runner, "--capability", ...(hosted ? ["--hosted-release"] : []), "--app", f.app, "--output", output],
+    const result = spawnSync(process.execPath, [runner, "--capability", ...(hosted && !nightly ? ["--hosted-release"] : []), "--app", f.app, "--output", output],
       { encoding: "utf8", env: { ...clean, ...(hosted ? f.env : {}), HOME: f.home, TMPDIR: f.root } });
     expect(result.status).toBe(1); // Deliberate synthetic launch refusal, never live-green.
     const receipt = JSON.parse(readFileSync(output, "utf8"));
     expect(receipt.processes).toEqual([]);
     expect(receipt.production_guard).toMatchObject(hosted ? { status: "PASS", violations: [], runner_local_state: [
-      { path: marker, before: "/synthetic-before.sock", after: "/tmp/cmux-nightly.sock" },
-    ] } : { status: "FAIL", violations: [marker], runner_local_state: [] });
+      ...(nightly ? [{ path: marker, before: "/tmp/cmux-nightly.sock", after: "/tmp/cmux-nightly.sock" }] : []),
+      { path: activeMarker, before: "/synthetic-before.sock", after: "/tmp/cmux-nightly.sock" },
+    ] } : { status: "FAIL", violations: [activeMarker], runner_local_state: [] });
   });
 });
 

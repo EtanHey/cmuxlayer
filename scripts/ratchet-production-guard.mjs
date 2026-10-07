@@ -1,5 +1,5 @@
-import { statSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
-import { join } from "node:path";
+import { statSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 import { isHostedCapabilityTarget } from "./ratchet-app-guard.mjs";
 
 const pointers = [".local/state/cmux/last-socket-path", ".local/state/cmux/nightly-last-socket-path"];
@@ -27,10 +27,14 @@ export function productionChanges(before, after, identifiers, agentIds, reads = 
   if (Object.values(before.files).some(old => !Object.values(after.files).some(current => old.dev === current.dev && old.ino === current.ino))) throw new Error("production append source disappeared");
   for (const id of after.agents.filter(id => !before.agents.includes(id))) if (agentIds.includes(id) || id.startsWith("ratchet")) changed.push(`.cmux/agents/${id}`);
   const runnerLocal = isHostedCapabilityTarget(context.app, context);
+  const env = context.env ?? process.env;
+  const nightlyHome = runnerLocal && context.nightly === true && env.HOME ? realpathSync(env.HOME) : null;
+  const nightlyRunnerLocal = nightlyHome && realpathSync(before.home) === nightlyHome && realpathSync(after.home) === nightlyHome &&
+    realpathSync(env.RUNNER_TEMP).startsWith(nightlyHome + sep);
   for (const path of pointers) {
-    // Only this marker is runner-local on an ephemeral hosted capability run.
+    // NIGHTLY additionally requires the snapshot HOME to own runner scratch.
     // Keep both actual snapshots and all other production attribution intact.
-    if (runnerLocal && path === ".local/state/cmux/last-socket-path") {
+    if ((runnerLocal && path === ".local/state/cmux/last-socket-path") || (nightlyRunnerLocal && path === ".local/state/cmux/nightly-last-socket-path")) {
       if (!context.runnerLocal) throw new Error("hosted marker receipt missing");
       context.runnerLocal.push({ path, before: before.socket_pointers[path], after: after.socket_pointers[path] });
       continue;

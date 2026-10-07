@@ -177,7 +177,7 @@ finally {
   try { if (productionBefore) {
     const reads = [], runnerLocal = [];
     const changed = productionChanges(productionBefore, productionSnapshot(productionHome), [launchToken, scratch, ...runAgentIds], [...runAgentIds], reads,
-      { capability: argv.includes("--capability") && Boolean(appTarget), app, runnerLocal });
+      { capability: argv.includes("--capability") && Boolean(appTarget), nightly: appTarget?.bundleId === "com.cmuxterm.app.nightly", app, runnerLocal });
     receipt.production_guard = { read_ranges: reads, runner_local_state: runnerLocal, violations: changed, status: changed.length ? "FAIL" : "PASS" };
     if (changed.length) { receipt.status = "FAIL"; receipt.error = "attributed production write during run"; }
   } } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }
