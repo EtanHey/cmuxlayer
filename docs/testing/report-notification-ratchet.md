@@ -33,3 +33,20 @@ legacy startup silence, separate DONE/BLOCKED receipts, delivered restart dedupe
 prompt/pause/error/stop gates, and public watch delivery. The captured MCP spawn
 fixture in `tests/p11-spawn-contract.test.ts` restarts with a pending DONE before
 resting and verifies the guarded parent relay still delivers it once.
+
+## F1 input-iteration rows
+
+Replay these two rows against reviewed parent
+`9cbbc341c6abb59a07d1146f20221560bf52e078` before applying the child repair.
+The same tests and exact child SHA, hashes, per-row results and logs must be
+sealed in `docs.local/report-done-only/f1/ratchet-receipt.json`.
+
+| Durable row | Test selector | Required behavior |
+| --- | --- | --- |
+| report-second-input-boundary | F1-P2 second verified input | Keep the earliest pending arm/floor. Preserve A's completed report at B's input boundary, then notify B separately: initial+A+B is three DONEs. No new report, duplicate receipt ACKs, background edits and restarts add no DONE. |
+| report-late-ack-submit-anchor | F1-Q3 delayed acknowledgement | Anchor to pre-submit report evidence and submission time, preserving both across receipt updates. A fast completed iteration survives late verification. A new receipt with identical text starts another iteration; stale receipt snapshots/ACKs, unchanged reports, same-iteration edits and old-boot receipts do not re-arm or duplicate. |
+
+These rows encode Etan's ruling: one DONE per input-defined work iteration.
+Separate inputs may produce separate pending completions inside one sweep
+interval. Background edits within one iteration do not create new outcomes.
+This remains local synthetic engine evidence, not real-client or live proof.

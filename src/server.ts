@@ -3224,6 +3224,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id, {
               verifiedDelivery: args.source_event === "send_to",
+              deliveryId: args.delivery_id,
             });
           }
           return { ...delivery, queued_behind_turn: expectedCli === "codex"

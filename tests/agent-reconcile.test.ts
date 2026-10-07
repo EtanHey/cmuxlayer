@@ -3211,6 +3211,106 @@ describe("Agent reconcile", () => {
     };
 
 
+    describe("F1 iteration ratchets", () => {
+      const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+      const input = (id: string) => engine.acceptPendingVerify({
+        delivery_id: id, agent_id: childId, text: "Synthetic next task",
+        press_enter: true, source_event: "send_to", retry_count: 0,
+      });
+      const confirm = (id: string) => {
+        const receipt = engine.getDeliveryReceipt(id)!;
+        engine.resolveDelivery({ ...receipt, delivery_state: "submitted", terminal: true,
+          submit_verified: true });
+        engine.markAgentWorking(childId, { verifiedDelivery: true, deliveryId: id });
+      };
+
+      it("F1-P2 second verified input preserves completed iterations without edit duplicates", async () => {
+        await setup();
+        await finish();
+        await tick();
+        input("f1-p2-a");
+        confirm("f1-p2-a");
+        const arm = stateMgr.readState(childId)!.reopen_pending_at;
+        const floor = stateMgr.readState(childId)!.reopen_report_mtime_ms;
+        await engine.runSweep(); // No new report is not a completion.
+        expect(doneCalls()).toHaveLength(1);
+        await tick();
+        writeFileSync(reportPath, "A complete\nDONE_REPORT_EPISODE\n");
+        await tick();
+        input("f1-p2-b");
+        confirm("f1-p2-b"); // A finished, but no sweep observed its report.
+        expect(stateMgr.readState(childId)!.reopen_pending_at).toBe(arm);
+        expect(stateMgr.readState(childId)!.reopen_report_mtime_ms).toBe(floor);
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2);
+        await tick();
+        writeFileSync(reportPath, "B complete\nDONE_REPORT_EPISODE\n");
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        const ids = doneCalls().map(([, child]) => child.report_done_delivery_id);
+        expect(new Set(ids).size).toBe(3);
+        confirm("f1-p2-a"); // Old receipt retries do not create another iteration.
+        await tick();
+        writeFileSync(reportPath, "Same B iteration edit\nDONE_REPORT_EPISODE\n");
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        await engine.runSweep();
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+      });
+
+      it("F1-Q3 delayed acknowledgement uses submit evidence and keeps a distinct task eligible", async () => {
+        await setup();
+        await finish();
+        await tick();
+        const receipt = input("f1-q3-a");
+        await tick();
+        writeFileSync(reportPath, "Fast A complete\nDONE_REPORT_EPISODE\n");
+        screen("Claude Code\n✻ Thinking… (esc to interrupt)");
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(1);
+        // Updating transport evidence must preserve the pre-submit snapshot.
+        engine.acceptPendingVerify({ ...receipt, typed: true, submit_dispatched: true });
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        engine.setDeliveryVerifier(async () => ({ outcome: "delivered", submit_verified: true }));
+        await engine.verifyPendingDeliveries();
+        expect(stateMgr.readState(childId)!.reopen_pending_at).toBe(receipt.submission_started_at);
+        screen(readyScreen);
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2);
+        await tick();
+        input("f1-q3-b"); // Identical payload, distinct receipt = distinct iteration.
+        confirm("f1-q3-b");
+        engine.resolveDelivery({ ...receipt, delivery_state: "submitted", terminal: true,
+          submit_verified: true }); // A stale receipt snapshot cannot erase durable dedupe.
+        confirm("f1-q3-a"); // A late old ACK cannot move B's freshness floor.
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2);
+        await tick();
+        writeFileSync(reportPath, "B complete\nDONE_REPORT_EPISODE\n");
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        await tick();
+        writeFileSync(reportPath, "B background edit\nDONE_REPORT_EPISODE\n");
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        // This captured ready screen has no task_done signal; finish before resume.
+        persist({ state: "done" });
+        await tick();
+        stateMgr.reopenForResume(childId);
+        stateMgr.transition(childId, "booting");
+        stateMgr.transition(childId, "ready");
+        const resumed = stateMgr.transition(childId, "working");
+        engine.getRegistry().set(childId, resumed);
+        const generation = resumed.report_episode_key;
+        confirm("f1-q3-a");
+        persist({ state: "done" });
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+        expect(stateMgr.readState(childId)!.report_episode_key).toBe(generation);
+      });
+    });
+
     describe("R2 review repros", () => {
       const thinking = "Claude Code\n✻ Thinking… (esc to interrupt)";
       const tick = () => new Promise((resolve) => setTimeout(resolve, 15));

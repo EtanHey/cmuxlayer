@@ -3,6 +3,7 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   readFileSync,
@@ -201,6 +202,7 @@ import type {
   LiveStateResolver,
   FreshLiveStateProbe,
   AgentDeliveryReceipt,
+  ReportSubmissionEvidence,
   DeliveryVerifier,
   DeliverySnapshotReader,
   DeliveryIssueFiler,
@@ -523,6 +525,7 @@ export class AgentEngine {
         stateMgr,
         registry,
         getAgentState: (agentId) => this.getAgentState(agentId),
+        captureReportSubmission: (agentId) => this.captureReportSubmission(agentId),
         markAgentWorking: (agentId, markOpts) =>
           this.markAgentWorking(agentId, markOpts),
       },
@@ -3334,6 +3337,89 @@ export class AgentEngine {
     return finalLine === coordinationBlockedMarker(agent.agent_id) ? "blocked" : null;
   }
 
+  private reportSnapshot(agent: AgentRecord) {
+    const mtime = agent.report_path ? safeMtimeMs(agent.report_path) : 0;
+    const outcome = this.reportTerminalOutcome(agent);
+    return { mtime_ms: mtime, outcome: agent.report_path && safeMtimeMs(agent.report_path) === mtime ? outcome : null };
+  }
+
+  private captureReportSubmission(agentId: string): ReportSubmissionEvidence | null {
+    const agent = this.stateMgr.readState(agentId) ?? this.registry.get(agentId);
+    if (!agent?.parent_agent_id || !agent.report_path || !agent.done_marker ||
+        !agent.report_episode_key || agent.report_episode_key !==
+          `${agent.boot_instance_id ?? agent.created_at}:${agent.reopen_count ?? 0}`) return null;
+    return {
+      boot: agent.boot_instance_id ?? agent.created_at,
+      parent: agent.parent_agent_id, path: agent.report_path, marker: agent.done_marker,
+      ...this.reportSnapshot(agent),
+      prior: {
+        key: agent.report_episode_key, started_at: agent.report_episode_started_at ?? "",
+        floor: agent.reopen_report_mtime_ms ?? null,
+        done_id: agent.report_done_delivery_id ?? null,
+        blocked_id: agent.report_blocked_delivery_id ?? null,
+        done_notified: agent.report_done_notified_episode === agent.report_episode_key,
+        blocked_notified: agent.report_blocked_notified_episode === agent.report_episode_key,
+      },
+      done_id: randomUUID(), blocked_id: randomUUID(),
+    };
+  }
+
+  private reportSubmissionMatches(agent: AgentRecord, evidence: ReportSubmissionEvidence): boolean {
+    return evidence.boot === (agent.boot_instance_id ?? agent.created_at) &&
+      evidence.parent === agent.parent_agent_id && evidence.path === agent.report_path &&
+      evidence.marker === agent.done_marker;
+  }
+
+  /** Each verified input owns one report iteration, even if several finish between sweeps. */
+  private async notifyInputReportOutcomes(ctx: SweepAgentContext, agent: AgentRecord): Promise<boolean> {
+    const boundaries = this.listDeliveryReceipts().filter((receipt) =>
+      receipt.agent_id === agent.agent_id && receipt.source_event === "send_to" &&
+      receipt.press_enter && receipt.submit_verified !== false && receipt.submission_started_at &&
+      receipt.report_submission && this.reportSubmissionMatches(agent, receipt.report_submission),
+    ).sort((a, b) => Date.parse(a.submission_started_at!) - Date.parse(b.submission_started_at!));
+    const receipts = boundaries.filter((receipt) => receipt.submit_verified === true);
+    if (!receipts.length) return false;
+    // Freeze the current artifact before awaiting any parent delivery.
+    const latest = this.reportSnapshot(agent);
+    const emit = async (receipt: AgentDeliveryReceipt, outcome: "done" | "blocked", prior = false) => {
+      const evidence = receipt.report_submission!;
+      const field = prior
+        ? (outcome === "done" ? "report_prior_done_notified" : "report_prior_blocked_notified")
+        : (outcome === "done" ? "report_done_notified" : "report_blocked_notified");
+      if (receipt[field]) return;
+      const id = prior
+        ? (outcome === "done" ? evidence.prior.done_id : evidence.prior.blocked_id)
+        : (outcome === "done" ? evidence.done_id : evidence.blocked_id);
+      if (!id) return;
+      // Ownership still uses the current contract; delivery identity belongs to this input.
+      const child = { ...agent, [outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"]: id };
+      const signature = prior ? evidence.prior.key : `input:${evidence.boot}:${receipt.delivery_id}`;
+      if (await this.notifyLifecycleEventForSweep(ctx, child, outcome, signature)) {
+        this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { [field]: true });
+      }
+    };
+    // Preserve a pending boot completion at the first input boundary as well.
+    const first = boundaries[0]!;
+    const before = first.report_submission!;
+    if (first.submit_verified === true && before.outcome && !before.prior[before.outcome === "done" ? "done_notified" : "blocked_notified"] &&
+        before.mtime_ms >= Date.parse(before.prior.started_at) &&
+        (before.prior.floor === null || before.mtime_ms > before.prior.floor)) {
+      await emit(first, before.outcome, true);
+    }
+    for (let i = 0; i < receipts.length; i++) {
+      const receipt = receipts[i]!;
+      const evidence = receipt.report_submission!;
+      // The next input captured this iteration's last report before it could be overwritten.
+      const boundary = receipts[i + 1]?.report_submission;
+      const mtime = boundary?.mtime_ms ?? latest.mtime_ms;
+      const outcome = boundary ? boundary.outcome : latest.outcome;
+      if (outcome && mtime >= Date.parse(receipt.submission_started_at!) && mtime > evidence.mtime_ms) {
+        await emit(receipt, outcome);
+      }
+    }
+    return true;
+  }
+
   /** Report readiness is independent of KEPT_OPEN and PR-loop closure policy. */
   private reportReadyOutcome(agent: AgentRecord): "done" | "blocked" | null {
     if (!agent.parent_agent_id || !agent.report_path || !agent.done_marker ||
@@ -3353,9 +3439,7 @@ export class AgentEngine {
   ): Promise<void> {
     const episodeKey = agent.report_episode_key;
     if (!this.reportOutcomeNotifications || !episodeKey || !this.assertSweepInputCurrent(ctx)) return;
-    const outcome = this.reportReadyOutcome(agent);
-    const notifiedField = outcome === "done" ? "report_done_notified_episode" : "report_blocked_notified_episode";
-    if (!outcome || agent[notifiedField] === agent.report_episode_key || screenText === undefined ||
+    if (screenText === undefined ||
         agent.state === "error" || agent.user_killed || agent.deletion_intent ||
         agent.blocked_on_prompt || agent.paused) return;
     const parsed = parseScreen(screenText);
@@ -3363,6 +3447,10 @@ export class AgentEngine {
         parsed.control_state === "busy" || parsed.control_state === "composer_dirty" ||
         parsed.control_state === "permission_prompt" || parsed.control_state === "interactive_overlay" ||
         (parsed.control_state !== "ready" && parsed.status !== "done")) return;
+    if (await this.notifyInputReportOutcomes(ctx, agent)) return;
+    const outcome = this.reportReadyOutcome(agent);
+    const notifiedField = outcome === "done" ? "report_done_notified_episode" : "report_blocked_notified_episode";
+    if (!outcome || agent[notifiedField] === agent.report_episode_key) return;
     if (await this.notifyLifecycleEventForSweep(ctx, agent, outcome, episodeKey)) {
       const current = this.stateMgr.readState(agent.agent_id);
       if (!current || current.report_episode_key !== agent.report_episode_key) return;
@@ -4953,22 +5041,33 @@ export class AgentEngine {
 
   markAgentWorking(
     agentId: string,
-    opts: { verifiedDelivery?: boolean } = {},
+    opts: { verifiedDelivery?: boolean; deliveryId?: string } = {},
   ): AgentRecord | null {
     const current =
       this.registry.get(agentId) ?? this.stateMgr.readState(agentId);
+    const contracted = current?.report_episode_key && current.parent_agent_id && current.report_path && current.done_marker;
+    const receipt = opts.verifiedDelivery && opts.deliveryId && contracted ? this.getDeliveryReceipt(opts.deliveryId) : null;
+    if (opts.verifiedDelivery && opts.deliveryId && contracted &&
+        (!current || !receipt || receipt.agent_id !== agentId || receipt.source_event !== "send_to" ||
+         !receipt.press_enter || !receipt.submission_started_at || !receipt.report_submission ||
+         !this.reportSubmissionMatches(current, receipt.report_submission) || receipt.report_reopen_armed)) {
+      return current;
+    }
     if (
       current?.state === "done" &&
       current.user_killed !== true &&
       opts.verifiedDelivery === true
     ) {
       const armed = this.stateMgr.updateRecord(agentId, {
-        reopen_pending_at: new Date().toISOString(),
-        reopen_report_mtime_ms: current.report_path ? safeMtimeMs(current.report_path) : null,
+        reopen_pending_at: current.reopen_pending_at ?? receipt?.submission_started_at ?? new Date().toISOString(),
+        reopen_report_mtime_ms: current.reopen_pending_at ? current.reopen_report_mtime_ms
+          : receipt?.report_submission?.mtime_ms ?? (current.report_path ? safeMtimeMs(current.report_path) : null),
       });
       this.registry.set(agentId, armed);
+      if (receipt) this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { report_reopen_armed: true });
       return armed;
     }
+    if (receipt) this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { report_reopen_armed: true });
     if (!current || current.state !== "idle") {
       return current;
     }

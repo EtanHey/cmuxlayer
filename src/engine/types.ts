@@ -77,6 +77,27 @@ export type AgentDeliveryState =
   | "failed_confirmed"
   | "stalled_queue";
 
+/** Private, pre-submit report evidence; never expose report contents in receipts. */
+export interface ReportSubmissionEvidence {
+  boot: string;
+  parent: string;
+  path: string;
+  marker: string;
+  mtime_ms: number;
+  outcome: "done" | "blocked" | null;
+  prior: {
+    key: string;
+    started_at: string;
+    floor: number | null;
+    done_id: string | null;
+    blocked_id: string | null;
+    done_notified: boolean;
+    blocked_notified: boolean;
+  };
+  done_id: string;
+  blocked_id: string;
+}
+
 export interface AgentDeliveryReceipt {
   delivery_id: string;
   agent_id: string;
@@ -106,6 +127,13 @@ export interface AgentDeliveryReceipt {
   boot_recovery_finalized_at?: string;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
+  /** Captured before this input; stable across late ACKs and receipt updates. */
+  report_submission?: ReportSubmissionEvidence | null;
+  report_reopen_armed?: boolean;
+  report_done_notified?: boolean;
+  report_blocked_notified?: boolean;
+  report_prior_done_notified?: boolean;
+  report_prior_blocked_notified?: boolean;
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
   next_attempt_at?: string | null;
   /** The receiving TUI visibly accepted this into its own queue; never replay it. */
