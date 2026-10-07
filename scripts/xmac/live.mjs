@@ -8,6 +8,7 @@ import { openDriver, prepareBuild } from "./driver.mjs";
 import { targetOptions } from "./target.mjs";
 import { runScenarios, ratchetProof, markdownTable } from "./runner.mjs";
 import { scenarioLaunchers, launchFailureRows } from "./launcher-preflight.mjs";
+import { humanSessionApprovalArgument } from "../cmux-session-guard.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cleanGitEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
@@ -21,6 +22,7 @@ export function options(argv) {
     "--sha": "sha", "--driver-root": "driverRoot", "--driver-sha": "driverSha", "--output": "output", "--installed-dist-digest": "installedDistDigest" };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
+    if (humanSessionApprovalArgument(arg, opts)) continue;
     if (arg === "--dry-run") opts.dryRun = true;
     else if (arg === "--replay") opts.replay = true;
     else if (arg === "--prepare-driver") opts.prepareDriver = true;
@@ -38,14 +40,14 @@ export async function replaySamples(scenarios, sample, resolveSha = value => val
   const ratchets = [];
   for (const scenario of scenarios) {
     const bug = await sample([scenario], resolveSha(scenario.bug.sha), "bug", true);
-    const absent = bug.rows.find(row => ["launch_overlay", "launch_cwd", "resume_identity"].includes(row.precondition?.kind));
+    const absent = bug.rows.find(row => ["launch_overlay", "launch_cwd", "resume_identity", "human_cmux_session"].includes(row.precondition?.kind));
     if (absent) {
       ratchets.push({ name: scenario.id, baseline: absent, candidate: `not run: ${absent.precondition.kind}`, delta: "stopped at precondition", ceiling: 0, status: "UNPROVEN" });
       break;
     }
     const fixed = scenario.fix?.sha ? await sample([scenario], resolveSha(scenario.fix.sha), "fix", true) : null;
     ratchets.push({ name: scenario.id, baseline: bug.rows[0], candidate: fixed?.rows[0] ?? "fix: pending", delta: fixed ? "bug → fix" : "pending", ceiling: 0, status: ratchetProof(bug.rows[0], fixed?.rows[0]) });
-    if (fixed?.rows.some(row => ["launch_overlay", "launch_cwd", "resume_identity"].includes(row.precondition?.kind))) break;
+    if (fixed?.rows.some(row => ["launch_overlay", "launch_cwd", "resume_identity", "human_cmux_session"].includes(row.precondition?.kind))) break;
   }
   return ratchets;
 }

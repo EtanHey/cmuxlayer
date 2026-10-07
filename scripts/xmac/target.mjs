@@ -8,6 +8,7 @@ export function targetOptions(opts) {
   if (!["m1", "mbp"].includes(opts.host)) throw new Error("host must be m1 or mbp");
   if (!["prod", "nightly"].includes(opts.cmux)) throw new Error("cmux must be prod or nightly");
   if (opts.host === "mbp" && opts.cmux === "prod") throw new Error("MBP production launches are forbidden");
+  if (opts.humanSessionQuitApproved && (opts.host !== "m1" || opts.cmux !== "prod")) throw new Error("human-session approval is M1 production only");
   if (opts.cmux === "nightly" && !opts.privateHome) throw new Error("NIGHTLY requires --private-home");
   if (opts.cmux === "prod" && !opts.dmg) throw new Error("M1 requires pinned DMG provenance");
   if (opts.cmux === "prod" && !opts.repo) throw new Error("M1 requires a registered repoGolem repo");
