@@ -703,6 +703,7 @@ export function registerSpawnAgentTool(
                 terminalFocusLease = await capturePostCreationFocus(terminalFocusLease, { surface: created.surface, workspace: created.workspace ?? workspace });
               },
             );
+            await assertCreatedTerminal();
             if (runtimeInitialization === "unsupported") throw new SurfaceRuntimeNotStartedError(created.surface);
           } catch (error) {
             await restoreFocusAfterRender(terminalFocusLease, undefined, created.workspace ?? workspace, { waitForReady: false });

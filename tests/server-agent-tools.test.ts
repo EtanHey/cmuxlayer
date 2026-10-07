@@ -15291,6 +15291,99 @@ describe("auto-focus discipline (focus target before split, restore after render
     }
   });
 
+  it.each(
+    (["ready", "demand"] as const).flatMap(mode =>
+      (["uuid", "ref-only"] as const).flatMap(identity =>
+        (["stable", "observer-unavailable", "observer-replaced", "uuid-reuse"] as const)
+          .filter(transition => identity === "uuid" || transition !== "uuid-reuse")
+          .map(transition => ({ mode, identity, transition })))),
+  )("bare runtime acceptance ratchet $mode $identity $transition", async ({ mode, identity, transition }) => {
+    const socketDir = mkdtempSync(join(tmpdir(), "cmux-bare-runtime-acceptance-"));
+    const paths = [join(socketDir, "one.sock"), join(socketDir, "two.sock")];
+    const sockets = paths.map(() => privateNet.createServer());
+    await Promise.all(sockets.map((socket, i) => new Promise<void>((resolve, reject) => {
+      socket.once("error", reject); socket.listen(paths[i], resolve);
+    })));
+    try {
+      const uuidA = "11111111-1111-4111-8111-111111111111";
+      const uuidB = "22222222-2222-4222-8222-222222222222";
+      const base = makeFocusLifecycleExec({ runtimeMode: mode === "ready" ? "ready" : "cold" });
+      let client: CmuxClient;
+      let created = false, demandCompleted = false, injected = false;
+      let occupant = uuidA;
+      const rows: Array<{ args: string[]; path: string | null; stale: boolean; metadata?: unknown }> = [];
+      const exec = vi.fn(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+        // Record the environment at dispatch, before the pending reply changes
+        // future routing. A later setEnv cannot make Ctrl-U retroactively stale.
+        const row = { args: [...args], path: env?.CMUX_SOCKET_PATH ?? null,
+          stale: client.currentSocketPath() !== paths[0] || occupant !== uuidA };
+        rows.push(row);
+        let result = await base.exec(cmd, args.map(arg => arg.replaceAll(uuidA, "surface:new")));
+        if (args.includes("new-split") || args.includes("new-surface")) {
+          created = true;
+          if (identity === "uuid") result = { ...result,
+            stdout: JSON.stringify({ ...JSON.parse(result.stdout), surface_id: uuidA }) };
+        }
+        if (args.includes("send-key") && args.includes("ctrl-u")) demandCompleted = true;
+        if (created && args.includes("list-pane-surfaces")) {
+          const data = JSON.parse(result.stdout);
+          data.surfaces = data.surfaces.map((surface: any) => surface.ref === "surface:new" && identity === "uuid"
+            ? { ...surface, id: occupant } : surface);
+          result = { ...result, stdout: JSON.stringify(data) };
+        }
+        if (created && args.includes("debug-terminals")) {
+          (row as { metadata?: unknown }).metadata = JSON.parse(result.stdout);
+          if (!injected && transition !== "stable" && (mode === "ready" || demandCompleted)) {
+            // Return a ready snapshot from A after losing its current identity.
+            // This is the awaited reply boundary in initializeNewSurfaceRuntime.
+            if (transition === "observer-unavailable") client.setEnv({});
+            if (transition === "observer-replaced") client.setEnv({ CMUX_SOCKET_PATH: paths[1] });
+            if (transition === "uuid-reuse") occupant = uuidB;
+            injected = true;
+          }
+        }
+        return result;
+      }) as unknown as ExecFn;
+      client = new CmuxClient({ exec, bin: "cmux", env: { CMUX_SOCKET_PATH: paths[0] } });
+      const opts: CreateServerOptions = { client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        lifecycleInitializer: async () => {} };
+      const context = createServerContext(opts); serverContexts.push(context);
+      expect(context.surfaceObserverEpoch).toBeTruthy();
+      const server = createServer({ ...opts, context });
+      const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+        type: "terminal", workspace: "workspace:2",
+      }, {}));
+      const mutations = rows.filter(row => row.args.some(arg =>
+        ["new-split", "new-surface", "select-workspace", "surface.focus", "close-surface", "send-key"].includes(arg)));
+      const evidence = { mode, identity, transition, injected, demandCompleted,
+        initialPath: paths[0], finalPath: client.currentSocketPath(), result, rows, mutations };
+      if (process.env.BARE_F1_OUTPUT_DIR) writeFileSync(
+        join(process.env.BARE_F1_OUTPUT_DIR, `${mode}-${identity}-${transition}.json`), JSON.stringify(evidence, null, 2) + "\n");
+      expect(injected, JSON.stringify(evidence)).toBe(transition !== "stable");
+      expect(demandCompleted).toBe(mode === "demand");
+      expect(rows.filter(row => row.args.includes("debug-terminals")).length).toBe(mode === "demand" ? 2 : 1);
+      expect(mutations.filter(row => row.stale), JSON.stringify(evidence)).toEqual([]);
+      expect(mutations.filter(row => row.args.includes("close-surface") || row.args.includes("surface.focus") || row.args.includes("select-workspace"))).toEqual([]);
+      const demand = mutations.filter(row => row.args.includes("send-key"));
+      expect(demand.length).toBe(mode === "demand" ? 1 : 0);
+      if (demand.length) {
+        expect(demand[0].path).toBe(paths[0]);
+        expect(demand[0].args).toContain(identity === "uuid" ? uuidA : "surface:new");
+      }
+      if (transition === "stable") expect(result, JSON.stringify(evidence)).toMatchObject({ ok: true });
+      else {
+        expect(result, JSON.stringify(evidence)).toMatchObject({ ok: false });
+        expect(result.error).toMatch(transition === "uuid-reuse" ? /UUID binding changed/ : /creation observer changed/);
+      }
+    } finally {
+      await Promise.allSettled(serverContexts.map(context => context.lifecycleStartPromise ?? Promise.resolve()));
+      for (const context of serverContexts.splice(0)) context.dispose();
+      await Promise.all(sockets.map(socket => new Promise<void>(resolve => socket.close(() => resolve()))));
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     { mode: "empty", workspace: "workspace:2", focusNeeded: true },
     { mode: "empty", workspace: "workspace:1", focusNeeded: true },

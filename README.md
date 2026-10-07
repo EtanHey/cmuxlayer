@@ -100,7 +100,7 @@ key.
 
 Use cmuxlayer's MCP tools for pane operations. Calling the raw `cmux` CLI yourself bypasses stable-UUID guards, draft ownership, delivery receipts, tailer reaping, and placement. After a cmux restart, reconnect cmuxlayer before any pane operation: run `/mcp reconnect cmuxlayer` in Claude Code, restart Codex CLI or T3 Code, or use **MCP: List Servers → Restart Server** in VS Code. Use the equivalent MCP reconnect control in other clients.
 
-Bare terminal creation also requires an available observer. Its runtime initialization, temporary focus, focus restoration, and failure cleanup remain bound to the creation observer and any returned surface UUID. If that identity changes, cmuxlayer refuses stale refs and skips unsafe cleanup; the original initialization error remains visible. Unsupported runtime metadata still permits temporary focus when ownership is stable. Explicit `focus:false` keeps initialization in the background, and a user focus change prevents restoration.
+Bare terminal creation through the production server requires an available observer. The handler checks the creation observer and any returned surface UUID before and after runtime initialization, at temporary focus and cleanup boundaries, and through its restoration lease. If those checks detect lost identity, cmuxlayer refuses stale refs and skips unsafe cleanup; the original initialization error remains visible. These handler checks do not provide atomic ownership across a connector's internal awaits, self-healing retries, or an in-flight RPC. Unsupported runtime metadata still permits temporary focus when ownership is stable. Explicit `focus:false` keeps initialization in the background, and a user focus change prevents restoration.
 
 ## What you can do
 
