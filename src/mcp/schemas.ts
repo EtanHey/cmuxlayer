@@ -256,7 +256,7 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
       update_menu_skipped: z.boolean().optional(),
       update_menu_text_hash: z.string().optional(),
-      spawn_state: z.enum(["started", "boot_unsubmitted"]).optional(),
+      spawn_state: z.enum(["started", "boot_unsubmitted", "pending_verify"]).optional(),
       next_action: z.string().optional(),
       delivered_chars: z.number().int().nonnegative().optional(),
     })
