@@ -14896,6 +14896,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     let focusedSurface = opts?.focusedSurface ?? "surface:origin";
     let spawnCreated = false;
     let createdWorkspace: string | undefined;
+    let resumedLauncher = false;
     let initialized = opts?.runtimeMode === "ready";
     let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
@@ -15126,6 +15127,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           stderr: "",
         };
       }
+      if (opts?.runtimeMode && args.includes("send") && /\bresume\b/.test(String(args.at(-1)))) resumedLauncher = true;
       const result = await lifecycleExec(cmd, args);
       if (opts?.runtimeMode && (args.includes("list-panes") || args.includes("list-pane-surfaces"))) {
         return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), workspace_ref: routeWorkspace }) };
@@ -15148,6 +15150,10 @@ describe("auto-focus discipline (focus target before split, restore after render
       ) {
         focusedWorkspace = opts.moveFocusDuringReadinessTo.workspace;
         focusedSurface = opts.moveFocusDuringReadinessTo.surface;
+      }
+      if (opts?.runtimeMode && resumedLauncher && args.includes("read-screen")) {
+        // A resume launcher opens the captured CLI; it submits no user task.
+        return { ...result, stdout: JSON.stringify({ surface: "surface:new", text: "codex> ", lines: 20, scrollback_used: false }) };
       }
       return result;
     }) as unknown as ExecFn;
