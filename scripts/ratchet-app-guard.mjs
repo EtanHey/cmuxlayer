@@ -9,11 +9,17 @@ export function processBundleId(executable) {
   if (!match) throw new Error("app executable is outside an app bundle");
   return plist(match[1], "CFBundleIdentifier");
 }
+// Shared boundary for hosted capability exceptions. Resolve both paths so a
+// symlink or a similarly prefixed sibling cannot impersonate runner scratch.
+export function isHostedCapabilityTarget(app, { capability = false, env = process.env } = {}) {
+  return Boolean(capability && env.GITHUB_ACTIONS === "true" && env.RUNNER_ENVIRONMENT === "github-hosted" &&
+    env.RUNNER_OS === "macOS" && env.RUNNER_TEMP && realpathSync(app).startsWith(realpathSync(env.RUNNER_TEMP) + sep));
+}
 export function assertAppTarget(app, { hostedRelease = false, capability = false, env = process.env } = {}) {
   const resolved = realpathSync(app), executable = join(resolved, "Contents/MacOS/cmux");
   const bundleId = plist(resolved, "CFBundleIdentifier"), targetId = processBundleId(executable);
   // This exception is capability-only on an ephemeral GitHub-hosted Mac, never a local version switch.
-  const hosted = hostedRelease && capability && env.GITHUB_ACTIONS === "true" && env.RUNNER_ENVIRONMENT === "github-hosted" && env.RUNNER_OS === "macOS" && env.RUNNER_TEMP && resolved.startsWith(realpathSync(env.RUNNER_TEMP) + sep);
+  const hosted = hostedRelease && isHostedCapabilityTarget(resolved, { capability, env });
   if ((bundleId === productionId || targetId === productionId) && !hosted) throw new Error("production bundle refused: local ratchet is NIGHTLY only");
   if (hostedRelease && !hosted) throw new Error("hosted release requires GitHub-hosted capability mode and a scratch app");
   const expected = hostedRelease ? productionId : nightlyId;

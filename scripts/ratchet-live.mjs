@@ -175,8 +175,10 @@ try {
 finally {
   try { if (nightlyPid) await terminate(nightlyPid, `${app}/Contents/MacOS/cmux`); } catch (error) { receipt.error = String(error); receipt.status = "FAIL"; }
   try { if (productionBefore) {
-    const reads = [], changed = productionChanges(productionBefore, productionSnapshot(productionHome), [launchToken, scratch, ...runAgentIds], [...runAgentIds], reads);
-    receipt.production_guard = { read_ranges: reads, violations: changed, status: changed.length ? "FAIL" : "PASS" };
+    const reads = [], runnerLocal = [];
+    const changed = productionChanges(productionBefore, productionSnapshot(productionHome), [launchToken, scratch, ...runAgentIds], [...runAgentIds], reads,
+      { capability: argv.includes("--capability") && Boolean(appTarget), app, runnerLocal });
+    receipt.production_guard = { read_ranges: reads, runner_local_state: runnerLocal, violations: changed, status: changed.length ? "FAIL" : "PASS" };
     if (changed.length) { receipt.status = "FAIL"; receipt.error = "attributed production write during run"; }
   } } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }
   try { receipt.production_end = production(); if (JSON.stringify(receipt.production_start) !== JSON.stringify(receipt.production_end)) { receipt.status = "FAIL"; receipt.error = "production PID/start-time changed"; } } catch (error) { receipt.status = "FAIL"; receipt.error = String(error); }

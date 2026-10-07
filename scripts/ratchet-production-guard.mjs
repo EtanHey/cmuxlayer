@@ -1,5 +1,6 @@
 import { statSync, readdirSync, readFileSync, openSync, readSync, fstatSync, closeSync } from "node:fs";
 import { join } from "node:path";
+import { isHostedCapabilityTarget } from "./ratchet-app-guard.mjs";
 
 const pointers = [".local/state/cmux/last-socket-path", ".local/state/cmux/nightly-last-socket-path"];
 const missing = fn => { try { return fn(); } catch (error) { if (error.code !== "ENOENT") throw error; return null; } };
@@ -20,12 +21,22 @@ export function productionSnapshot(home) {
 }
 
 // Read only appended bytes; retain no production content in a receipt.
-export function productionChanges(before, after, identifiers, agentIds, reads = []) {
+export function productionChanges(before, after, identifiers, agentIds, reads = [], context = {}) {
   const changed = [], needles = [...new Set(identifiers.filter(Boolean))].map(value => Buffer.from(value));
   if (!needles.length) throw new Error("guard identifiers missing");
   if (Object.values(before.files).some(old => !Object.values(after.files).some(current => old.dev === current.dev && old.ino === current.ino))) throw new Error("production append source disappeared");
   for (const id of after.agents.filter(id => !before.agents.includes(id))) if (agentIds.includes(id) || id.startsWith("ratchet")) changed.push(`.cmux/agents/${id}`);
-  for (const path of pointers) if (before.socket_pointers[path] !== after.socket_pointers[path] && after.socket_pointers[path] && [...identifiers, "/tmp/cmux-nightly.sock"].filter(Boolean).some(id => after.socket_pointers[path].includes(id))) changed.push(path);
+  const runnerLocal = isHostedCapabilityTarget(context.app, context);
+  for (const path of pointers) {
+    // Only this marker is runner-local on an ephemeral hosted capability run.
+    // Keep both actual snapshots and all other production attribution intact.
+    if (runnerLocal && path === ".local/state/cmux/last-socket-path") {
+      if (!context.runnerLocal) throw new Error("hosted marker receipt missing");
+      context.runnerLocal.push({ path, before: before.socket_pointers[path], after: after.socket_pointers[path] });
+      continue;
+    }
+    if (before.socket_pointers[path] !== after.socket_pointers[path] && after.socket_pointers[path] && [...identifiers, "/tmp/cmux-nightly.sock"].filter(Boolean).some(id => after.socket_pointers[path].includes(id))) changed.push(path);
+  }
   for (const [path, stat] of Object.entries(after.files)) {
     const previous = Object.values(before.files).find(old => old.dev === stat.dev && old.ino === stat.ino);
     const start = previous?.size ?? 0, end = stat.size;

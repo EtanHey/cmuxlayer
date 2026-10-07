@@ -66,6 +66,19 @@ The stable DMG URL is `/v0.64.22/cmux-macos.dmg`, with SHA-256
 `fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25`
 from the upstream GitHub release asset metadata.
 
+On an ephemeral hosted capability runner, only the real-account
+`.local/state/cmux/last-socket-path` marker is classified as runner-local.
+Its actual before/after values are retained in `production_guard.runner_local_state`.
+The shared hosted/macOS/capability/scratch-path policy gates this exception; local,
+M1, self-hosted and replay runs keep the production attribution rules. All other
+watched pointers, logs, tickets and agents remain guarded on hosted runs too.
+
+Artifact verification requires `codesign --verify --deep --strict` and Gatekeeper
+assessment with `source=Notarized Developer ID`. A missing or invalid staple is
+annotated, then Gatekeeper must accept the app; its assessment is uploaded.
+[Apple documents online ticket discovery](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow),
+so the offline staple is not a prerequisite for a notarized CI download.
+
 **Required gate policy:** pinned hosted 0.64.22 capability and replay rows become
 the required check once hosted capability is proven. R1 adds the capability
 candidate; it does not activate required checks or add hosted replay rows.
