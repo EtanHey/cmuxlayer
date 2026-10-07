@@ -200,7 +200,7 @@ export function registerSpawnAgentTool(
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
-    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts; unresolved Return submission is pending_verify with a delivery_id to query using wait_for. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts; unresolved Return submission is pending_verify with wait_for({delivery_id}) guidance in warning. Default successes have at most six fields: ok, agent_id, surface_id, state (spawn outcome), delivered (boot prompt), and optional warning. Use verbose:true for contract_path, report_path, done_marker, transport, worktree, and diagnostics; report_path and done_marker are also in the issued contract file. Failures always keep full detail.",
     {
       version: z
         .literal(1)
@@ -350,7 +350,7 @@ export function registerSpawnAgentTool(
         })
         .optional()
         .describe(
-          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified. Inspect the pane, then relay with send_to({agent_id, text:"Read and follow <contract_path>", press_enter:true}); do not use raw cmux send/send-key. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
+          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. report_path, done_marker, contract_path, coordination_footer_delivered and coordination_footer_note are verbose:true-only fields; the default warning contains any required relay instruction with its exact issued paths or marker. For resume_agent_id calls, coordination_footer_note is folded into warning: the pointer was deliberately not re-delivered, so relay only if the restored session lost its original context. For new spawns, when contract_path is present and folded pointer submission was queued or unverified, warning includes the pointer. Inspect the pane, then relay with send_to({agent_id, text:"Read and follow <contract_path>", press_enter:true}); do not use raw cmux send/send-key. When contract_path is absent, inline mode is active or the contract file could not be written, so warning tells YOU to relay report_path and done_marker.',
         ),
       force_new: z
         .boolean()
@@ -377,7 +377,7 @@ export function registerSpawnAgentTool(
         .optional()
         .default(false)
         .describe(
-          "Return the full legacy spawn response instead of the lean default.",
+          "Return the full success receipt, including contract_path, report_path, done_marker, transport, worktree, and diagnostics; defaults to at most six fields. Failures always keep full detail.",
         ),
     },
     ANNOTATIONS.mutating,

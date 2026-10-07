@@ -6172,7 +6172,7 @@ describe("tool handler integration", () => {
         const result = await runWithFakeTimers(
           () =>
             tool.handler(
-              {
+              { verbose: true,
                 repo: "cmuxlayer",
                 model: "gpt-5.5",
                 cli: "codex", effort: "medium",
@@ -6959,7 +6959,7 @@ describe("tool handler integration", () => {
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
-            {
+            { verbose: true,
               repo: "cmuxlayer",
               model: "gpt-5.5",
               cli: "codex", effort: "medium",

@@ -234,9 +234,13 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
   spawn_agent: z
     .object({
       ...BaseOutputShape,
+      retry_count: BaseOutputShape.retry_count.optional(),
+      state: z.string().optional(),
+      delivered: z.boolean().optional(),
+      warning: z.string().optional(),
       version: z.literal(1).optional(),
       type: z.enum(["agent", "terminal"]).optional(),
-      agent_id: z.string().optional(),
+      agent_id: z.string().nullable().optional(),
       parent_agent_id: z.string().nullable().optional(),
       role: z.string().optional(),
       surface_id: z.string().optional(),

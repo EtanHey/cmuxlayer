@@ -73,6 +73,7 @@ function isLauncherSend(args: string[]): boolean {
 async function spawnReadyAgent(
   server: any,
   cli: "claude" | "codex" = "claude",
+  options: { verbose?: boolean } = {},
 ) {
   const spawn = server._registeredTools["spawn_agent"];
   const spawnResult = await spawn.handler(
@@ -83,6 +84,7 @@ async function spawnReadyAgent(
       ...(cli === "codex" ? { effort: "medium" } : {}),
       workspace: "workspace:1",
       boot_prompt_timeout_ms: 100,
+      ...options,
     },
     {} as any,
   );
@@ -993,7 +995,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
       const bootSpawn = vi.spyOn(server._registeredTools.spawn_agent, "handler");
-      const agentId = await spawnReadyAgent(server);
+      const agentId = await spawnReadyAgent(server, "claude", { verbose: true });
       expect(parseToolResult(await bootSpawn.mock.results[0].value).boot_prompt_receipt)
         .toMatchObject({ submit_dispatched: false });
       const engine = engineForTests(server);

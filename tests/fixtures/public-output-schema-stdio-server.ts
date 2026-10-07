@@ -21,7 +21,7 @@ const registeredTools = (
     _registeredTools: Record<
       string,
       {
-        handler: () => Promise<{
+        handler: (args: { verbose?: boolean; type?: string }) => Promise<{
           content: Array<{ type: "text"; text: string }>;
           structuredContent: Record<string, unknown>;
         }>;
@@ -31,38 +31,21 @@ const registeredTools = (
 )._registeredTools;
 
 for (const toolName of PUBLIC_TOOL_NAMES) {
-  registeredTools[toolName]!.handler = async () => {
-    const partialSpawn =
-      toolName === "spawn_agent"
-        ? buildSpawnToolReturn({
-            spawn_state: "boot_unsubmitted",
-            agent_id: "cmuxlayerCodex-test",
-            surface_id: "surface:test",
-            workspace_id: "workspace:test",
-            delivered_chars: 42,
-            boot_prompt_receipt: {
-              typed: true,
-              submit_attempted: true,
-              submit_verified: false,
-            },
-          }).structuredContent
-        : {};
+  registeredTools[toolName]!.handler = async (args) => {
+    if (toolName === "spawn_agent") {
+      return buildSpawnToolReturn(args.type === "terminal"
+        ? { retry_count: 0, type: "terminal", surface_id: "surface:test" }
+        : { retry_count: 0, spawn_state: "boot_unsubmitted",
+            agent_id: "cmuxlayerCodex-test", surface_id: "surface:test",
+            workspace_id: "workspace:test", delivered_chars: 42,
+            contract_path: "/tmp/synthetic-contract.md",
+            report_path: "/tmp/synthetic-report.md", done_marker: "DONE_SYNTHETIC",
+            boot_prompt_receipt: { typed: true, submit_attempted: true,
+              submit_verified: false } }, args.verbose);
+    }
     return {
-      content: [
-        {
-          type: "text",
-          text:
-            toolName === "spawn_agent"
-              ? "spawn_state: boot_unsubmitted"
-              : `${toolName} ok`,
-        },
-      ],
-      structuredContent: {
-        ok: true,
-        retry_count: 0,
-        stdio_contract_probe: toolName,
-        ...partialSpawn,
-      },
+      content: [{ type: "text", text: `${toolName} ok` }],
+      structuredContent: { ok: true, retry_count: 0, stdio_contract_probe: toolName },
     };
   };
 }

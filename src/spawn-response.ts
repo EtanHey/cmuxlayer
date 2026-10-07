@@ -5,48 +5,6 @@ const FRESH_SPAWN_INFO_CODES = new Set([
   "registry_screen_disagreement",
 ]);
 
-const ESSENTIAL_FIELDS = [
-  "spawn_state",
-  "next_action",
-  "retry_count",
-  "agent_id",
-  "surface_id",
-  "workspace_id",
-  "delivered_chars",
-  "state",
-  "model",
-  "requested_model",
-  "role",
-  "authority",
-  "placement",
-  "parent_agent_id",
-  "collab_path",
-  "version",
-  "type",
-  "runtime_initialization",
-  "resumed",
-  "cwd",
-  "boot_prompt_delivered",
-  "boot_prompt_receipt",
-  "boot_prompt_submit_verified",
-  "update_menu_skipped",
-  "update_menu_text_hash",
-  "readiness_recovered",
-  "readiness_cleared",
-  // P11/U10: the engine-issued coordination contract is ESSENTIAL, not verbose
-  // detail -- a lead that cannot see it falls back to inventing its own path,
-  // which is the S3 disagreement this lane exists to make impossible.
-  "report_path",
-  "done_marker",
-  "coordination_footer_bytes",
-  // P11b: the file the boot pointer points at. A lead that cannot see it cannot
-  // check whether the worker was actually told -- the whole point of the trade.
-  "contract_path",
-  // Provenance travels WITH the byte count or the count is a false claim.
-  "coordination_footer_delivered",
-  "coordination_footer_note",
-] as const;
-
 type JsonObject = Record<string, unknown>;
 export interface SpawnToolReturn {
   [key: string]: unknown;
@@ -58,6 +16,15 @@ function record(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : null;
+}
+
+function coordinationWarning(full: JsonObject): string | undefined {
+  if (full.coordination_footer_delivered !== false) return undefined;
+  const relay = typeof full.contract_path === "string" && full.contract_path.length > 0
+    ? `Relay with send_to(${JSON.stringify({ agent_id: full.agent_id,
+        text: `Read and follow ${full.contract_path}`, press_enter: true })}) as directed by the note.`
+    : `The LEAD must relay report_path=${JSON.stringify(full.report_path)} and done_marker=${JSON.stringify(full.done_marker)} to this worker.`;
+  return [full.coordination_footer_note, relay].filter(Boolean).join(" ");
 }
 
 function bootUnsubmittedNextAction(
@@ -127,58 +94,37 @@ function leanHealth(value: unknown): JsonObject | undefined {
   };
 }
 
-function leanWorktree(value: unknown): JsonObject | undefined {
-  const worktree = record(value);
-  if (!worktree) return undefined;
-  return Object.fromEntries(
-    ["path", "name", "branch", "created", "reused"]
-      .filter((key) => worktree[key] !== undefined)
-      .map((key) => [key, worktree[key]]),
-  );
-}
-
-/** Retain actionable spawn identity and evidence while omitting routine detail. */
+/** Five identity/outcome fields, plus one optional actionable warning. */
 export function shapeSpawnResponse(
   full: JsonObject,
   verbose = false,
 ): JsonObject {
-  if (verbose) return full;
-
-  const hasBootPromptReceipt = record(full.boot_prompt_receipt) !== null;
-  const lean: JsonObject = {
-    ...(full.ok !== undefined ? { ok: full.ok } : {}),
-    ...Object.fromEntries(ESSENTIAL_FIELDS.filter(
-      (field) =>
-        full[field] !== undefined &&
-        !(
-          field.startsWith("boot_prompt_") &&
-          full[field] === null &&
-          !(field === "boot_prompt_submit_verified" && hasBootPromptReceipt)
-        ),
-    ).map((field) => [field, full[field]])),
-  };
-
-  const worktree = leanWorktree(full.worktree);
-  if (worktree) lean.worktree = worktree;
-
-  const warnings = Array.isArray(full.warnings) ? [...full.warnings] : [];
-  if (
-    typeof full.duplicate_spawn_warning === "string" &&
-    full.duplicate_spawn_warning.length > 0
-  ) {
-    warnings.push(full.duplicate_spawn_warning);
-  }
-  if (warnings.length > 0) {
-    lean.warnings = warnings;
-  }
+  if (verbose || full.ok !== true) return full;
 
   const health = leanHealth(full.health);
-  if (health) lean.health = health;
-
-  const modelPolicy = record(full.model_policy);
-  if (modelPolicy?.coerced === true) lean.model_policy = full.model_policy;
-
-  return lean;
+  const healthWarnings = Array.isArray(health?.issues) && health.issues.length > 0
+    ? health.issues : (health?.issue_codes ?? []);
+  const reportedWarnings = Array.isArray(full.warnings)
+    ? full.warnings.filter((value): value is string =>
+        typeof value === "string" && value.length > 0)
+    : [];
+  const warnings = [
+    full.warning === reportedWarnings.join(" | ") ? undefined : full.warning,
+    ...reportedWarnings,
+    full.duplicate_spawn_warning,
+    full.next_action,
+    coordinationWarning(full),
+    ...(Array.isArray(healthWarnings) ? healthWarnings : []),
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  const warning = [...new Set(warnings)].join(" | ");
+  return {
+    ok: true,
+    agent_id: full.agent_id ?? null,
+    surface_id: full.surface_id,
+    state: full.spawn_state ?? full.state ?? "started",
+    delivered: full.delivered ?? (full.boot_prompt_delivered === true),
+    ...(warning ? { warning } : {}),
+  };
 }
 
 export function buildSpawnToolReturn(
@@ -201,11 +147,9 @@ export function buildSpawnToolReturn(
             : {}) }
     : {};
   const full = { ok: true, ...stateFields, ...data };
-  const payload = verbose
+  const payload = verbose || full.ok !== true
     ? full
-    : leanData
-      ? { ok: true, ...stateFields, ...leanData }
-      : shapeSpawnResponse(full);
+    : shapeSpawnResponse(leanData ? { ...full, ...leanData } : full);
   return {
     content: [
       {
