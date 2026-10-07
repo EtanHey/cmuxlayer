@@ -38,14 +38,14 @@ export async function replaySamples(scenarios, sample, resolveSha = value => val
   const ratchets = [];
   for (const scenario of scenarios) {
     const bug = await sample([scenario], resolveSha(scenario.bug.sha), "bug", true);
-    const absent = bug.rows.find(row => ["launch_overlay", "launch_cwd"].includes(row.precondition?.kind));
+    const absent = bug.rows.find(row => ["launch_overlay", "launch_cwd", "resume_identity"].includes(row.precondition?.kind));
     if (absent) {
       ratchets.push({ name: scenario.id, baseline: absent, candidate: `not run: ${absent.precondition.kind}`, delta: "stopped at precondition", ceiling: 0, status: "UNPROVEN" });
       break;
     }
     const fixed = scenario.fix?.sha ? await sample([scenario], resolveSha(scenario.fix.sha), "fix", true) : null;
     ratchets.push({ name: scenario.id, baseline: bug.rows[0], candidate: fixed?.rows[0] ?? "fix: pending", delta: fixed ? "bug → fix" : "pending", ceiling: 0, status: ratchetProof(bug.rows[0], fixed?.rows[0]) });
-    if (fixed?.rows.some(row => ["launch_overlay", "launch_cwd"].includes(row.precondition?.kind))) break;
+    if (fixed?.rows.some(row => ["launch_overlay", "launch_cwd", "resume_identity"].includes(row.precondition?.kind))) break;
   }
   return ratchets;
 }

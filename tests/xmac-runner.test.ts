@@ -65,3 +65,23 @@ it("closes the target when evidence directory creation fails", async () => {
     expect(d.close).toHaveBeenCalledOnce();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("a caught missing resume identity stays an absent precondition, stops replay and never proves a ratchet", async () => {
+  const { replaySamples } = await import("../scripts/xmac/live.mjs");
+  const root = mkdtempSync(join(tmpdir(), "xmac-resume-runner-")), d = driver();
+  const next = vi.fn();
+  d.call.mockImplementation(async (name: string) => ({ structuredContent: name === "list_agents" ? { ok: true, agents: [{ agent_id: "seat", surface_id: "surface:1", cli: "codex", detail: { agent_id: "seat", cli: "codex", cli_session_id: null } }] } : name === "close_surface" ? { ok: true, stopped: true, surface_closed: true } : { ok: true, agent_id: "seat", surface_id: "surface:1", model_policy: { cli: "codex", effective_model: "gpt-6-luna" } } }));
+  const absent = { ...scenario, id: "resume", fix: { sha: "fix" }, async run(ctx: any) {
+    await ctx.spawn({ cli: "codex" }); await ctx.close("seat");
+    try { await ctx.resume("seat", { force: true }); } catch { return { status: "FAIL", evidence: {}, notes: ["caught by frozen scenario"] }; }
+  } };
+  try {
+    const output = await runScenarios({ scenarios: [absent, { ...scenario, id: "next", run: next }], driver: d, evidenceDir: root, parseScreen: () => ({}) });
+    expect(output.rows).toHaveLength(1);
+    expect(output.rows[0]).toMatchObject({ status: "PRECONDITION_ABSENT", precondition: { kind: "resume_identity" }, failure_kind: "infrastructure", expected_defect: false });
+    expect(next).not.toHaveBeenCalled();
+    const sample = vi.fn(async () => output);
+    expect(await replaySamples([absent, scenario], sample)).toMatchObject([{ status: "UNPROVEN", candidate: "not run: resume_identity" }]);
+    expect(sample).toHaveBeenCalledOnce();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

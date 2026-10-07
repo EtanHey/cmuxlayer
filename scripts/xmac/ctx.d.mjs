@@ -9,8 +9,8 @@
  * @property {(opts:object)=>Promise<object>} spawnLeadSeat Private-MCP Haiku lead, authority lead, left; finally sweeps children and run surfaces.
  * @property {(agentId:string,text:string)=>Promise<object>} leadSend Send a short action to a real lead; verdict needs screen/registry/topology.
  * @property {(opts:object)=>Promise<object>} spawn Verbose spawn_agent receipt; runner owns every spawned seat.
- * @property {(agentId:string,opts:object)=>Promise<object>} resume Verbose spawn_agent({resume_agent_id,...opts}) receipt.
- * @property {(agentId:string)=>Promise<object>} close close_surface({agent_id,scope:'agent',force:true}); runner still sweeps.
+ * @property {(agentId:string,opts:object)=>Promise<object>} resume Resume from verified cheap spawn plus a full registry identity captured after spawn, before close; forward resume-only options. Missing identity is PRECONDITION_ABSENT.
+ * @property {(agentId:string)=>Promise<object>} close close_surface({agent_id,scope:'agent',force:true}); verified closed seats leave cleanup ownership; resume re-enrolls them.
  * @property {(opts:object)=>Promise<object>} send Verbose send_to; default mode:'agent', options passed through.
  * @property {(surface:string,key:string)=>Promise<object>} key send_to({mode:'key',surface,text:key}).
  * @property {(surface:string)=>Promise<Screen>} readScreen Independent cmux socket text, every row/blank/composer preserved.

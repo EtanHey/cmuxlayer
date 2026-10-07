@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { captureSpawnIdentity, resumeArgs } from "./resume-identity.mjs";
 
 export class WaitTimeout extends Error {
   constructor(last) { super("screen wait timed out"); this.name = "WaitTimeout"; this.last = last; }
@@ -23,7 +24,7 @@ function cheapSpawn(opts) {
 
 /** @returns {import('./ctx.d.mjs').ScenarioContext} */
 export function createContext({ driver, evidenceDir, parseScreen, onScreen = () => {}, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now }) {
-  const owned = new Set();
+  const owned = new Set(), identities = new Map();
   let launchPrecondition;
   let sequence = 0;
   const artifact = async (name, data) => {
@@ -34,22 +35,23 @@ export function createContext({ driver, evidenceDir, parseScreen, onScreen = () 
     return path;
   };
   const call = async (name, args = {}) => {
-    if (name === "spawn_agent") {
-      if (args.resume_agent_id && !args.cli) {
-        const agent = unwrap(await driver.call("list_agents", { agent_ids: [args.resume_agent_id], detail: "full" })).agents?.[0];
-        if (!agent?.cli) throw new Error("resume CLI identity missing");
-        args = { ...args, cli: agent.cli };
-      }
-      args = cheapSpawn(args);
-    }
     let result;
-    try { result = await driver.call(name, args); }
-    catch (error) { if (error.precondition?.kind === "launch_overlay") launchPrecondition = error.precondition; throw error; }
+    try {
+      if (name === "spawn_agent") args = args.resume_agent_id ? resumeArgs(args, identities) : cheapSpawn(args);
+      result = await driver.call(name, args);
+    } catch (error) {
+      if (["launch_overlay", "resume_identity"].includes(error.precondition?.kind)) launchPrecondition = error.precondition;
+      throw error;
+    }
     // Error envelopes can still identify a partially-created seat: own it before decoding.
     const partial = result?.structuredContent;
     if (name === "spawn_agent" && partial?.agent_id) owned.add(partial.agent_id);
     const value = unwrap(result);
-    if (name === "spawn_agent" && value.agent_id) owned.add(value.agent_id);
+    if (name === "spawn_agent" && value.agent_id) {
+      owned.add(value.agent_id);
+      if (!args.resume_agent_id) await captureSpawnIdentity(identities, value, id => ctx.inspectAgent(id));
+    }
+    if (name === "close_surface" && args.agent_id && value.ok === true && await driver.verifyClosed(args.agent_id)) owned.delete(args.agent_id);
     return value;
   };
   const ctx = {
@@ -61,6 +63,7 @@ export function createContext({ driver, evidenceDir, parseScreen, onScreen = () 
       if (result?.structuredContent?.agent_id) owned.add(result.structuredContent.agent_id);
       const value = unwrap(result);
       if (value.agent_id) owned.add(value.agent_id);
+      await captureSpawnIdentity(identities, value, id => ctx.inspectAgent(id));
       return value;
     },
     leadSend: (agentId, text) => ctx.send({ agent_id: agentId, text }),

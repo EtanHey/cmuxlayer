@@ -51,7 +51,7 @@ export async function runScenarios({ scenarios, driver, evidenceDir, parseScreen
       row.expected_defect = row.failure_kind === "behavior" && !!code && row.notes.some(note => String(note).includes(code));
       payloads.set(row.id, { result, error });
       rows.push(row);
-      if (row.precondition?.kind === "launch_overlay") break;
+      if (["launch_overlay", "resume_identity"].includes(row.precondition?.kind)) break;
     }
   } catch (error) { lifecycleErrors.push(String(error)); }
   finally {
