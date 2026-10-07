@@ -42,7 +42,7 @@ import {
   parseScreen,
 } from "../screen-parser.js";
 import { assertSeatIdentity } from "../seat-identity.js";
-import { initializeNewSurfaceRuntime } from "../surface-runtime.js";
+import { initializeNewSurfaceRuntime, runtimeMetadataAvailable, SurfaceRuntimeNotStartedError } from "../surface-runtime.js";
 import {
   buildLaunchCommand,
   describeModelPin,
@@ -476,16 +476,20 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
       authority,
     },
   );
-  let runtimeInitialization: "unsupported" | "already_ready" | "input_demand" = "unsupported";
+  let runtimeInitialization: SpawnAgentResult["runtime_initialization"] = "focus";
   try {
-    if ((spawnParams.runtime_metadata_supported ?? this.client.supportsSurfaceRuntimeMetadata) === true) runtimeInitialization = await initializeNewSurfaceRuntime(
+    if (spawnParams.focus === false) runtimeInitialization = await initializeNewSurfaceRuntime(
       this.client,
       surface.surface,
       createdWorkspace,
       spawnParams.boot_prompt_timeout_ms,
       async () => this.assertSurfaceObserverEpochCurrent(surface.observerEpoch, "runtime initialization"),
       surface.surface_id,
+      spawnParams.on_runtime_focus
+        ? () => spawnParams.on_runtime_focus!(surface.surface, createdWorkspace, async () => this.assertSurfaceObserverEpochCurrent(surface.observerEpoch, "runtime initialization focus"))
+        : undefined,
     );
+    if (runtimeInitialization === "unsupported") throw new SurfaceRuntimeNotStartedError(surface.surface);
     await this.client.renameTab(
       surface.surface,
       managedPaneTitle(agentId, surface.surface, spawnParams.title),
@@ -576,7 +580,9 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
 export async function resumeAgent(
   this: LifecycleHost,
   agentId: string,
-  opts?: { workspace?: string; force?: boolean; focus?: boolean },
+  opts?: { workspace?: string; force?: boolean; focus?: boolean;
+    on_surface_created?: SpawnAgentParams["on_surface_created"];
+    on_runtime_focus?: SpawnAgentParams["on_runtime_focus"] },
 ): Promise<SpawnAgentResult> {
   let agent = this.resolveResumeAgent(agentId);
   if (!agent) {
@@ -617,7 +623,7 @@ export async function resumeAgent(
   const requestedWorkspace =
     opts?.workspace ?? agent.workspace_id ?? undefined;
   // Match spawn's metadata-aware default while retaining legacy initialization.
-  const focus = opts?.focus ?? !this.client.supportsSurfaceRuntimeMetadata;
+  const focus = opts?.focus ?? !await runtimeMetadataAvailable(this.client);
   this.spawnGuard.check(requestedWorkspace);
   const persistedAgent = this.stateMgr.readState(agent.agent_id);
   if (!persistedAgent) {
@@ -669,6 +675,7 @@ export async function resumeAgent(
         },
       });
     }
+    await opts?.on_surface_created?.({ agent_id: agent.agent_id, surface: surface.surface, workspace });
 
     const creating = this.stateMgr.reopenForResume(agent.agent_id);
     recordReopened = true;
@@ -702,6 +709,22 @@ export async function resumeAgent(
       cli_session_id: agent.cli_session_id,
     });
     this.registry.set(agent.agent_id, booting);
+    if (!focus) {
+      const initialization = await initializeNewSurfaceRuntime(
+        this.client, surface.surface, workspace, undefined,
+        async () => this.assertSurfaceObserverEpochCurrent(surface!.observerEpoch, "resume runtime initialization"),
+        surface.surface_id,
+        opts?.on_runtime_focus
+          ? () => opts.on_runtime_focus!(surface!.surface, workspace, async () => this.assertSurfaceObserverEpochCurrent(surface!.observerEpoch, "resume runtime focus"))
+          : opts?.focus === undefined ? async () => {
+            if (workspace) await this.client.selectWorkspace(workspace);
+            await this.client.focusSurface(surface!.surface, { workspace,
+              beforeMutation: async () => this.assertSurfaceObserverEpochCurrent(surface!.observerEpoch, "resume runtime focus"),
+            });
+          } : undefined,
+      );
+      if (initialization === "unsupported") throw new SurfaceRuntimeNotStartedError(surface.surface);
+    }
     await this.sendLaunchCommand(
       surface.surface,
       workspace,

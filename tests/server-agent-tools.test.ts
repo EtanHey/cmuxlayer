@@ -3004,8 +3004,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const exec = makeLifecycleExec();
     const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
-    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [] });
-    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true }] });
+    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
+    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
     const server = createTrackedServer({ client, stateDir: TEST_DIR,
       inboxBaseDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     await serverContexts.at(-1)?.lifecycleStartPromise;
@@ -3019,6 +3019,11 @@ describe("agent lifecycle tool handlers", () => {
     if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
     const parsed = parseToolResult(result) as Record<string, unknown>;
 
+    if (metadata === "legacy" && focus === false) {
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toMatch(/surface_runtime_not_started/);
+      return;
+    }
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
     expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
       surface_id: "surface:new", state: "started", delivered: false });
@@ -5182,7 +5187,7 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it.each([{ alreadyReady: false, socketMode: false, missingFirst: false }, { alreadyReady: true, socketMode: false, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode, missingFirst }) => {
+  it.each([{ alreadyReady: false, socketMode: false, missingFirst: false }, { alreadyReady: true, socketMode: false, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: true }])("#636 D4 initializes owned surfaces using proven metadata or legacy focus (case=%j)", async ({ alreadyReady, socketMode, missingFirst }) => {
     vi.useFakeTimers();
     try {
       let ready = alreadyReady;
@@ -5190,7 +5195,7 @@ describe("agent lifecycle tool handlers", () => {
       const lifecycleExec = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
         if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: missingFirst && metadataReads++ === 0 ? [] : [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
-        if (args.includes("send-key") && args.includes("ctrl-u")) ready = true;
+        if ((args.includes("send-key") && args.includes("ctrl-u")) || (args.includes("surface.focus") && args.some((a: string) => a.includes("surface:new")))) ready = true;
         if (args.includes("read-screen") && !ready) throw new Error("internal_error: Failed to read terminal text");
         return lifecycleExec(cmd, args);
       });
@@ -5202,8 +5207,8 @@ describe("agent lifecycle tool handlers", () => {
       const result = (server as any)._registeredTools.spawn_agent.handler({ verbose: true, repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
       await vi.advanceTimersByTimeAsync(3_000);
       expect(parseToolResult(await result).ok).toBe(true);
-      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
-      expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
+      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady || missingFirst ? 0 : 1);
+      expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(missingFirst);
       wrapped?.stop();
     } finally { vi.useRealTimers(); }
   });
@@ -5213,7 +5218,7 @@ describe("agent lifecycle tool handlers", () => {
     try {
       const base = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
-        if (args.includes("debug-terminals")) return { stdout: '{"terminals":[]}', stderr: "" };
+        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: false, ghostty_surface_ptr: "nil" }] }), stderr: "" };
         if (closeFails && args.includes("close-surface")) throw new Error("cleanup close rejected");
         return base(cmd, args);
       });
@@ -14872,6 +14877,8 @@ describe("auto-focus discipline (focus target before split, restore after render
 
   function makeFocusLifecycleExec(opts?: {
     selectedWorkspace?: string;
+    runtimeMode?: "empty" | "unsupported" | "cold" | "ready" | "focus-only";
+    launchFails?: boolean;
     focusedSurface?: string;
     roleTopology?: boolean;
     focusGatesCreatedSurfaceReadiness?: boolean;
@@ -14888,9 +14895,32 @@ describe("auto-focus discipline (focus target before split, restore after render
     let focusedWorkspace = opts?.selectedWorkspace ?? "workspace:1";
     let focusedSurface = opts?.focusedSurface ?? "surface:origin";
     let spawnCreated = false;
+    let createdWorkspace: string | undefined;
+    let initialized = opts?.runtimeMode === "ready";
     let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
       calls.push(args);
+      const routeWorkspace = args.includes("--workspace") ? args[args.indexOf("--workspace") + 1] : focusedWorkspace;
+      if (opts?.runtimeMode && (args.includes("list-panes") || args.includes("list-pane-surfaces")) && (!spawnCreated || routeWorkspace !== createdWorkspace)) {
+        const witness = `surface:witness-${routeWorkspace}`;
+        return { stdout: JSON.stringify(args.includes("list-panes") ? {
+          workspace_ref: routeWorkspace, panes: [{ ref: "pane:witness", index: 0, focused: false,
+            surface_count: 1, surface_refs: [witness], selected_surface_ref: witness }],
+        } : { workspace_ref: routeWorkspace, pane_ref: "pane:witness", surfaces: [{
+          ref: witness, title: "plain shell", type: "terminal", index: 0, selected: true,
+        }] }), stderr: "" };
+      }
+      if (opts?.runtimeMode && args.includes("debug-terminals")) {
+        if (opts.runtimeMode === "unsupported") throw new Error("unknown command debug-terminals");
+        return { stdout: JSON.stringify({ terminals: opts.runtimeMode === "empty" ? [] : [{
+          surface_ref: spawnCreated ? "surface:new" : "surface:origin",
+          runtime_surface_ready: initialized,
+          ghostty_surface_ptr: initialized ? "0x123" : "nil",
+        }] }), stderr: "" };
+      }
+      if (spawnCreated && opts?.runtimeMode && args.includes("send-key") && args.includes("ctrl-u") && opts.runtimeMode === "cold") initialized = true;
+      if (spawnCreated && opts?.runtimeMode && args.includes("read-screen") && args.includes("surface:new") && !initialized) throw new Error("internal_error: Failed to read terminal text");
+      if (spawnCreated && opts?.launchFails && args.includes("send")) throw new Error("fixture launch failed");
       if (args.includes("list-windows")) {
         return {
           stdout: JSON.stringify({
@@ -14964,6 +14994,7 @@ describe("auto-focus discipline (focus target before split, restore after render
         }
         focusedWorkspace = payload.workspace_id ?? focusedWorkspace;
         focusedSurface = payload.surface_id ?? focusedSurface;
+        if (focusedSurface === "surface:new") initialized = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("select-workspace")) {
@@ -15096,13 +15127,17 @@ describe("auto-focus discipline (focus target before split, restore after render
         };
       }
       const result = await lifecycleExec(cmd, args);
+      if (opts?.runtimeMode && (args.includes("list-panes") || args.includes("list-pane-surfaces"))) {
+        return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), workspace_ref: routeWorkspace }) };
+      }
       if (args.includes("new-split") || args.includes("new-surface")) {
         spawnCreated = true;
+        createdWorkspace = routeWorkspace;
         return {
           ...result,
           stdout: JSON.stringify({
             ...(JSON.parse(result.stdout) as Record<string, unknown>),
-            workspace: focusedWorkspace,
+            workspace: args.includes("--workspace") ? args[args.indexOf("--workspace") + 1] : focusedWorkspace,
           }),
         };
       }
@@ -15118,6 +15153,80 @@ describe("auto-focus discipline (focus target before split, restore after render
     }) as unknown as ExecFn;
     return { exec, calls };
   }
+
+  it.each([
+    { mode: "empty", workspace: "workspace:2", focusNeeded: true },
+    { mode: "empty", workspace: "workspace:1", focusNeeded: true },
+    { mode: "unsupported", workspace: "workspace:2", focusNeeded: true },
+    { mode: "cold", workspace: "workspace:2", focusNeeded: false },
+    { mode: "ready", workspace: "workspace:2", focusNeeded: false },
+    { mode: "focus-only", workspace: "workspace:2", focusNeeded: true },
+  ] as const)("resume runtime witness $mode $workspace", async ({ mode, workspace, focusNeeded }) => {
+    const agentId = "cmuxlayerCodex-runtime-witness";
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: workspace,
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
+    const client = new CmuxClient({ exec });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId }, {}));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, agent_id: agentId, surface_id: "surface:new" });
+    const focused = focusSurfaceIdx(calls, "surface:new");
+    expect(focused >= 0).toBe(focusNeeded);
+    const read = calls.findIndex(a => a.includes("read-screen") && a.includes("surface:new"));
+    const demand = calls.findIndex(a => a.includes("send-key") && a.includes("ctrl-u"));
+    if (focusNeeded) {
+      expect(read).toBeGreaterThan(focused);
+      if (workspace === "workspace:2") expect(selectIdx(calls, workspace)).toBeLessThan(focused);
+      expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThan(read);
+    } else {
+      expect(calls.some(a => a.includes("select-workspace"))).toBe(false);
+      if (mode === "cold") expect(read).toBeGreaterThan(demand);
+      else expect(demand).toBe(-1);
+    }
+  });
+
+  it.each(["failure", "user-move", "explicit-false"] as const)("resume runtime witness restoration $mode", async mode => {
+    const agentId = "cmuxlayerCodex-runtime-restore";
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: "empty", launchFails: mode === "failure",
+      ...(mode === "user-move" ? { moveFocusDuringReadinessTo: { workspace: "workspace:1", surface: "surface:user-click" } } : {}) });
+    const client = new CmuxClient({ exec });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId,
+      ...(mode === "explicit-false" ? { focus: false } : {}) }, {}));
+    expect(result.ok).toBe(mode === "user-move");
+    expect(focusSurfaceIdx(calls, "surface:origin") >= 0).toBe(mode === "failure");
+    if (mode === "explicit-false") {
+      expect(calls.some(a => a.includes("select-workspace") || a.includes("surface.focus"))).toBe(false);
+      expect(result.error).toMatch(/surface_runtime_not_started/);
+      expect(calls.some(a => a.includes("send"))).toBe(false);
+    }
+  });
+
+  it.each([
+    { type: "agent", mode: "empty" }, { type: "agent", mode: "cold" }, { type: "agent", mode: "ready" },
+    { type: "terminal", mode: "empty" }, { type: "terminal", mode: "cold" }, { type: "terminal", mode: "ready" },
+  ] as const)("new terminal runtime witness $type $mode", async ({ type, mode }) => {
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
+    const client = new CmuxClient({ exec });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+      type, workspace: "workspace:2", ...(type === "agent" ? { repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true } : {}),
+    }, {}));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, surface_id: "surface:new" });
+    expect(focusSurfaceIdx(calls, "surface:new") >= 0).toBe(mode === "empty");
+    expect(calls.some(a => a.includes("ctrl-u"))).toBe(mode === "cold");
+    expect(focusSurfaceIdx(calls, "surface:origin") >= 0).toBe(mode === "empty");
+  });
 
   it("spawn_agent restores the prior surface after a same-workspace spawn", async () => {
     const { exec, calls } = makeFocusLifecycleExec();

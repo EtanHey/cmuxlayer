@@ -212,6 +212,8 @@ export interface SpawnAgentParams {
   /** False initializes the new runtime by input demand without focusing it. */
   focus?: boolean;
   runtime_metadata_supported?: boolean;
+  /** Internal owned-terminal initialization fallback; caller owns focus restoration. */
+  on_runtime_focus?: (surface: string, workspace: string | undefined, beforeMutation: () => Promise<void>) => Promise<void>;
   model?: string;
   effort?: string;
   cli: CliType;
@@ -246,7 +248,7 @@ export interface SpawnAgentParams {
 }
 
 export interface SpawnAgentResult {
-  runtime_initialization?: "unsupported" | "already_ready" | "input_demand";
+  runtime_initialization?: "unsupported" | "already_ready" | "input_demand" | "focus";
   agent_id: string;
   collab_path?: string | null;
   parent_agent_id: string | null;

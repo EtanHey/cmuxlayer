@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import {
   initializeNewSurfaceRuntime,
-  readRuntimeMetadata,
+  runtimeMetadataAvailable,
   SurfaceRuntimeNotStartedError,
 } from "../../surface-runtime.js";
 import { buildSpawnToolReturn } from "../../spawn-response.js";
@@ -190,12 +190,6 @@ export function registerSpawnAgentTool(
     watchRegistryPath,
     withSurfaceWrite,
   } = deps;
-  const runtimeMetadataAvailable = async (): Promise<boolean> =>
-    typeof client.listSurfaceRuntimeMetadata === "function" ||
-    (typeof client.listTerminalMetadata === "function" &&
-      await readRuntimeMetadata(() => client.listTerminalMetadata())
-        .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
-        .catch(() => false));
 
   // 11. spawn_agent
   server.tool(
@@ -363,7 +357,7 @@ export function registerSpawnAgentTool(
         .boolean()
         .optional()
         .describe(
-          "Leave focus on the created agent tab instead of restoring the exact origin after initialization. On resume, false suppresses focus; omitted stays in the background on metadata-capable cmux and initializes legacy cmux with focus.",
+          "Leave focus on the created tab instead of restoring the exact origin after initialization. Resume and bare terminals: false forbids focus and fails closed if background initialization is unavailable; omitted may temporarily focus to initialize, then restore the origin. Fresh managed agents retain legacy initialization focus.",
         ),
       allow_long_inline: z
         .boolean()
@@ -472,15 +466,30 @@ export function registerSpawnAgentTool(
             args.workspace ?? existing.workspace_id ?? undefined,
           );
           await assertWorkspaceMutationAllowed("spawn_agent", workspace);
-          const focusForResume = args.focus ?? !await runtimeMetadataAvailable();
+          const focusForResume = args.focus ?? !await runtimeMetadataAvailable(client);
           let focusRestoreLease = focusForResume
             ? await focusTargetBeforeSplit(workspace, args.focus !== true)
             : null;
-          const result = await engine.resumeAgent(args.resume_agent_id, {
-            workspace,
-            force: args.force,
-            focus: focusForResume,
-          });
+          let result: Awaited<ReturnType<typeof engine.resumeAgent>>;
+          try {
+            result = await engine.resumeAgent(args.resume_agent_id, {
+              workspace, force: args.force, focus: focusForResume,
+              on_surface_created: async created => {
+                creation.record({ agent_id: existing.agent_id, surface_id: created.surface,
+                  workspace_id: created.workspace ?? workspace ?? null });
+                focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, created);
+              },
+              on_runtime_focus: args.focus === false ? undefined : async (surface, targetWorkspace, beforeMutation) => {
+                focusRestoreLease = await focusTargetBeforeSplit(targetWorkspace, args.focus !== true);
+                await beforeMutation();
+                await client.focusSurface(surface, { workspace: targetWorkspace });
+                focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, { surface, workspace: targetWorkspace });
+              },
+            });
+          } catch (error) {
+            await restoreFocusAfterRender(focusRestoreLease, undefined, workspace, { waitForReady: false });
+            throw error;
+          }
           creation.record({
             agent_id: result.agent_id,
             surface_id: result.surface_id,
@@ -626,13 +635,14 @@ export function registerSpawnAgentTool(
             surface_id: created.surface,
             workspace_id: created.workspace ?? workspace ?? null,
           });
+          let terminalFocusLease: FocusRestoreLease | null = null;
           let runtimeInitialization: string;
           try {
             runtimeInitialization = await initializeNewSurfaceRuntime(
               {
                 listTerminalMetadata: client.listSurfaceRuntimeMetadata
                   ? () => client.listSurfaceRuntimeMetadata!()
-                  : undefined,
+                  : () => client.listTerminalMetadata(),
                 sendKey: (surface, key, options) => client.sendKey(surface, key, options),
               },
               created.surface,
@@ -640,8 +650,15 @@ export function registerSpawnAgentTool(
               args.boot_prompt_timeout_ms,
               undefined,
               created.surface_id,
+              args.focus === false ? undefined : async () => {
+                terminalFocusLease = await focusTargetBeforeSplit(created.workspace ?? workspace, args.focus !== true);
+                await client.focusSurface(created.surface, { workspace: created.workspace ?? workspace });
+                terminalFocusLease = await capturePostCreationFocus(terminalFocusLease, { surface: created.surface, workspace: created.workspace ?? workspace });
+              },
             );
+            if (runtimeInitialization === "unsupported") throw new SurfaceRuntimeNotStartedError(created.surface);
           } catch (error) {
+            await restoreFocusAfterRender(terminalFocusLease, undefined, created.workspace ?? workspace, { waitForReady: false });
             try {
               await client.closeSurface(created.surface, { workspace: created.workspace ?? workspace });
             } catch (cleanupError) {
@@ -651,6 +668,7 @@ export function registerSpawnAgentTool(
             }
             throw error;
           }
+          await restoreFocusAfterRender(terminalFocusLease, created.surface, created.workspace ?? workspace);
           if (args.title) {
             await client.renameTab(created.surface, args.title, {
               workspace: created.workspace ?? workspace,
@@ -939,7 +957,7 @@ export function registerSpawnAgentTool(
           }
           return true;
         };
-        const runtimeMetadataSupported = await runtimeMetadataAvailable();
+        const runtimeMetadataSupported = await runtimeMetadataAvailable(client);
         const focusForLaunch = args.focus === true || !runtimeMetadataSupported;
         let focusRestoreLease = focusForLaunch
           ? await focusTargetBeforeSplit(spawnWorkspace, args.focus !== true)
@@ -951,6 +969,12 @@ export function registerSpawnAgentTool(
             repo: args.repo,
             focus: focusForLaunch,
             runtime_metadata_supported: runtimeMetadataSupported,
+            on_runtime_focus: async (surface, workspace, beforeMutation) => {
+              focusRestoreLease = await focusTargetBeforeSplit(workspace, args.focus !== true);
+              await beforeMutation();
+              await client.focusSurface(surface, { workspace });
+              focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, { surface, workspace });
+            },
             model: args.model,
             effort: args.effort,
             cli: args.cli,
