@@ -3,22 +3,27 @@
   "status": "FROZEN_DESIGN_NOT_MEASURED",
   "catalogs": "baseline.txt and candidate.txt contain full current/candidate tool catalogs; same validation schemas and companion tools. Only spawn_agent descriptions vary.",
   "exposure": "full retains field descriptions; top_level_only recursively removes every inputSchema description in BOTH arms, retaining top-level tool descriptions.",
-  "runner": "Independent lead arms only. Fresh context per case/arm; provide protocol, one prompt, and its exposed catalog. Never expose expected-actions.json or other cases. No actual tools or production messages.",
+  "runner": "Lead runs exactly two visible panes total: one fresh context for baseline and one for candidate. Each receives the identical ordered batch of all eight cases once, with the corresponding arm catalog and case exposure map. No per-case contexts, restarts or tool execution. Hide rubric, grader, scores and repository access from both arms.",
   "output_contract": {
-    "actions": [
+    "cases": [
       {
-        "tool": "catalog tool name",
-        "args": {},
-        "when": "now|after_resume|after_ready_frame"
+        "id": "integer 1..8",
+        "actions": [
+          {
+            "tool": "catalog tool name",
+            "args": {},
+            "when": "now|after_resume|after_ready_frame"
+          }
+        ],
+        "state": {
+          "lifecycle": "not_started|started|unknown",
+          "readiness": "unknown|blocked|ready",
+          "task_delivery": "not_sent|unverified|verified"
+        }
       }
-    ],
-    "state": {
-      "lifecycle": "not_started|started|unknown",
-      "readiness": "unknown|blocked|ready",
-      "task_delivery": "not_sent|unverified|verified"
-    }
+    ]
   },
-  "planning": "Use $spawn.surface_id as a symbolic reference to a future spawn response. after_ready_frame requires fresh evidence that the restored harness accepts task text; do not execute dependent steps on timeout, chooser, permission prompt or failed delivery. Return JSON only. State classifies observations BEFORE planned actions execute. not_started means this spawn/resume attempt has not started; not_sent means no task submission in this attempt. started and verified require observed receipts.",
+  "planning": "Use $spawn.surface_id as a symbolic reference to a future spawn response. after_ready_frame requires fresh evidence that the restored harness accepts task text; do not execute dependent steps on timeout, chooser, permission prompt or failed delivery. Return JSON only. State classifies observations BEFORE planned actions execute. not_started means this spawn/resume attempt has not started; not_sent means no task submission in this attempt. started and verified require observed receipts. Each case is a separate hypothetical world; do not carry observed state between cases. Additional safe readiness checks are allowed; omitted tool defaults use the catalog defaults.",
   "provenance": "Each independent arm must record model_requested, concrete model_effective, effort_effective and observation sources per skill-creator. No observed provenance means no scores or deltas.",
   "cases": [
     {
@@ -78,5 +83,6 @@
       "prompt": "Resume captured stopped agent sampleCodex-12345678 in workspace:7, keep focus elsewhere, and request full diagnostics. Do not force resume; do not send a task."
     }
   ],
-  "caller": "Synthetic managed lead in workspace:1; no actual tools may be called."
+  "caller": "Synthetic managed lead in workspace:1; no actual tools may be called.",
+  "batch_limitation": "Cases share a context: prompts and full field prose in other cases can cue later or earlier answers, including top_level_only cases. Those cases test case-designated exposure, not isolated absence of field prose. Report batch-conditioned A/B only; do not claim eight independent trials or isolated top-level-only effectiveness."
 }

@@ -15,12 +15,23 @@ Validation schemas and companion tools are identical between arms. In each
 `top_level_only` case, recursively strip inputSchema descriptions in both arms.
 Keep top-level descriptions. Freeze hashes are in that private packet.
 
-Run independent arms with the same harness/model/effort and fresh case contexts.
-Provide one case prompt, output contract/planning instructions and exposed
-catalog; omit design status, grading files, other cases and repository access.
-Return JSON plans only; no actual tool calls, panes or task sends.
-Use `$spawn.surface_id` as the future response reference. Conditional steps
-must stop on missing readiness evidence. Grade parsed JSON values and schema
-validity, never English phrasing. Report per-case assertion results and observed
-model/effort provenance before any A/B score or delta. The incident motivating
-this design is not a measured baseline. Lead owns both arms and fresh review.
+Run exactly two visible panes total: one fresh context per arm, each given
+all eight cases in the same order as one identical batch. Keep harness, model,
+effort, protocol and exposure mapping identical; only the arm's spawn wording
+changes. Do not restart or create per-case contexts, limiting descriptor churn.
+Return one JSON object with eight case plans; no actual tools or task sends.
+Grader and rubric stay hidden. The private `build-batches.py` creates both
+arm inputs from the frozen catalogs and protocol without opening any pane.
+
+Batch limitation: cases can cue one another, and full field prose in one case
+can inform a top_level_only case. Report batch-conditioned results, never eight
+independent trials or isolated top-level-only effectiveness. Case exposure is
+a designated view, not a guarantee that the context never saw field prose.
+
+Grade semantic action/argument/state predicates, not one exact plan. Accept
+extra safe readiness checks, surface aliases, omitted raw, and default
+send_to press_enter=true. Reject unsupported resume fields, premature task
+sends/success claims and duplicate submission during pending verification.
+Use `$spawn.surface_id` for a future response; dependent actions remain gated.
+Record observed per-arm model/effort provenance before any score or delta.
+The incident is not a measured baseline. Lead owns both arms and fresh review.
