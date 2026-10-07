@@ -15167,7 +15167,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: workspace,
       cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
     const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
     client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
     const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
       disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -15195,7 +15195,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
     const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: "empty", launchFails: mode === "failure",
       ...(mode === "user-move" ? { moveFocusDuringReadinessTo: { workspace: "workspace:1", surface: "surface:user-click" } } : {}) });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
     client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
     const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
       disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -15215,7 +15215,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     { type: "terminal", mode: "empty" }, { type: "terminal", mode: "cold" }, { type: "terminal", mode: "ready" },
   ] as const)("new terminal runtime witness $type $mode", async ({ type, mode }) => {
     const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
-    const client = new CmuxClient({ exec });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
     client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
     const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
       disableSpawnPreflight: true, sessionIdentityResolver: () => null });
