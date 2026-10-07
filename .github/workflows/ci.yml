@@ -263,6 +263,8 @@ jobs:
       # bun.lock pins every platform's optional deps (e.g. the rollup linux
       # binary); --frozen-lockfile fails the job if the lockfile would change.
       - run: bun install --frozen-lockfile
+      - name: Install zsh for harness shell regression tests
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - run: bun run typecheck
       - run: bun run test
       - name: Check bounded event-log RSS

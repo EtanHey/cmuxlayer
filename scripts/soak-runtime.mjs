@@ -7,6 +7,7 @@ import { join, sep } from "node:path";
 import { privateBuild, launcherEnvironment } from "./xmac/target.mjs";
 import { randomUUID, createHash } from "node:crypto";
 import { assertAppTarget, assertProcessTarget, processBundleId } from "./soak-app-guard.mjs";
+import { checkLauncherArgv } from "./xmac/argv-preflight.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -55,6 +56,14 @@ export function appLaunchEnvironment(env, opts, scratch, app, socketPath) {
     for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) launch[key] = privateEnv[key];
   }
   return launch;
+}
+
+export function shellStartup(env, opts) {
+  return Object.entries(env).filter(([key]) => /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key))
+    .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n" +
+    // Bootstrap repoGolem for a fresh shell, generate legacy launchers, then
+    // register the modern thin wrappers LAST. Nothing in target ~/.config changes.
+    (opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\nsource ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\n` : "");
 }
 
 export function assertProcessIdentity(saved, observed) {
@@ -203,10 +212,8 @@ export async function startSoakRuntime(opts, outputRoot) {
       if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
     } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
     // App-created shells must use the same private environment, with no personal zsh startup files.
-    writeFileSync(join(scratch, "zdot/.zshenv"), Object.entries(env).filter(([key]) =>
-      /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/u.test(key))
-      .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n" +
-      (opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\n` : ""), { mode: 0o600 });
+    writeFileSync(join(scratch, "zdot/.zshenv"), shellStartup(env, opts), { mode: 0o600 });
+    receipt.argv_preflight = checkLauncherArgv(env, opts, receipt.expected_launchers);
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
     if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
     run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
@@ -257,7 +264,8 @@ export async function startSoakRuntime(opts, outputRoot) {
     receipt.daemon = daemon;
     return { env, workspace: workspace.workspace_id, cwd: join(scratch, "repo"), receiptPath, receipt, close };
   } catch (error) {
+    if (error.precondition) receipt.precondition = error.precondition;
     receipt.error = String(error); await close();
-    throw new Error(`${error}; lifecycle receipt: ${receiptPath}`);
+    throw Object.assign(new Error(`${error}; lifecycle receipt: ${receiptPath}`), { precondition: error.precondition });
   }
 }

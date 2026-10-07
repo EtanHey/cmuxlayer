@@ -9,6 +9,7 @@ import { targetOptions, shellQuote, privateBuild, distDigest, requireLauncherMod
 import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 import { checkLauncherRoots } from "./launcher-preflight.mjs";
+import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
 
 
 export function boundedSpawn(args, defaults) {
@@ -74,6 +75,9 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     if (!Array.isArray(value.surfaces)) throw new Error("raw surface enumeration incomplete");
     return value.surfaces;
   };
+  const anchor = new Set([runtime.receipt.workspace?.surface_id, runtime.receipt.workspace?.surface_ref].filter(Boolean));
+  const closeSurfaces = ownedSurfaces => closeOwnedSurfaces({ list: surfaceList,
+    close: surface => socket("surface.close", { surface_id: surface }), owned: ownedSurfaces, anchor });
   const sweepChildren = async () => {
     const receipts = [], errors = [];
     for (const parent of leads) {
@@ -89,8 +93,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     }
     if (errors.length) {
       // This entire workspace was created by this run; never sweep another one.
-      for (const surface of await surfaceList()) await socket("surface.close", { surface_id: surface.id ?? surface.ref });
-      if ((await surfaceList()).length) throw new Error("fallback surface sweep failed");
+      receipts.push(await closeSurfaces(new Set((await surfaceList()).flatMap(row => [row.id, row.ref]).filter(Boolean))));
     }
     return { receipts, enumeration_errors: errors, fallback: errors.length > 0 };
   };
@@ -135,7 +138,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       const errors = [];
       try { await sweepChildren(); } catch (error) { errors.push(String(error)); }
       try {
-        for (const surface of await surfaceList()) await socket("surface.close", { surface_id: surface.id ?? surface.ref });
+        runtime.receipt.surface_cleanup = await closeSurfaces(new Set([...agents.values()].map(agent => agent.surface).filter(Boolean)));
       } catch (error) { errors.push(String(error)); }
       try { await client.close(); } catch (error) { errors.push(String(error)); }
       const lifecycle = await runtime.close();
