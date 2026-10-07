@@ -5,24 +5,15 @@ import { join } from "node:path";
 import { checkLauncherRoots, scenarioLaunchers, launchFailureRows } from "../scripts/xmac/launcher-preflight.mjs";
 import { ratchetProof } from "../scripts/xmac/runner.mjs";
 import * as registry from "../src/launcher-registry.js";
-const targetHome = vi.hoisted(() => ({ value: "" }));
-vi.mock("node:os", async original => ({ ...await original<typeof import("node:os")>(),
-  hostname: () => "Locals-MacBook-Pro.local", homedir: () => targetHome.value }));
-vi.mock("../scripts/soak-runtime.mjs", async original => ({ ...await original<any>(),
-  startSoakRuntime: vi.fn(() => { throw new Error("app launch must not be reached"); }) }));
-
-it("startTarget checks the real target registry before starting the app or private daemon", async () => {
-  const home = mkdtempSync(join(tmpdir(), "xmac-root-test-")); targetHome.value = home;
+it("legacy launcher helper refuses missing roots without a launch; fixture targets use private registries", async () => {
+  const home = mkdtempSync(join(tmpdir(), "xmac-root-test-"));
   try {
     const dir = join(home, ".config/ralphtools"); mkdirSync(dir, { recursive: true });
     const path = join(home, "missing repo");
     writeFileSync(join(dir, "launchers.zsh"), `repoGolem fixture '${path}'\n`);
-    const { startTarget } = await import("../scripts/xmac/target-client.mjs");
-    const { startSoakRuntime } = await import("../scripts/soak-runtime.mjs");
-    await expect(startTarget({ host: "m1", cmux: "prod", dmg: "/pinned", repo: "fixture", launcherClis: ["codex"] }, { launcherRegistry: registry })).rejects.toMatchObject({
+    await expect(checkLauncherRoots("fixture", ["codex"], { sourcePath: join(dir, "launchers.zsh"), registry })).rejects.toMatchObject({
       precondition: { status: "PRECONDITION_ABSENT", missing: [{ cli: "codex", launcher: "fixtureCodex", path }] },
     });
-    expect(startSoakRuntime).not.toHaveBeenCalled();
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

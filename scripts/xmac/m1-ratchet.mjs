@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { startSoakRuntime, rpc, isolatedEnvironment } from "../soak-runtime.mjs";
-import { privateBuild, targetOptions, shellQuote } from "./target.mjs";
+import { privateBuild, targetOptions, shellQuote, distDigest } from "./target.mjs";
 import { runCodexResolutionProbe, observeProbeOwner } from "./startup-probe.mjs";
 import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { attestFixtureProcess, fileDigest } from "./fixture-attestation.mjs";
@@ -19,13 +19,19 @@ export const rows = [
   { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5baf9596df137c73394b1e2a074e2e59d", fix: "fee6d9e5f29801e97fa64dabb8bfe0fc41aa5c94", specimen: "#1019 merge / docs.local/lanes/spawn-p0/live-specimen-1.md" },
   { name: "spawn_contract_once", fixture: "contract", bug: "87eccd87a81d116e3fe6056a9373e7d85fd0c3ab", fix: "288dadb4c48a69af63a8151970d3c01d448746a2", specimen: "initialization consumes brief / contract footer stranded" },
 ];
+export const requiredRunnerFiles = ["scripts/xmac/m1-ratchet.mjs", "scripts/xmac/fixture-launchers.mjs", "scripts/xmac/fixture-attestation.mjs",
+  "scripts/ratchet-fixture-tui.mjs", "scripts/soak-runtime.mjs", "scripts/soak-app-guard.mjs", "scripts/cmux-session-guard.mjs",
+  "scripts/xmac/production-guard.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
 export function validateWrapperConfig(cfg) {
   if (cfg.nativeApproved !== true || !/^[a-f0-9]{40}$/.test(cfg.runnerSha) || cfg.host && cfg.host !== "m1" ||
       cfg.cmux && cfg.cmux !== "prod" || rows.some(row => cfg.runnerSha === row.fix || cfg.runnerSha === row.bug) ||
-      Object.keys(cfg.products ?? {}).sort().join() !== rows.map(row => row.name).sort().join()) throw new Error("M1 reviewed runner/control admission missing");
+      Object.keys(cfg.products ?? {}).sort().join() !== rows.map(row => row.name).sort().join() ||
+      Object.keys(cfg.runnerFiles ?? {}).sort().join() !== [...requiredRunnerFiles].sort().join() ||
+      Object.values(cfg.runnerFiles).some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error("M1 reviewed runner/control admission missing");
   for (const row of rows) {
     const pair = cfg.products[row.name];
-    if (pair.baseline?.sha !== row.bug || pair.candidate?.sha !== row.fix) throw new Error("product baseline/approved candidate mismatch");
+    if (pair.baseline?.sha !== row.bug || pair.candidate?.sha !== row.fix ||
+        !/^[a-f0-9]{64}$/.test(pair.baseline.distDigest) || !/^[a-f0-9]{64}$/.test(pair.candidate.distDigest)) throw new Error("product baseline/approved candidate mismatch");
   }
   return cfg;
 }
@@ -66,7 +72,8 @@ export function checkProductRegistry(build, env) {
 }
 async function sample(cfg, row, product, outputRoot) {
   const before = productionSnapshot(homedir()), token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
-  const owned = [], reads = [], sample = { sha: product.sha, runner_sha: cfg.runnerSha, token, behavior_status: "FAIL", attribution_status: "FAIL", expected_defect: false };
+  const owned = [], reads = [], sample = { sha: product.sha, runner_sha: cfg.runnerSha, token, behavior_status: "FAIL", attribution_status: "FAIL", expected_defect: false,
+    lock_sha256: fileDigest(join(product.root, "bun.lock")), dist_digest: product.distDigest };
   let runtime, client;
   try {
     const opts = targetOptions({ ...cfg.options, host: "m1", cmux: "prod", repo: "ratchet", driverRoot: cfg.driverRoot, driverSha: cfg.runnerSha,
@@ -136,16 +143,21 @@ export async function runNative(cfg) {
   if (hostname() !== "Locals-MacBook-Pro.local") throw new Error("dedicated M1 only; no MBP/NIGHTLY route");
   const harness = privateBuild(cfg.driverRoot, cfg.runnerSha);
   if (realpathSync(fileURLToPath(import.meta.url)) !== join(harness.root, "scripts/xmac/m1-ratchet.mjs")) throw new Error("runner does not match reviewed driver prefix");
+  for (const [file, hash] of Object.entries(cfg.runnerFiles)) {
+    const path = join(harness.root, file);
+    if (realpathSync(path) !== path || fileDigest(path) !== hash) throw new Error("reviewed runner source hash mismatch");
+  }
   const productionBefore = productionSnapshot(homedir());
   for (const row of rows) for (const product of Object.values(cfg.products[row.name])) {
     const build = privateBuild(product.root, product.sha), probe = mkdtempSync(join(harness.root, "registry-probe-"));
+    if (distDigest(join(build.root, "dist")) !== product.distDigest) throw new Error("compiled product digest mismatch");
     for (const dir of ["home", "state", "inbox"]) mkdirSync(join(probe, dir), { mode: 0o700 });
     const env = isolatedEnvironment({}, probe, "/Applications/cmux.app", "/tmp/cmux-soak-stable.sock");
     env.CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY = "1";
     checkProductRegistry(build, env); // Every historical control must refuse raw fallback BEFORE any app action.
   }
   const outputRoot = join(harness.root, "evidence", `m1-ratchet-${randomUUID()}`); mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
-  const receipt = { status: "FAIL", runner_sha: cfg.runnerSha, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
+  const receipt = { status: "FAIL", runner_sha: cfg.runnerSha, runner_files: cfg.runnerFiles, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
   for (const row of rows) {
     const pair = cfg.products[row.name];
     const baseline = await sample(cfg, row, pair.baseline, outputRoot), candidate = await sample(cfg, row, pair.candidate, outputRoot);

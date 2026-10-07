@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const modulePath = process.env.M1_WRAPPER_UNDER_TEST ?? new URL("../scripts/xmac/m1-ratchet.mjs", import.meta.url).href;
-const { rows, validateWrapperConfig, evaluateRow, combineProof, checkProductRegistry } = await import(modulePath.startsWith("file:") ? modulePath : pathToFileURL(modulePath).href);
+const { rows, validateWrapperConfig, evaluateRow, combineProof, checkProductRegistry, requiredRunnerFiles } = await import(modulePath.startsWith("file:") ? modulePath : pathToFileURL(modulePath).href);
 const candidate="288dadb4c48a69af63a8151970d3c01d448746a2";
 const row={name:"spawn_contract_once",fixture:"contract"};
 const result={ok:true,agent_id:"fixture",contract_path:"/private/contract.md",boot_prompt_delivered:true,boot_prompt_submit_verified:true,coordination_footer_delivered:true,spawn_state:"running"};
@@ -37,7 +37,7 @@ it("keeps behavior PASS distinct from overall marker FAIL and demands RED witnes
  expect(combineProof({...b,expected_defect:false},{...c,attribution_status:"PASS"})).toMatchObject({status:"FAIL"});
 });
 it("rejects unapproved product, runner identity collapse, missing controls and non-M1 routes",()=>{
- const cfg={nativeApproved:true,runnerSha:"a".repeat(40),products:Object.fromEntries(rows.map((r:any)=>[r.name,{baseline:{sha:r.bug},candidate:{sha:r.fix}}]))};
+ const cfg={nativeApproved:true,runnerSha:"a".repeat(40),runnerFiles:Object.fromEntries((requiredRunnerFiles ?? []).map((f:string)=>[f,"a".repeat(64)])),products:Object.fromEntries(rows.map((r:any)=>[r.name,{baseline:{sha:r.bug,distDigest:"c".repeat(64)},candidate:{sha:r.fix,distDigest:"d".repeat(64)}}]))};
  expect(()=>validateWrapperConfig(cfg)).not.toThrow();
  for(const copy of [{...cfg,nativeApproved:false},{...cfg,runnerSha:candidate},{...cfg,host:"mbp"},
   {...cfg,products:{}},{...cfg,products:{...cfg.products,spawn_contract_once:{baseline:{sha:rows[2]?.bug},candidate:{sha:"b58063f4028c22828fb340ea03750f153a959a87"}}}}])
@@ -57,4 +57,12 @@ it("checks compiled registry enforcement against a raw-plan sensitivity control 
   writeFileSync(file,"export const launcherRegistryRequired=e=>true; export const resolveSpawnLaunchPlan=()=>{throw Error('Cannot resolve cwd');};");
   expect(()=>checkProductRegistry({root},env)).toThrow();
  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+it("refuses missing compiled/source hash bindings before native admission",()=>{
+ const products=Object.fromEntries(rows.map((r:any)=>[r.name,{baseline:{sha:r.bug,distDigest:"c".repeat(64)},candidate:{sha:r.fix,distDigest:"d".repeat(64)}}]));
+ const cfg={nativeApproved:true,runnerSha:"a".repeat(40),products,runnerFiles:Object.fromEntries((requiredRunnerFiles ?? []).map((f:string)=>[f,"a".repeat(64)]))};
+ expect(()=>validateWrapperConfig({...cfg,runnerFiles:{}})).toThrow();
+ const copy=structuredClone(cfg); delete copy.products.spawn_contract_once.candidate.distDigest;
+ expect(()=>validateWrapperConfig(copy)).toThrow();
 });
