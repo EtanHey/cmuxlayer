@@ -217,7 +217,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     // App-created shells must use the same private environment, with no personal zsh startup files.
     writeFileSync(join(scratch, "zdot/.zshenv"), shellStartup(env, opts), { mode: 0o600 });
     receipt.argv_preflight = checkLauncherArgv(env, opts, receipt.expected_launchers);
-    scenarioRepo = createScenarioRepo(env, opts, scratch, token);
+    scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
     receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
     if (opts.privateAppHome) receipt.app_home = launchEnv.HOME;
