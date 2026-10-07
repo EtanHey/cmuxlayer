@@ -121,7 +121,7 @@ export interface SpawnAgentToolDeps {
   ensureMonitorBoot: (agentId: string) => MonitorBootResult;
   evaluateServerAgentHealth: ServerAgentHealthEvaluator;
   executeDeliveryEngine: DeliveryEngine["executeDeliveryEngine"];
-  focusTargetBeforeSplit: (targetWorkspace: string | undefined, restore?: boolean, capturedPrior?: FocusTarget | null) => Promise<FocusRestoreLease | null>;
+  focusTargetBeforeSplit: (targetWorkspace: string | undefined, restore?: boolean, capturedPrior?: FocusTarget | null, beforeMutation?: () => Promise<void>) => Promise<FocusRestoreLease | null>;
   isBootPromptDelivered: DeliveryEngine["isBootPromptDelivered"];
   issueSpawnCoordination: (agentId: string, reportPathOverride?: string | null) => CoordinationContract;
   launchShellRecoveryBySurface: Map<string, { recovered: true; cleared: string[]; }>;
@@ -480,7 +480,7 @@ export function registerSpawnAgentTool(
                 focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, created);
               },
               on_runtime_focus: args.focus === false ? undefined : async (surface, targetWorkspace, beforeMutation) => {
-                focusRestoreLease = await focusTargetBeforeSplit(targetWorkspace, args.focus !== true);
+                focusRestoreLease = await focusTargetBeforeSplit(targetWorkspace, args.focus !== true, undefined, beforeMutation);
                 await beforeMutation();
                 await client.focusSurface(surface, { workspace: targetWorkspace });
                 focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, { surface, workspace: targetWorkspace });
@@ -970,7 +970,7 @@ export function registerSpawnAgentTool(
             focus: focusForLaunch,
             runtime_metadata_supported: runtimeMetadataSupported,
             on_runtime_focus: async (surface, workspace, beforeMutation) => {
-              focusRestoreLease = await focusTargetBeforeSplit(workspace, args.focus !== true);
+              focusRestoreLease = await focusTargetBeforeSplit(workspace, args.focus !== true, undefined, beforeMutation);
               await beforeMutation();
               await client.focusSurface(surface, { workspace });
               focusRestoreLease = await capturePostCreationFocus(focusRestoreLease, { surface, workspace });

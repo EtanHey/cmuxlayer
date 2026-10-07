@@ -1472,21 +1472,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     targetWorkspace: string | undefined,
     restore = true,
     capturedPrior?: FocusTarget | null,
+    beforeMutation?: () => Promise<void>,
   ): Promise<FocusRestoreLease | null> => {
     if (!targetWorkspace) return null;
+    const observerEpoch = context.surfaceObserverEpoch;
+    const assertCurrent = async (): Promise<void> => {
+      // The engine guard binds fallback focus to the surface's creation epoch.
+      await beforeMutation?.();
+      if (!observerEpoch || context.surfaceObserverEpoch !== observerEpoch) {
+        throw new Error("Surface observer changed or became unavailable during focus; refusing stale focus refs");
+      }
+    };
     const prior =
       capturedPrior === undefined ? await currentFocusTarget() : capturedPrior;
     const placementFocus =
       capturedPrior === undefined ? prior : await currentFocusTarget();
+    // Focus reads can reconnect the observer. Check after them, at the write.
+    await assertCurrent();
     if (!placementFocus || placementFocus.workspace !== targetWorkspace) {
       await client.selectWorkspace(targetWorkspace);
     }
     if (!prior || !restore) return null;
     const expected = await currentFocusTarget();
+    await assertCurrent();
     // Without an exact expected surface, a later same-workspace user move
     // cannot be distinguished from cmuxlayer's own placement focus.
     if (!expected?.surface) return null;
-    return { prior, expected };
+    return { prior, expected, assertCurrent };
   };
 
   /** Refresh the lease immediately after the surface mutation. */
@@ -1528,18 +1540,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     opts?: { waitForReady?: boolean },
   ): Promise<string | null> => {
     if (!lease) return null;
-    if (surface && opts?.waitForReady !== false) {
-      try {
-        await waitForLaunchShellReady({ surface, workspace });
-      } catch {
-        // Readiness timed out — restore focus anyway rather than strand it.
-      }
-    }
-    const current = await currentFocusTarget();
-    // The user may deliberately move while a pane boots. Restore only while
-    // focus still exactly matches the post-creation state cmuxlayer caused.
-    if (!current || !sameExactFocus(current, lease.expected)) return null;
     try {
+      await lease.assertCurrent();
+      if (surface && opts?.waitForReady !== false) {
+        try {
+          await waitForLaunchShellReady({ surface, workspace });
+        } catch {
+          // Readiness timed out — restore while the observer remains current.
+        }
+      }
+      const current = await currentFocusTarget();
+      // The user may deliberately move while a pane boots. Restore only while
+      // focus still exactly matches the post-creation state cmuxlayer caused.
+      if (!current || !sameExactFocus(current, lease.expected)) return null;
+      // Readiness and focus lookup can both replace the observer. Never use
+      // an old origin on that connection, including during failure cleanup.
+      await lease.assertCurrent();
       if (lease.prior.surface) {
         await client.focusSurface(lease.prior.surface, {
           workspace: lease.prior.workspace,

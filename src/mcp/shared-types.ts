@@ -22,6 +22,8 @@ export type FocusTarget = {
 export type FocusRestoreLease = {
   prior: FocusTarget;
   expected: FocusTarget;
+  /** Bound to the observer that captured the origin and created the surface. */
+  assertCurrent: () => Promise<void>;
 };
 
 export type RawSurfaceMutationRoute = {

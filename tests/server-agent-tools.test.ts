@@ -15234,6 +15234,140 @@ describe("auto-focus discipline (focus target before split, restore after render
     expect(focusSurfaceIdx(calls, "surface:origin") >= 0).toBe(mode === "empty");
   });
 
+  it.each([false, true])("scoped reviewer observer fallback race changed=%s", async change => {
+    const agentId = "cmuxlayerCodex-reviewer-epoch";
+    let epoch = "review-observer:1";
+    let demanded = false;
+    let switched = false;
+    const mutationEpochs: Array<{ args: string[]; epoch: string }> = [];
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only" });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send-key") && args.includes("ctrl-u")) demanded = true;
+      if (change && demanded && args.includes("identify") && !switched) {
+        epoch = "review-observer:2";
+        switched = true;
+      }
+      if (args.includes("select-workspace") || args.includes("surface.focus")) mutationEpochs.push({ args, epoch });
+      return base.exec(cmd, args);
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/review-epoch-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "review-observer-owner",
+      surfaceObserverEpochProvider: () => epoch });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId }, {}));
+    if (change) {
+      expect(switched).toBe(true);
+      expect(result.ok, JSON.stringify(result)).toBe(false);
+      expect(result.error).toMatch(/surface observer changed/i);
+      expect(mutationEpochs.filter(row => row.epoch === "review-observer:2"), JSON.stringify(mutationEpochs)).toEqual([]);
+    } else {
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, agent_id: agentId });
+      expect(mutationEpochs.length).toBeGreaterThan(0);
+    }
+  });
+
+  it.each(
+    (["resume", "managed"] as const).flatMap(caller =>
+      (["placement-read", "selected-read", "restore-success", "restore-failure", "restore-ready-read", "restore-before-failure"] as const).flatMap(phase =>
+        [false, true].map(change => ({ caller, phase, change })))),
+  )("observer focus ratchet $caller $phase changed=$change", async ({ caller, phase, change }) => {
+    const agentId = "cmuxlayerCodex-observer-ratchet";
+    if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
+      agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex",
+    }));
+    let epoch = "ratchet:1";
+    let demanded = false;
+    let selected = false;
+    let launched = false;
+    let switched = false;
+    const mutations: Array<{ args: string[]; epoch: string }> = [];
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only", launchFails: phase.includes("failure") });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send-key") && args.includes("ctrl-u")) demanded = true;
+      if (args.includes("select-workspace")) selected = true;
+      if (args.includes("send")) launched = true;
+      const atPhase = phase === "placement-read" ? demanded && !selected
+        : phase === "selected-read" ? selected && !launched
+        : phase === "restore-success" || phase === "restore-failure" ? launched : false;
+      if (change && args.includes("identify") && atPhase && !switched) {
+        epoch = "ratchet:2";
+        switched = true;
+      }
+      if (args.includes("select-workspace") || args.includes("surface.focus") || args.includes("close-surface")) {
+        mutations.push({ args, epoch });
+      }
+      try {
+        return await base.exec(cmd, args);
+      } finally {
+        // Reconnect during render, or before failure unwinds into cleanup.
+        if (change && !switched && (
+          (phase === "restore-ready-read" && launched && args.includes("read-screen")) ||
+          (phase === "restore-before-failure" && args.includes("send"))
+        )) {
+          epoch = "ratchet:2";
+          switched = true;
+        }
+      }
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => epoch });
+    const args = caller === "resume" ? { resume_agent_id: agentId }
+      : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    if (change) {
+      expect(switched, JSON.stringify(result)).toBe(true);
+      expect(mutations.filter(row => row.epoch === "ratchet:2"), JSON.stringify(mutations)).toEqual([]);
+    }
+    const rejectedFocus = change && (phase === "placement-read" || phase === "selected-read");
+    expect(result.ok, JSON.stringify(result)).toBe(!rejectedFocus && !phase.includes("failure"));
+    if (rejectedFocus) expect(result.error).toMatch(/surface observer changed/i);
+    if (phase.includes("failure")) expect(result.error).toMatch(/fixture launch failed/);
+    const originRestores = mutations.filter(row => row.args.includes("surface.focus") && row.args.some(a => a.includes("surface:origin")));
+    expect(originRestores.length, JSON.stringify(mutations)).toBe(change ? 0 : 1);
+  });
+
+  it.each(
+    (["resume", "managed"] as const).flatMap(caller => [false, true].map(failure => ({ caller, failure }))),
+  )("observer focus ratchet user movement $caller failure=$failure", async ({ caller, failure }) => {
+    const agentId = "cmuxlayerCodex-observer-user";
+    if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
+      agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex",
+    }));
+    let launched = false;
+    let moved = false;
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only", launchFails: failure });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send")) launched = true;
+      if (launched && args.includes("identify")) {
+        moved = true;
+        return { stdout: JSON.stringify({ focused: { workspace_ref: "workspace:1", surface_ref: "surface:user-click" } }), stderr: "" };
+      }
+      return base.exec(cmd, args);
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => "ratchet:1" });
+    const args = caller === "resume" ? { resume_agent_id: agentId }
+      : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    expect(moved).toBe(true);
+    expect(result.ok, JSON.stringify(result)).toBe(!failure);
+    if (failure) expect(result.error).toMatch(/fixture launch failed/);
+    expect(focusSurfaceIdx(base.calls, "surface:origin")).toBe(-1);
+  });
+
   it("spawn_agent restores the prior surface after a same-workspace spawn", async () => {
     const { exec, calls } = makeFocusLifecycleExec();
     const server = createLifecycleServer(exec);
