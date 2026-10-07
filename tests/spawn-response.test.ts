@@ -5,6 +5,8 @@ import {
 } from "../src/spawn-response.js";
 
 const base = {
+  ok: true,
+  spawn_state: "started",
   agent_id: "agent-1",
   surface_id: "surface:1",
   workspace_id: "workspace:1",
@@ -16,6 +18,21 @@ const base = {
 };
 
 describe("spawn response shaping", () => {
+  it("preserves pending_verify wait_for delivery guidance in the lean warning", () => {
+    const result = buildSpawnToolReturn({ ...base, spawn_state: "pending_verify",
+      boot_prompt_receipt: { delivery_id: "delivery-synthetic", submit_dispatched: true } });
+    expect(result.structuredContent.state).toBe("pending_verify");
+    expect(result.structuredContent.warning).toContain('wait_for({delivery_id:"delivery-synthetic"})');
+    expect(Object.keys(result.structuredContent)).toHaveLength(6);
+    expect(JSON.parse(result.content[0]!.text)).toEqual(result.structuredContent);
+  });
+
+  it("keeps failures intact without verbose", () => {
+    const failure = { ok: false, error: "launch failed", retry_count: 2,
+      contract_path: "/tmp/contract.md", transport: { stderr: "synthetic" } };
+    expect(shapeSpawnResponse(failure)).toBe(failure);
+  });
+
   it("omits healthy fresh-spawn health, non-coerced policy, and empty warnings", () => {
     const shaped = shapeSpawnResponse({
       ...base,
@@ -44,7 +61,7 @@ describe("spawn response shaping", () => {
       model_policy: { coerced: false, effective_model: "codex" },
     });
 
-    expect(shaped).toEqual({ ...base });
+    expect(shaped).toEqual({ ok: true, agent_id: "agent-1", surface_id: "surface:1", state: "started", delivered: false });
   });
 
   it("keeps only real health issues when a spawn is degraded", () => {
@@ -65,13 +82,15 @@ describe("spawn response shaping", () => {
       },
     });
 
-    expect(shaped.health).toEqual({
-      status: "degraded",
+    expect(shaped.warning).toBe("lead is missing");
+    expect(Object.keys(shaped)).toHaveLength(6);
+  });
+
+  it("keeps a real health warning even when its message is missing", () => {
+    const result = shapeSpawnResponse({ ...base, health: { status: "degraded",
       issue_codes: ["missing_managed_lead_agent_id"],
-      issues: ["lead is missing"],
-      issue_severities: { missing_managed_lead_agent_id: "degraded" },
-      recommended_actions: ["spawn_lead"],
-    });
+      issue_severities: { missing_managed_lead_agent_id: "degraded" } } });
+    expect(result.warning).toBe("missing_managed_lead_agent_id");
   });
 
   it("preserves issue-message alignment when an invalid code precedes a real issue", () => {
@@ -87,13 +106,10 @@ describe("spawn response shaping", () => {
       },
     });
 
-    expect(shaped.health).toMatchObject({
-      issue_codes: ["missing_managed_lead_agent_id"],
-      issues: ["lead is missing"],
-    });
+    expect(shaped.warning).toBe("lead is missing");
   });
 
-  it("includes a coerced model policy and non-empty warnings", () => {
+  it("combines actionable warnings in one field", () => {
     const policy = { coerced: true, effective_model: "codex" };
     const shaped = shapeSpawnResponse({
       ...base,
@@ -101,11 +117,11 @@ describe("spawn response shaping", () => {
       model_policy: policy,
     });
 
-    expect(shaped.warnings).toEqual(["model coerced"]);
-    expect(shaped.model_policy).toBe(policy);
+    expect(shaped.warning).toBe("model coerced");
+    expect(shaped).not.toHaveProperty("model_policy");
   });
 
-  it("keeps only essential worktree fields in lean mode", () => {
+  it("keeps worktree detail only in verbose mode", () => {
     const shaped = shapeSpawnResponse({
       ...base,
       worktree: {
@@ -119,13 +135,7 @@ describe("spawn response shaping", () => {
       },
     });
 
-    expect(shaped.worktree).toEqual({
-      path: "/tmp/cmuxlayer",
-      name: "lean-response",
-      branch: "feat/lean-response",
-      created: false,
-      reused: true,
-    });
+    expect(shaped).not.toHaveProperty("worktree");
   });
 
   it("returns the full legacy object unchanged in verbose mode", () => {
@@ -141,12 +151,12 @@ describe("spawn response shaping", () => {
     expect(shapeSpawnResponse(full, true)).toBe(full);
   });
 
-  it("keeps readiness recovery evidence in the lean spawn receipt", () => {
+  it("keeps readiness recovery evidence in verbose mode", () => {
     const shaped = shapeSpawnResponse({
       ...base,
       readiness_recovered: true,
       readiness_cleared: ["wenfnng"],
-    });
+    }, true);
 
     expect(shaped.readiness_recovered).toBe(true);
     expect(shaped.readiness_cleared).toEqual(["wenfnng"]);
@@ -164,14 +174,11 @@ describe("spawn response shaping", () => {
       boot_prompt_submit_verified: null,
     });
 
-    expect(noPrompt.boot_prompt_delivered).toBe(false);
+    expect(noPrompt.delivered).toBe(false);
     expect(noPrompt).not.toHaveProperty("boot_prompt_receipt");
     expect(noPrompt).not.toHaveProperty("boot_prompt_submit_verified");
-    expect(attempted).toMatchObject({
-      boot_prompt_delivered: false,
-      boot_prompt_receipt: { submit_verified: null },
-      boot_prompt_submit_verified: null,
-    });
+    expect(attempted).toEqual(noPrompt); // Both lack proof of delivery.
+    expect(shapeSpawnResponse({ ...base, boot_prompt_delivered: true }).delivered).toBe(true);
   });
 
   it("names false/null boot submission as partial in lean and verbose receipts", () => {
@@ -181,17 +188,21 @@ describe("spawn response shaping", () => {
           spawn_state: "boot_unsubmitted",
           boot_prompt_receipt: { submit_verified } }, verbose, "legacy", undefined,
           { callerOwnsBootDraft: true });
-        expect(result.structuredContent).toMatchObject({ ok: true,
-          spawn_state: "boot_unsubmitted", agent_id: "agent-1",
-          surface_id: "surface:1", workspace_id: "workspace:1",
-          next_action: expect.stringContaining('read_screen({surface:"surface:1"})'),
-          boot_prompt_receipt: { submit_verified } });
-        expect(result.structuredContent.next_action).toContain('send_to({mode:"key"');
-        expect(result.structuredContent.next_action).toMatch(/Boot prompt submission was not verified/i);
-        expect(result.structuredContent.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
-        expect(result.content[0]!.text).toMatch(
-          /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
-        );
+        expect(result.structuredContent).toMatchObject(verbose
+          ? { ok: true, spawn_state: "boot_unsubmitted", agent_id: "agent-1",
+              surface_id: "surface:1", workspace_id: "workspace:1",
+              boot_prompt_receipt: { submit_verified } }
+          : { ok: true, state: "boot_unsubmitted", agent_id: "agent-1",
+              surface_id: "surface:1", delivered: false });
+        const action = result.structuredContent[verbose ? "next_action" : "warning"] as string;
+        expect(action).toContain('read_screen({surface:"surface:1"})');
+        expect(action).toContain('send_to({mode:"key"');
+        expect(action).toMatch(/Boot prompt submission was not verified/i);
+        expect(action).not.toMatch(/retr(?:y|ies).*exhausted/i);
+        if (!verbose) {
+          expect(Object.keys(result.structuredContent)).toHaveLength(6);
+          expect(JSON.parse(result.content[0]!.text)).toEqual(result.structuredContent);
+        }
       }
     }
   });
@@ -200,12 +211,12 @@ describe("spawn response shaping", () => {
     const unsubmitted = { ...base, spawn_state: "boot_unsubmitted",
       boot_prompt_receipt: { typed: true, submit_dispatched: false, submit_verified: false } };
     const owned = buildSpawnToolReturn(unsubmitted, false, undefined, undefined,
-      { callerOwnsBootDraft: true }).structuredContent.next_action as string;
+      { callerOwnsBootDraft: true }).structuredContent.warning as string;
     expect(owned).toContain('send_to({mode:"key",surface:"surface:1",text:"return"})');
     expect(owned).toMatch(/within 5 minutes/);
     for (const opts of [undefined, { callerOwnsBootDraft: false }]) {
       const unowned = buildSpawnToolReturn(unsubmitted, false, undefined, undefined, opts)
-        .structuredContent.next_action as string;
+        .structuredContent.warning as string;
       expect(unowned).not.toContain('mode:"key"');
       expect(unowned).toContain('read_screen({surface:"surface:1"})');
       expect(unowned).toMatch(/report boot_unsubmitted .* never re-spawn/);
@@ -229,8 +240,8 @@ describe("spawn response shaping", () => {
       },
     });
 
-    expect(result.structuredContent.next_action).toMatch(/Return was not dispatched/i);
-    expect(result.structuredContent.next_action).not.toMatch(/retries.*exhausted/i);
+    expect(result.structuredContent.warning).toMatch(/Return was not dispatched/i);
+    expect(result.structuredContent.warning).not.toMatch(/retries.*exhausted/i);
   });
 
   it.each([
@@ -250,12 +261,35 @@ describe("spawn response shaping", () => {
     expect(result.content[0]!.text).toBe(legacyText);
   });
 
+  it("does not let alternate lean data bypass the field cap", () => {
+    const result = buildSpawnToolReturn(base, false, undefined,
+      { workspace_id: "workspace:2", report_path: "/tmp/report", timings: {} });
+    expect(Object.keys(result.structuredContent).sort()).toEqual(
+      ["ok", "agent_id", "surface_id", "state", "delivered"].sort());
+  });
+
+  it("preserves a compact receipt through the registration projection", () => {
+    const compact = shapeSpawnResponse({ ...base, boot_prompt_delivered: true,
+      warning: "focus restore failed" });
+    expect(shapeSpawnResponse(compact)).toEqual(compact);
+  });
+
+  it.each(["duplicate", "duplicate | model coerced"])(
+    "deduplicates warning sources including the resume aggregate %s",
+    (warning) => {
+      const result = buildSpawnToolReturn({ ...base, warning,
+        warnings: ["duplicate", "model coerced"], duplicate_spawn_warning: "duplicate" });
+      expect(result.structuredContent.warning).toBe("duplicate | model coerced");
+      expect(Object.keys(result.structuredContent)).toHaveLength(6);
+    },
+  );
+
   it("uses the same lean payload for text and structured content", () => {
     const result = buildSpawnToolReturn({ ...base, retry_count: 0 });
 
     expect(JSON.parse(result.content[0]!.text)).toEqual(
       result.structuredContent,
     );
-    expect(result.structuredContent.retry_count).toBe(0);
+    expect(result.structuredContent).not.toHaveProperty("retry_count");
   });
 });

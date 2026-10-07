@@ -679,9 +679,10 @@ export class DeliveryQueue {
     if (!agent || agent.boot_instance_id !== receipt.boot_instance_id ||
       !["booting", "ready", "working"].includes(agent.state)) return;
     if (agent.boot_prompt_pending !== false || agent.prompt_delivered !== true ||
-      agent.submit_verified !== true) {
+      agent.submit_verified !== true || agent.boot_verify_started_at != null) {
       agent = this.stateMgr.updateRecord(agent.agent_id, {
         boot_prompt_pending: false,
+        boot_verify_started_at: null,
         prompt_delivered: true,
         submit_verified: true,
       });

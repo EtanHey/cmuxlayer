@@ -1188,6 +1188,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       opts.pre_return_screen,
     );
     let sawNewInterrupt = false;
+    let stableBootClearedPolls = 0;
     const screenIncludesSubmittedText = (screenText: string): boolean =>
       screenContainsCompleteSubmittedText(screenText, opts.text);
 
@@ -1391,6 +1392,29 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         bootFrameAdvanced &&
         !hasPendingSubmitEvidence &&
         (codexScreen ? codexSubmitEchoed : screenIncludesSubmittedText(snapshot.text));
+      // A boot starts from an observed owned payload in an idle composer.
+      // Codex can scroll the committed row away before the first read. Accept
+      // a fresh turn or a stable cleared composer, while retaining the paste
+      // burst, pending draft, queue and interrupt guards used by normal sends.
+      const bootComposerHasResidue = Boolean(composerInput?.trim());
+      const bootTurnStarted = opts.source_event === "boot_prompt" &&
+        bootFrameAdvanced && !hasPendingSubmitEvidence && !bootComposerHasResidue &&
+        isSubmitVerifiedStatus(snapshot.parsed.status) &&
+        !isSubmitVerifiedStatus(parseScreen(opts.pre_return_screen ?? "").status);
+      const bootComposerCleared = opts.source_event === "boot_prompt" &&
+        bootFrameIsMonotonic && composerInput !== null &&
+        !bootComposerHasResidue && !hasPendingSubmitEvidence &&
+        !bootConsumptionRefuted && !sawNewInterrupt &&
+        screenHasAnyAgentIdentity(snapshot.text, snapshot.parsed);
+      stableBootClearedPolls = bootComposerCleared ? stableBootClearedPolls + 1 : 0;
+      if (!sawNewInterrupt && !bootConsumptionRefuted &&
+          !bootHasTranscriptEcho && !codexSubmitEchoed &&
+          !cursorShowsSubmittedResponse && !bootHasTokenOrCostDelta &&
+          (bootTurnStarted || stableBootClearedPolls >= 2)) {
+        return { submit_verified: true,
+          submit_evidence: bootTurnStarted ? "status_only" : "cleared_composer",
+          submit_verification_reason: null, retry_count: retryCount, delivery: "submitted" };
+      }
       const interruptedHasTranscriptEcho =
         bootHasTranscriptEcho ||
         (opts.require_attributable_submit_evidence !== true &&
@@ -1480,6 +1504,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.source_event === "dispatch_nudge" ||
           opts.source_event === "report_to_parent" ||
           opts.source_event === "boot_prompt") &&
+        (opts.source_event !== "boot_prompt" || !isSubmitVerifiedStatus(snapshot.parsed.status)) &&
         hasPendingSubmitEvidence &&
         (screenCli === "codex" ||
           (screenCli === "claude" && ownsExactClaudeDraft(opts, snapshot)));
@@ -3641,6 +3666,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   const deliverBootPrompt = async (opts: {
     surface: string;
+    delivery_id?: string;
     stableSurfaceIdentity?: string | null;
     workspace?: string;
     cli?: CliType;
@@ -3796,6 +3822,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: true,
             source_event: "boot_prompt",
+            delivery_id: opts.delivery_id ?? randomUUID(),
             // #793: key the boot draft's owner token by the stable UUID, the
             // same key a UUID-routed send_to key-Return looks it up by.
             stableSurfaceIdentity: opts.stableSurfaceIdentity,

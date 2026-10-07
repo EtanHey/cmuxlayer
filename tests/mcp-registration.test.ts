@@ -34,13 +34,18 @@ describe("installToolRegistration (mcp/registration.ts)", () => {
     expect(result.structuredContent?.receipts).toEqual([expect.objectContaining({ agent_id: "delivered", submitted: true }), skipped]);
     expect(result.structuredContent).not.toHaveProperty("transport");
   });
-  it.each(["cli", "socket"])("round 1 lean spawn retains %s transport warnings", async mode => {
+  it.each(["cli", "socket"])("compact spawn reserves %s transport diagnostics for verbose", async mode => {
     const { server, registration } = install({ getTransportHealth: () => ({ mode, degraded: true, current_socket_path: "/tmp/synthetic.sock" }) });
-    server.tool("spawn_agent", "synthetic spawn", async () => ok({ agent_id: "synthetic", warnings: ["existing"] }));
+    server.tool("spawn_agent", "synthetic spawn", async () => ok({ agent_id: "synthetic", surface_id: "surface:test", warnings: ["existing"] }));
     const handler = registration.toolHandlersByName.get("spawn_agent");
     if (!handler) throw new Error("spawn handler missing");
     const result = await handler({}, {});
-    expect(result.structuredContent?.warnings).toEqual(["existing", mode === "cli" ? "cli_fallback_active" : "socket_degraded"]);
+    expect(result.structuredContent).toEqual({ ok: true, agent_id: "synthetic",
+      surface_id: "surface:test", state: "started", delivered: false, warning: "existing" });
+    const verbose = await handler({ verbose: true }, {});
+    expect(verbose.structuredContent?.warnings).toEqual(
+      ["existing", mode === "cli" ? "cli_fallback_active" : "socket_degraded"]);
+    expect(verbose.structuredContent).toHaveProperty("transport", mode);
     expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
     expect(result.structuredContent).not.toHaveProperty("transport");
   });
