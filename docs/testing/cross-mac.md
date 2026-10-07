@@ -40,6 +40,14 @@ shim runs through that same shell and requires separate `--model` and
 `gpt-6-luna` argv elements. A mismatch is `PRECONDITION_ABSENT` with the observed
 model arguments (other arguments are redacted). The shim uses a temporary
 private CODEX_HOME and does not modify target launcher or auth files.
+M1 scenario working directories live in mode-0700 run directories under
+`$HOME/.cache/cmuxlayer-xmac/`, inside the existing trusted HOME. Teardown removes
+only the recorded run directory after checking its identity and parents.
+Launch readiness observes new run-owned surfaces while spawn is pending. Trust,
+update, and other numbered launch pickers stop the batch promptly with
+`PRECONDITION_ABSENT` (`launch_overlay`) and the first overlay lines. The harness
+sends no overlay input, adds no trust entry, and uses no trust override. A trust
+prompt inside HOME remains an absent precondition; further replay requires GO.
 
 `--prepare-driver` archives the committed harness SHA, transfers tracked code
 only through fixed-alias `ssh m1`, and builds inside a new mode-0700 temporary

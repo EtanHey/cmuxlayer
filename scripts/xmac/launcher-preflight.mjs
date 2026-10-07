@@ -30,7 +30,7 @@ export async function checkLauncherRoots(repo, clis, { sourcePath = join(homedir
   return result;
 }
 export function launchFailureRows(selected, opts, sha, phase, evidencePath, error) {
-  const absent = error.precondition?.status === "PRECONDITION_ABSENT" && ["launcher_root", "launcher_argv"].includes(error.precondition.kind);
+  const absent = error.precondition?.status === "PRECONDITION_ABSENT" && ["launcher_root", "launcher_argv", "launch_overlay"].includes(error.precondition.kind);
   return selected.map(scenario => ({ id: scenario.id, host: opts.host, cmux: opts.cmux === "prod" ? "prod-0.64.22" : "nightly", cmux_version: null,
     cmuxlayer_sha: sha, phase, status: absent ? "PRECONDITION_ABSENT" : "FAIL", failure_kind: "infrastructure", expected_defect: false,
     notes: [String(error)], precondition: absent ? error.precondition : null, evidence_path: evidencePath }));
