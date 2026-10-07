@@ -21,10 +21,11 @@ it("fails launch immediately on an independent raw overlay frame even when spawn
 it("puts M1 scenario repo below the authenticated home with mode0700 and removes only its recorded run directory", () => {
   const home = mkdtempSync(join(tmpdir(), "xmac-home-test-")), scratch = mkdtempSync(join(tmpdir(), "xmac-scratch-test-"));
   try {
-    const run = createScenarioRepo({ HOME: home }, { target: "m1-gate" }, scratch, "fixture-run");
-    expect(run.path).toBe(join(realpathSync(home), ".cache/cmuxlayer-xmac/fixture-run/repo"));
+    const lock = join(scratch, "harness.lock"); writeFileSync(lock, "fixture-run", { mode: 0o600, flag: "wx" });
+    const run = createScenarioRepo({ HOME: home }, { target: "m1-gate" }, scratch, "fixture-run", lock);
+    expect(run.path).toBe(join(realpathSync(home), ".cache/cmuxlayer-xmac/repo"));
     expect(statSync(run.path).mode & 0o777).toBe(0o700); run.close();
-    expect(existsSync(join(home, ".cache/cmuxlayer-xmac/fixture-run"))).toBe(false); expect(existsSync(scratch)).toBe(true);
+    expect(existsSync(run.run_dir)).toBe(false); expect(existsSync(scratch)).toBe(true);
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(scratch, { recursive: true, force: true }); }
 });
 it("checks a raw frame even if the product reports ready before the screen RPC completes", async () => {
@@ -35,10 +36,11 @@ it("checks a raw frame even if the product reports ready before the screen RPC c
 it("refuses symlink parents and a replaced run directory without deleting unrelated data", () => {
   const home = mkdtempSync(join(tmpdir(), "xmac-home-test-")), foreign = mkdtempSync(join(tmpdir(), "xmac-foreign-test-"));
   try {
+    const lock = join(foreign, "harness.lock"); writeFileSync(lock, "fixture-run", { mode: 0o600, flag: "wx" });
     writeFileSync(join(foreign, "sentinel"), "retain"); symlinkSync(foreign, join(home, ".cache"));
-    expect(() => createScenarioRepo({ HOME: home }, { target: "m1-gate" }, foreign, "fixture-run")).toThrow("unsafe");
+    expect(() => createScenarioRepo({ HOME: home }, { target: "m1-gate" }, foreign, "fixture-run", lock)).toThrow("unsafe");
     rmSync(join(home, ".cache"));
-    const run = createScenarioRepo({ HOME: home }, { target: "m1-gate" }, foreign, "fixture-run");
+    const run = createScenarioRepo({ HOME: home }, { target: "m1-gate" }, foreign, "fixture-run", lock);
     renameSync(run.run_dir, run.run_dir + "-original"); mkdirSync(run.run_dir, { mode: 0o700 });
     expect(() => run.close()).toThrow("identity changed");
     expect(readFileSync(join(foreign, "sentinel"), "utf8")).toBe("retain"); expect(existsSync(run.run_dir)).toBe(true);
