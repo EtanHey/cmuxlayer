@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, realpathSync, statSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -12,7 +12,8 @@ import { privateBuild, targetOptions, shellQuote, distDigest } from "./target.mj
 import { runCodexResolutionProbe, observeProbeOwner } from "./startup-probe.mjs";
 import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { attestFixtureProcess, fileDigest } from "./fixture-attestation.mjs";
-import { productionSnapshot, productionChanges } from "./production-guard.mjs";
+import { productionChanges } from "./production-guard.mjs";
+import { bindAccountHome, accountProductionSnapshot } from "./account-home.mjs";
 
 export const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603fc575638bd531aeb97e48038149aad78c", fix: "64260ba34ba8ee98fa7de3b71566387cecb12280", specimen: "#1007 / composer-overlays/codex-boot.txt" },
@@ -21,7 +22,7 @@ export const rows = [
 ];
 export const requiredRunnerFiles = ["scripts/xmac/m1-ratchet.mjs", "scripts/xmac/fixture-launchers.mjs", "scripts/xmac/fixture-attestation.mjs",
   "scripts/ratchet-fixture-tui.mjs", "scripts/soak-runtime.mjs", "scripts/soak-app-guard.mjs", "scripts/cmux-session-guard.mjs",
-  "scripts/xmac/production-guard.mjs", "scripts/xmac/fixture-shell.mjs", "scripts/xmac/app-admission.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
+  "scripts/xmac/production-guard.mjs", "scripts/xmac/account-home.mjs", "scripts/xmac/fixture-shell.mjs", "scripts/xmac/app-admission.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
 export function validateWrapperConfig(cfg) {
   if (cfg.nativeApproved !== true || !/^[a-f0-9]{40}$/.test(cfg.runnerSha) || cfg.host && cfg.host !== "m1" ||
       cfg.cmux && cfg.cmux !== "prod" || rows.some(row => cfg.runnerSha === row.fix || cfg.runnerSha === row.bug) ||
@@ -70,10 +71,10 @@ export function checkProductRegistry(build, env) {
     if(!refused) throw Error('product permits raw launcher fallback');`;
   execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", timeout: 10000 });
 }
-async function sample(cfg, row, product, outputRoot) {
-  const before = productionSnapshot(homedir()), token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
+async function sample(cfg, row, product, outputRoot, accountHome) {
+  const before = accountProductionSnapshot(accountHome), token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
   const owned = [], reads = [], sample = { sha: product.sha, runner_sha: cfg.runnerSha, token, behavior_status: "FAIL", attribution_status: "FAIL", expected_defect: false,
-    lock_sha256: fileDigest(join(product.root, "bun.lock")), dist_digest: product.distDigest };
+    account_home: accountHome, production_before: before, lock_sha256: fileDigest(join(product.root, "bun.lock")), dist_digest: product.distDigest };
   let runtime, client;
   try {
     const opts = targetOptions({ ...cfg.options, host: "m1", cmux: "prod", repo: "ratchet", driverRoot: cfg.driverRoot, driverSha: cfg.runnerSha,
@@ -126,13 +127,17 @@ async function sample(cfg, row, product, outputRoot) {
     catch (error) { sample.error = String(error); }
     try {
       const local = [token, runtime?.receipt.launch_token, runtime?.receipt.scratch, runtime?.env.CMUX_SOCKET_PATH, runtime?.env.CMUXLAYER_DAEMON_SOCKET, ...owned].filter(Boolean);
-      const violations = productionChanges(before, productionSnapshot(homedir()), local, owned, reads);
+      const after = accountProductionSnapshot(accountHome);
+      const violations = productionChanges(before, after, local, owned, reads);
       const path = runtime && join(runtime.env.CMUXLAYER_STATE_DIR, "daemon.log");
       const bytes = path && existsSync(path) ? statSync(path).size : 0;
       const positive = { path, bytes, status: bytes > 0 ? "PASS" : "FAIL" };
-      sample.attribution = { reads, violations, positive_control: positive };
+      sample.attribution = { account_home: accountHome, before, after, reads, violations, positive_control: positive };
       sample.attribution_status = !violations.length && positive.status === "PASS" ? "PASS" : "FAIL";
-    } catch (error) { sample.error = String(error); }
+    } catch (error) {
+      sample.error = String(error);
+      sample.attribution = { account_home: accountHome, before, snapshot_error: String(error) };
+    }
     if (sample.error) { sample.behavior_status = "FAIL"; sample.expected_defect = false; }
     writeFileSync(join(outputRoot, `${row.fixture}-${product.sha}.json`), JSON.stringify(sample, null, 2) + "\n", { mode: 0o600 });
   }
@@ -147,7 +152,8 @@ export async function runNative(cfg) {
     const path = join(harness.root, file);
     if (realpathSync(path) !== path || fileDigest(path) !== hash) throw new Error("reviewed runner source hash mismatch");
   }
-  const productionBefore = productionSnapshot(homedir());
+  const accountHome = bindAccountHome();
+  const productionBefore = accountProductionSnapshot(accountHome);
   for (const row of rows) for (const product of Object.values(cfg.products[row.name])) {
     const build = privateBuild(product.root, product.sha), probe = mkdtempSync(join(harness.root, "registry-probe-"));
     if (distDigest(join(build.root, "dist")) !== product.distDigest) throw new Error("compiled product digest mismatch");
@@ -157,18 +163,24 @@ export async function runNative(cfg) {
     checkProductRegistry(build, env); // Every historical control must refuse raw fallback BEFORE any app action.
   }
   const outputRoot = join(harness.root, "evidence", `m1-ratchet-${randomUUID()}`); mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
-  const receipt = { status: "FAIL", runner_sha: cfg.runnerSha, runner_files: cfg.runnerFiles, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
+  const receipt = { status: "FAIL", runner_sha: cfg.runnerSha, account_home: accountHome, production_before: productionBefore, runner_files: cfg.runnerFiles, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
   for (const row of rows) {
     const pair = cfg.products[row.name];
-    const baseline = await sample(cfg, row, pair.baseline, outputRoot), candidate = await sample(cfg, row, pair.candidate, outputRoot);
+    const baseline = await sample(cfg, row, pair.baseline, outputRoot, accountHome), candidate = await sample(cfg, row, pair.candidate, outputRoot, accountHome);
     receipt.rows.push({ ...row, baseline, candidate, ...combineProof(baseline, candidate) });
   }
   receipt.status = receipt.rows.every(row => row.status === "PASS") ? "PASS" : "FAIL";
   const reads = [], samples = receipt.rows.flatMap(row => [row.baseline, row.candidate]);
   const ids = samples.flatMap(sample => [sample.token, sample.result?.agent_id, sample.lifecycle?.launch_token, sample.lifecycle?.scratch]).filter(Boolean);
-  const violations = productionChanges(productionBefore, productionSnapshot(homedir()), [...ids, "/tmp/cmux-soak-stable.sock"], samples.map(sample => sample.result?.agent_id).filter(Boolean), reads);
-  receipt.production_guard = { reads, violations, status: violations.length ? "FAIL" : "PASS" };
-  if (violations.length) receipt.status = "FAIL";
+  try {
+    const productionAfter = accountProductionSnapshot(accountHome);
+    const violations = productionChanges(productionBefore, productionAfter, [...ids, "/tmp/cmux-soak-stable.sock"], samples.map(sample => sample.result?.agent_id).filter(Boolean), reads);
+    receipt.production_guard = { account_home: accountHome, before: productionBefore, after: productionAfter, reads, violations, status: violations.length ? "FAIL" : "PASS" };
+    if (violations.length) receipt.status = "FAIL";
+  } catch (error) {
+    receipt.production_guard = { account_home: accountHome, before: productionBefore, reads, snapshot_error: String(error), status: "FAIL" };
+    receipt.status = "FAIL";
+  }
   writeFileSync(join(outputRoot, "result.json"), JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 });
   return { ...receipt, outputRoot };
 }
