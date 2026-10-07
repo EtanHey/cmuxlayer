@@ -3808,6 +3808,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       restoreFocusAfterRender,
       spawnDeliveryWorkspace,
       stateMgr,
+      surfaceObserverEpochProvider: () => context.surfaceObserverEpoch,
       watchRegistryPath,
       withSurfaceWrite,
     });

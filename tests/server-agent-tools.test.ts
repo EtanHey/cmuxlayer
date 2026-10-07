@@ -1,3 +1,4 @@
+import * as privateNet from "node:net";
 import "./helpers/pin-long-inline-cap.js";
 /**
  * Integration tests for the agent lifecycle MCP tools registered in server.ts.
@@ -15159,6 +15160,136 @@ describe("auto-focus discipline (focus target before split, restore after render
     }) as unknown as ExecFn;
     return { exec, calls };
   }
+
+
+  it.each([
+    "stable-null", "null-to-epoch", "epoch-to-null", "reconnect-refreuse",
+    "acquisition-reconnect", "restoration-reconnect", "restoration-refreuse",
+    "cleanup-reconnect", "cleanup-refreuse", "primary-failure", "user-move",
+    "stable-uuid", "stable-ref-only", "stable-new-surface", "reconnect-new-surface", "explicit-false", "split-anchor-reconnect",
+  ] as const)("bare creation ownership ratchet %s", async phase => {
+    const socketDir = mkdtempSync(join(tmpdir(), "cmux-bare-ownership-"));
+    const paths = [join(socketDir, "one.sock"), join(socketDir, "two.sock")];
+    const sockets = paths.map(() => privateNet.createServer());
+    await Promise.all(sockets.map((socket, i) => new Promise<void>((resolve, reject) => {
+      socket.once("error", reject); socket.listen(paths[i], resolve);
+    })));
+    try {
+      const uuidA = "11111111-1111-4111-8111-111111111111";
+      const uuidB = "22222222-2222-4222-8222-222222222222";
+      const unavailable = phase === "stable-null" || phase === "null-to-epoch";
+      const failure = ["primary-failure", "cleanup-reconnect", "cleanup-refreuse"].includes(phase);
+      const base = makeFocusLifecycleExec({ runtimeMode: phase === "explicit-false" ? "cold" : "unsupported",
+        focusCreatedSurfaceFails: failure,
+        ...(phase === "user-move" ? { moveFocusDuringReadinessTo: {
+          workspace: "workspace:1", surface: "surface:user-click",
+        } } : {}),
+      });
+      let client: CmuxClient;
+      let created = false, focused = false, changed = false, insideSplit = false;
+      let occupant = uuidA;
+      const rows: Array<{ args: string[]; path: string | null; stale: boolean }> = [];
+      const replaceObserver = () => { client.setEnv({ CMUX_SOCKET_PATH: paths[1] }); changed = true; occupant = uuidB; };
+      const exec = vi.fn(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+        if (!changed && created && args.includes("identify")) {
+          if (phase === "epoch-to-null") { client.setEnv({}); changed = true; }
+          if (phase === "null-to-epoch") { client.setEnv({ CMUX_SOCKET_PATH: paths[0] }); changed = true; }
+          if (phase === "acquisition-reconnect" || (focused && phase === "restoration-reconnect")) replaceObserver();
+          if (focused && phase === "restoration-refreuse") { occupant = uuidB; changed = true; }
+        }
+        if (phase === "split-anchor-reconnect" && insideSplit && args.includes("list-pane-surfaces")) replaceObserver();
+        const row = { args: [...args], path: env?.CMUX_SOCKET_PATH ?? null,
+          stale: (created || args.includes("new-split") || args.includes("new-surface")) &&
+            (client.currentSocketPath() !== paths[0] || occupant !== uuidA) };
+        rows.push(row);
+        // The synthetic backend accepts the returned UUID as the same surface;
+        // original focus fixtures continue to observe canonical ref handles.
+        const translated = args.map(a => a.replaceAll(uuidA, "surface:new"));
+        let result;
+        try { result = await base.exec(cmd, translated); }
+        catch (error) {
+          if (args.includes("surface.focus") && failure) {
+            if (phase === "cleanup-reconnect") replaceObserver();
+            if (phase === "cleanup-refreuse") { occupant = uuidB; changed = true; }
+          }
+          throw error;
+        }
+        if (args.includes("surface.focus") && translated.at(-1)?.includes("surface:new")) focused = true;
+        if (args.includes("new-split") || args.includes("new-surface")) {
+          created = true;
+          if (phase !== "stable-ref-only") result = { ...result,
+            stdout: JSON.stringify({ ...JSON.parse(result.stdout), surface_id: uuidA }) };
+          if (phase === "reconnect-refreuse" || phase === "reconnect-new-surface") replaceObserver();
+        }
+        if (!created && phase.endsWith("new-surface")) {
+          if (args.includes("list-panes")) {
+            const data = JSON.parse(result.stdout);
+            data.panes.push({ ref: "pane:vacant-worker", index: 1, focused: false,
+              surface_count: 0, surface_refs: [] });
+            result = { ...result, stdout: JSON.stringify(data) };
+          }
+          if (args.includes("list-pane-surfaces") && args.includes("pane:vacant-worker")) {
+            result = { ...result, stdout: JSON.stringify({ workspace_ref: "workspace:2",
+              pane_ref: "pane:vacant-worker", surfaces: [] }) };
+          }
+        }
+        if (created && args.includes("list-pane-surfaces")) {
+          const data = JSON.parse(result.stdout);
+          data.surfaces = data.surfaces.map((surface: any) => surface.ref === "surface:new"
+            ? { ...surface, id: occupant } : surface);
+          result = { ...result, stdout: JSON.stringify(data) };
+        }
+        return result;
+      }) as unknown as ExecFn;
+      client = new CmuxClient({ exec, bin: "cmux", env: unavailable ? {} : { CMUX_SOCKET_PATH: paths[0] } });
+      const newSplit = client.newSplit.bind(client);
+      client.newSplit = async (direction, options) => {
+        insideSplit = true;
+        try { return await newSplit(direction, options); }
+        finally { insideSplit = false; }
+      };
+      const opts: CreateServerOptions = { client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null };
+      // Exercise production defaults, not createTrackedServer's fake epoch.
+      const context = createServerContext(opts); serverContexts.push(context);
+      expect(context.surfaceObserverEpoch === null).toBe(unavailable);
+      const server = createServer({ ...opts, context });
+      const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+        type: "terminal", workspace: "workspace:2", boot_prompt_timeout_ms: 100,
+        ...(phase === "explicit-false" ? { focus: false } : {}),
+      }, {}));
+      const mutations = rows.filter(row => row.args.some(a =>
+        ["new-split", "new-surface", "select-workspace", "surface.focus", "close-surface", "send-key"].includes(a)));
+      expect(mutations.filter(row => row.stale), JSON.stringify({ result, rows })).toEqual([]);
+      const closes = rows.filter(row => row.args.includes("close-surface"));
+      const restores = rows.filter(row => row.args.includes("surface.focus") && row.args.at(-1)?.includes("surface:origin"));
+      if (phase === "split-anchor-reconnect") expect(changed).toBe(false);
+      if (phase.endsWith("new-surface")) expect(rows.some(row => row.args.includes("new-surface"))).toBe(true);
+      if (phase === "explicit-false") expect(rows.filter(row => row.args.includes("surface.focus") || row.args.includes("select-workspace"))).toEqual([]);
+      if (unavailable) {
+        expect(result.ok).toBe(false);
+        expect(created).toBe(false);
+        expect(mutations).toEqual([]);
+      } else if (["epoch-to-null", "reconnect-refreuse", "reconnect-new-surface", "acquisition-reconnect"].includes(phase)) {
+        expect(result.ok).toBe(false); expect(changed).toBe(true);
+        expect(closes).toEqual([]); expect(restores).toEqual([]);
+      } else if (failure) {
+        expect(result.ok).toBe(false); expect(result.error).toBe("cmux rpc failed: created surface focus failed");
+        expect(closes.length).toBe(phase === "primary-failure" ? 1 : 0);
+        if (closes.length) expect(closes[0].args).toContain(uuidA);
+      } else {
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+        expect(restores.length).toBe(["user-move", "restoration-reconnect", "restoration-refreuse", "explicit-false"].includes(phase) ? 0 : 1);
+        expect(closes).toEqual([]);
+      }
+    } finally {
+      // Stop synthetic lifecycle reads before removing their owned socket nodes.
+      await Promise.allSettled(serverContexts.map(context => context.lifecycleStartPromise ?? Promise.resolve()));
+      for (const context of serverContexts.splice(0)) context.dispose();
+      await Promise.all(sockets.map(socket => new Promise<void>(resolve => socket.close(() => resolve()))));
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
 
   it.each([
     { mode: "empty", workspace: "workspace:2", focusNeeded: true },

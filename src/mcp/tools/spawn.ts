@@ -40,7 +40,11 @@ import {
   launcherNameForCli,
 } from "../../layout-policy.js";
 import { reposEquivalent } from "../../repo-workspace.js";
-import { healthTopologyOverrides } from "../../surface-topology.js";
+import {
+  captureSurfaceObserverEpoch,
+  healthTopologyOverrides,
+  isSurfaceObserverEpochCurrent,
+} from "../../surface-topology.js";
 import { rollbackPreparedWorktree, type McpProfile } from "../../worktree.js";
 import { hasInlinePrompt } from "../../delivery/composer-screen.js";
 import {
@@ -141,6 +145,7 @@ export interface SpawnAgentToolDeps {
   restoreFocusAfterRender: (lease: FocusRestoreLease | null, surface: string | undefined, workspace: string | undefined, opts?: { waitForReady?: boolean; }) => Promise<string | null>;
   spawnDeliveryWorkspace: (result: { workspace_id?: string; }, fallback?: string) => string | undefined;
   stateMgr: StateManager;
+  surfaceObserverEpochProvider?: () => string | null | undefined;
   watchRegistryPath: string;
   withSurfaceWrite: DeliveryEngine["withSurfaceWrite"];
 }
@@ -187,6 +192,7 @@ export function registerSpawnAgentTool(
     restoreFocusAfterRender,
     spawnDeliveryWorkspace,
     stateMgr,
+    surfaceObserverEpochProvider,
     watchRegistryPath,
     withSurfaceWrite,
   } = deps;
@@ -605,17 +611,36 @@ export function registerSpawnAgentTool(
               ? callerWorkspace
               : (requestedWorkspace ?? callerWorkspace),
           );
+          // Bind the entire bare creation lifetime, not a later focus lookup.
+          // Omitted library providers retain their existing opt-out semantics;
+          // an explicitly configured but unavailable observer never owns refs.
+          const creationEpoch = captureSurfaceObserverEpoch(surfaceObserverEpochProvider);
+          const assertCreationObserver = (): void => {
+            if (!isSurfaceObserverEpochCurrent(creationEpoch, surfaceObserverEpochProvider)) {
+              throw new Error("Bare terminal creation observer changed or became unavailable; refusing stale surface refs");
+            }
+          };
+          assertCreationObserver();
           const workspace = createsWorkspace
             ? (await client.createWorkspace(requestedWorkspace!.slice(4)))
                 .workspace
             : (requestedWorkspace ?? callerWorkspace);
+          assertCreationObserver();
           const panes = await client.listPanes({ workspace });
+          assertCreationObserver();
           const placement = chooseAgentSpawnPlacement(
             panes.panes,
             [],
             new Set<string>(),
             { role: "worker" },
           );
+          // Use the same guarded pane observation for a known split anchor.
+          // Otherwise the connector can reconnect during its own anchor read
+          // before issuing creation with the old workspace/pane refs.
+          const splitPane = placement.kind === "split"
+            ? panes.panes.find(pane => pane.ref === placement.pane)
+            : undefined;
+          const splitAnchor = splitPane?.selected_surface_ref ?? splitPane?.surface_refs[0];
           // Preserve terminal creation's former schema default; resume alone
           // needs to distinguish omitted focus from an explicit false.
           const created =
@@ -627,40 +652,69 @@ export function registerSpawnAgentTool(
                   type: "terminal",
                 })
               : await client.newSplit(placement.direction, {
+                  ...(splitAnchor ? { surface: splitAnchor } : {}),
                   ...(workspace ? { workspace } : {}),
                   ...(placement.pane ? { pane: placement.pane } : {}),
                   focus: args.focus ?? false,
                 });
           creation.record({
             surface_id: created.surface,
+            surface_uuid: created.surface_id,
             workspace_id: created.workspace ?? workspace ?? null,
           });
+          const createdWorkspace = created.workspace ?? workspace;
+          const createdTarget = created.surface_id ?? created.surface;
+          const assertCreatedTerminal = async (): Promise<void> => {
+            assertCreationObserver();
+            if (created.surface_id) {
+              const topology = await collectSurfaceTopology(createdWorkspace);
+              assertCreationObserver();
+              if (!topology?.complete ||
+                  topology.surfaceIdByRef.get(created.surface)?.toLowerCase() !== created.surface_id.toLowerCase() ||
+                  (createdWorkspace && topology.workspaceBySurface.get(created.surface) !== createdWorkspace)) {
+                throw new Error("Created bare terminal UUID binding changed or became unavailable; refusing stale surface refs");
+              }
+            }
+          };
           let terminalFocusLease: FocusRestoreLease | null = null;
           let runtimeInitialization: string;
           try {
+            await assertCreatedTerminal();
             runtimeInitialization = await initializeNewSurfaceRuntime(
               {
                 listTerminalMetadata: client.listSurfaceRuntimeMetadata
                   ? () => client.listSurfaceRuntimeMetadata!()
                   : () => client.listTerminalMetadata(),
-                sendKey: (surface, key, options) => client.sendKey(surface, key, options),
+                sendKey: async (_surface, key, options) => {
+                  await assertCreatedTerminal();
+                  return client.sendKey(createdTarget, key, options);
+                },
               },
               created.surface,
               created.workspace ?? workspace,
               args.boot_prompt_timeout_ms,
-              undefined,
+              assertCreatedTerminal,
               created.surface_id,
               args.focus === false ? undefined : async () => {
-                terminalFocusLease = await focusTargetBeforeSplit(created.workspace ?? workspace, args.focus !== true);
-                await client.focusSurface(created.surface, { workspace: created.workspace ?? workspace });
+                terminalFocusLease = await focusTargetBeforeSplit(createdWorkspace, args.focus !== true, undefined, assertCreatedTerminal);
+                await assertCreatedTerminal();
+                await client.focusSurface(createdTarget, { workspace: createdWorkspace });
+                await assertCreatedTerminal();
                 terminalFocusLease = await capturePostCreationFocus(terminalFocusLease, { surface: created.surface, workspace: created.workspace ?? workspace });
               },
             );
             if (runtimeInitialization === "unsupported") throw new SurfaceRuntimeNotStartedError(created.surface);
           } catch (error) {
             await restoreFocusAfterRender(terminalFocusLease, undefined, created.workspace ?? workspace, { waitForReady: false });
+            // A lost creation binding cannot authorize cleanup of a reused ref.
+            // Keep the original initialization error even when cleanup is unsafe.
             try {
-              await client.closeSurface(created.surface, { workspace: created.workspace ?? workspace });
+              await assertCreatedTerminal();
+            } catch {
+              throw error;
+            }
+            try {
+              await client.closeSurface(createdTarget, { workspace: createdWorkspace });
             } catch (cleanupError) {
               const primary = error instanceof Error ? error : new Error(String(error));
               primary.message += `. Failed to close launcher surface ${created.surface}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
@@ -670,16 +724,18 @@ export function registerSpawnAgentTool(
           }
           await restoreFocusAfterRender(terminalFocusLease, created.surface, created.workspace ?? workspace);
           if (args.title) {
-            await client.renameTab(created.surface, args.title, {
+            await assertCreatedTerminal();
+            await client.renameTab(createdTarget, args.title, {
               workspace: created.workspace ?? workspace,
             });
           }
           const cwdReceipt = args.cwd
             ? await withSurfaceWrite(
                 created.surface,
-                () =>
-                  executeDeliveryEngine({
-                    surface: created.surface,
+                async () => {
+                  await assertCreatedTerminal();
+                  return executeDeliveryEngine({
+                    surface: createdTarget,
                     workspace: created.workspace ?? workspace,
                     chunks: [`cd -- ${shellQuote(args.cwd!)}`],
                     chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
@@ -687,7 +743,8 @@ export function registerSpawnAgentTool(
                     press_enter: true,
                     source_event: "send_command",
                     verify_submit: false,
-                  }),
+                  });
+                },
                 {
                   toolName: "spawn_agent",
                   workspace: created.workspace ?? workspace,
