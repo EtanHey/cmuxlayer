@@ -21,15 +21,15 @@ type Boot = Payload & { agent_id: string; surface_id: string; contract_path: str
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function setup(hidden = false, wrapped = false) {
+async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = "codex") {
   const root = mkdtempSync(join(tmpdir(), "spawn-contract-once-"));
   const pane = { draft: "", submitted: [] as string[], inputs: [] as string[],
-    returns: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, beforeReturn: undefined as (() => void) | undefined };
+    returns: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, lostAck: false, onReturn: undefined as (() => void) | undefined, overlay: "", beforeReturn: undefined as (() => void) | undefined };
   const render = (text: string) => wrapped ? text.match(/.{1,96}/g)?.join("\n  ") ?? "" : text;
-  const frame = () => ["OpenAI Codex (v0.157.0)",
-    ...pane.submitted.map(text => `› ${render(text)}`),
-    ...(pane.submitted.length ? ["Working (1s • esc to interrupt)"] : []),
-    `› ${pane.hidden ? "" : render(pane.draft)}`,
+  const frame = () => [cli === "claude" ? "Claude Code" : "OpenAI Codex (v0.157.0)",
+    ...pane.submitted.map(text => `${cli === "claude" ? "⏺" : "›"} ${render(text)}`),
+    ...(pane.submitted.length ? [cli === "claude" ? "✻ Working… (esc to interrupt)" : "Working (1s • esc to interrupt)"] : []),
+    `${cli === "claude" ? "❯" : "›"} ${pane.hidden ? "" : render(pane.draft)}`,
     "  GPT-6.1-Sol high · ~/Gits/cmuxlayer", "  ? for shortcuts · 82% left"].join("\n");
   const response = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "" });
   const typeInput = (text: string) => {
@@ -43,12 +43,14 @@ async function setup(hidden = false, wrapped = false) {
     if (args.includes("read-screen")) {
       if (args.includes("surface:lead") || args.includes(LEAD)) return response({ surface: "surface:lead", text: "OpenAI Codex\nWorking (1s • esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer", lines: 20, scrollback_used: false });
       if (pane.beforeReturn) pane.baselineRead = true;
-      const text = pane.initializing-- > 0 ? "OpenAI Codex\nInitializing…\nWorking (1s • esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer" : frame();
+      const text = pane.overlay || (pane.initializing-- > 0 ? "OpenAI Codex\nInitializing…\nWorking (1s • esc to interrupt)\n›\n  GPT-6.1-Sol high · ~/Gits/cmuxlayer" : frame());
       return response({ surface: "surface:new", text, lines: 20, scrollback_used: false });
     }
     if (args.includes("send-key") && args.includes("return")) {
+      pane.onReturn?.();
       pane.returns++;
       if (!pane.hidden && pane.draft) { pane.submitted.push(pane.draft); pane.draft = ""; }
+      if (pane.lostAck) { pane.lostAck = false; throw new Error("synthetic Return ACK lost"); }
       return response({});
     }
     if (args.includes("set-buffer")) { pane.paste = String(args.at(-1)); return response({}); }
@@ -91,8 +93,8 @@ async function setup(hidden = false, wrapped = false) {
     return result.structuredContent as Payload;
   };
   const spawn = async (args: Payload = {}) => {
-    const boot = await call("spawn_agent", { verbose: true, repo: "brainlayer", cli: "codex", effort: "high",
-      model: "gpt-6.1-sol", workspace: "workspace:1", prompt: brief, boot_prompt_timeout_ms: 800, ...args }) as Boot;
+    const boot = await call("spawn_agent", { verbose: true, repo: "brainlayer", cli, ...(cli === "codex" ? { effort: "high" } : {}),
+      model: cli === "claude" ? "sonnet" : "gpt-6.1-sol", workspace: "workspace:1", prompt: brief, boot_prompt_timeout_ms: 800, ...args }) as Boot;
     expect(boot.ok, JSON.stringify(boot)).toBe(true);
     return boot;
   };
@@ -156,5 +158,114 @@ describe("P0 one owned spawn contract submission", () => {
     expect(sent.ok, JSON.stringify(sent)).toBe(false);
     expect(t.pane.returns).toBe(before);
     expect(t.pane.submitted).toEqual([]);
+    expect(await t.call("wait_for", { delivery_id: boot.boot_prompt_receipt.delivery_id, timeout_ms: 1 }))
+      .toMatchObject({ terminal: true, submit_dispatched: false, delivery_state: "typed" });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: false, prompt_delivered: false });
+  });
+});
+
+// R1 reviewer fault: identical consume-then-throw transport and original-ID
+// wait assertion. Explicit raw-key retry is outside this passive verifier test.
+describe("R1 original boot receipt at recovery dispatch", () => {
+  it("an explicit owned retry preserves the original recovery attribution", async () => {
+    const t=await setup(true); const boot=await t.spawn(); const id=boot.boot_prompt_receipt.delivery_id;
+    t.pane.hidden=false; t.pane.lostAck=true; t.pane.onReturn=()=>{ t.pane.hidden=true; t.pane.onReturn=undefined; };
+    expect((await t.key(boot.surface_id)).ok).toBe(false); const original=t.engine.getDeliveryReceipt(id)!;
+    t.context.deliveryPreTypeScreens.set(id,"later unrelated observation"); t.pane.hidden=false;
+    expect((await t.key(boot.surface_id)).ok).toBe(true);
+    expect(t.engine.getDeliveryReceipt(id)?.boot_recovery_context).toEqual(original.boot_recovery_context);
+    expect(t.pane.inputs).toHaveLength(1); expect(t.pane.submitted).toHaveLength(1);
+  });
+  it("Claude lost ACK needs fresh attributable evidence on the original ID", async () => {
+    const t=await setup(true,false,"claude"); const boot=await t.spawn(); t.pane.submitted.push("previous unrelated turn");
+    const text=t.pane.draft; t.pane.hidden=false; t.pane.lostAck=true;
+    t.pane.onReturn=()=>{ t.pane.overlay="Claude Code\n⏺ previous unrelated turn\n✻ Working… (esc to interrupt)\n❯ "; };
+    expect((await t.key(boot.surface_id)).ok).toBe(false); const before=t.pane.returns; await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1})).toMatchObject({ terminal:false, submit_verified:null });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending:true, prompt_delivered:false });
+    t.pane.overlay=""; const pending=t.engine.getDeliveryReceipt(boot.boot_prompt_receipt.delivery_id)!; t.engine.resolveDelivery({...pending,verify_last_attempt_at:null}); await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for",{delivery_id:pending.delivery_id,timeout_ms:1})).toMatchObject({ terminal:true,submit_verified:true });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending:false,prompt_delivered:true });
+    expect(t.pane.inputs).toEqual([text]); expect(t.pane.submitted).toEqual(["previous unrelated turn",text]); expect(t.pane.returns).toBe(before);
+  });
+  it("an uncertain recovery cannot settle boot from Working without attributable evidence", async () => {
+    const t=await setup(true); const boot=await t.spawn(); t.pane.hidden=false; t.pane.lostAck=true;
+    t.pane.onReturn=()=>{ t.pane.overlay="OpenAI Codex (v0.157.0)\nWorking (1s • esc to interrupt)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer"; };
+    await t.key(boot.surface_id); const before=t.pane.returns; await t.engine.runSweep();
+    expect(await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1})).toMatchObject({ terminal:false, submit_verified:null });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending:true, prompt_delivered:false });
+    expect(t.pane.returns).toBe(before);
+  });
+  it("lost recovery Return ACK keeps the original receipt truthful and does not replay", async () => {
+    const t=await setup(true); const boot=await t.spawn(); const text=t.pane.draft; t.pane.hidden=false; t.pane.lostAck=true;
+    const sent=await t.key(boot.surface_id); expect(sent.ok).toBe(false);
+    expect(t.pane.submitted).toEqual([text]); const before=t.pane.returns;
+    const receipt=await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1});
+    expect(receipt.submit_dispatched).not.toBe(false);
+    expect(receipt).toMatchObject({ delivery_id: boot.boot_prompt_receipt.delivery_id, terminal: false, delivery_state: "pending_verify", submit_attempted: true, submit_verified: null });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: true, prompt_delivered: false });
+    // Persisted recovery context survives loss of the in-memory baseline.
+    t.context.deliveryPreTypeScreens.delete(boot.boot_prompt_receipt.delivery_id);
+    await t.engine.verifyPendingDeliveries();
+    const settled=await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1});
+    expect(settled).toMatchObject({ delivery_id: boot.boot_prompt_receipt.delivery_id, terminal: true, submit_dispatched: true, submit_verified: true, delivery_state: "submitted" });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ state: "working", boot_prompt_pending: false, prompt_delivered: true, submit_verified: true });
+    expect(t.pane.returns).toBe(before); expect(t.pane.inputs).toEqual([text]);
+  });
+
+  it.each([false, true])("persists uncertainty before ACK; no evidence stays nonterminal without replay (lost=%s)", async lost => {
+    const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+    const originalBaseline = t.context.deliveryPreTypeScreens.get(id);
+    const bootBaseline = t.engine.getAgentState(boot.agent_id)!.boot_pre_type_screen;
+    const text = t.pane.draft; t.pane.hidden = false; t.pane.lostAck = lost;
+    t.pane.onReturn = () => {
+      expect(t.engine.getDeliveryReceipt(id)).toMatchObject({ delivery_state: "pending_verify", terminal: false, press_enter: true, typed: true, submit_verified: null, text });
+      expect(t.engine.getDeliveryReceipt(id)?.boot_recovery_context).toMatchObject({ caller_agent_id: "lead-seat", surface_uuid: CHILD, workspace_id: "workspace:1", cli_session_id: null, pre_type_screen: originalBaseline });
+      expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: true, prompt_delivered: false });
+      t.pane.overlay = "OpenAI Codex (v0.157.0)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer\n  ? for shortcuts · 82% left";
+    };
+    const sent = await t.key(boot.surface_id); expect(sent.ok).toBe(!lost);
+    const before = t.pane.returns;
+    const captured = t.engine.stateMgr.updateRecord(boot.agent_id, { cli_session_id: "11111111-2222-4333-8444-555555555555" });
+    t.engine.getRegistry().set(captured.agent_id, captured);
+    for (let i=0;i<2;i++) await t.engine.verifyPendingDeliveries();
+    expect(t.engine.getDeliveryReceipt(id)?.boot_recovery_context?.cli_session_id).toBe(captured.cli_session_id);
+    expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 }))
+      .toMatchObject({ delivery_id: id, terminal: false, delivery_state: "pending_verify", submit_verified: null, submit_attempted: true });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: true, prompt_delivered: false });
+    expect(t.context.deliveryPreTypeScreens.get(id)).toBe(originalBaseline);
+    expect(t.engine.getAgentState(boot.agent_id)!.boot_pre_type_screen).toBe(bootBaseline);
+    expect(t.pane.returns).toBe(before); expect(t.pane.inputs).toEqual([text]); expect(t.pane.submitted).toEqual([text]);
+    t.pane.overlay = "";
+    // Reset only the verifier read throttle, never the deadline or evidence.
+    const pending = t.engine.getDeliveryReceipt(id)!;
+    t.engine.resolveDelivery({ ...pending, verify_last_attempt_at: null });
+    await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 })).toMatchObject({ terminal: true, submit_verified: true });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true });
+    expect(t.pane.returns).toBe(before);
+  });
+
+  it.each(["session", "boot", "uuid"])("passive confirmation refuses replaced %s identity", async fault => {
+    const t=await setup(true); const boot=await t.spawn(); t.pane.hidden=false; t.pane.lostAck=true;
+    const pinned=t.engine.stateMgr.updateRecord(boot.agent_id, { cli_session_id: "99999999-8888-4777-8666-555555555555" });
+    t.engine.getRegistry().set(pinned.agent_id, pinned);
+    await t.key(boot.surface_id); const before=t.pane.returns;
+    const record=t.engine.stateMgr.updateRecord(boot.agent_id, fault === "session" ? { cli_session_id: "11111111-2222-4333-8444-555555555555" }
+      : fault === "boot" ? { boot_instance_id: "replacement" } : { surface_uuid: LEAD });
+    t.engine.getRegistry().set(record.agent_id, record);
+    await t.engine.verifyPendingDeliveries();
+    expect(await t.call("wait_for", { delivery_id: boot.boot_prompt_receipt.delivery_id, timeout_ms: 1 })).toMatchObject({ terminal: false, submit_verified: null });
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+    expect(t.pane.returns).toBe(before);
+  });
+
+  it.each([false, true])("refuses suffix-only contract without changing original receipt (wrapped=%s)", async wrapped => {
+    const t=await setup(true, wrapped); const boot=await t.spawn();
+    t.pane.draft=`cmuxlayer contract for ${boot.agent_id}: Read and follow ${boot.contract_path}`;
+    t.pane.hidden=false; const before=t.pane.returns;
+    expect((await t.key(boot.surface_id)).ok).toBe(false);
+    expect(t.pane.returns).toBe(before); expect(t.pane.submitted).toEqual([]);
+    expect(await t.call("wait_for",{delivery_id:boot.boot_prompt_receipt.delivery_id,timeout_ms:1})).toMatchObject({ terminal: true, submit_dispatched: false, delivery_state: "typed" });
   });
 });

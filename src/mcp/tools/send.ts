@@ -281,7 +281,9 @@ export function registerWaitForTool(
               delivery_state: receipt.delivery_state,
               typed: receipt.typed === true,
               submit_attempted: receipt.press_enter,
-              submit_dispatched: receipt.submit_dispatched === true,
+              // Owned recovery can lose its ACK; unknown dispatch is not false.
+              submit_dispatched: receipt.boot_recovery_context
+                ? receipt.submit_dispatched : receipt.submit_dispatched === true,
               submit_verified: receipt.submit_verified,
               retry_count: receipt.retry_count,
               rpc_methods: receipt.rpc_methods ?? [],

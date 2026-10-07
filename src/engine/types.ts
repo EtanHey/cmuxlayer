@@ -102,6 +102,14 @@ export interface AgentDeliveryReceipt {
   boot_recovery?: boolean;
   /** The exact boot generation whose pointer the receipt verifies. */
   boot_instance_id?: string;
+  /** Owned recovery's immutable attribution, captured before awaiting its ACK. */
+  boot_recovery_context?: {
+    caller_agent_id: string | null;
+    surface_uuid: string | null;
+    workspace_id: string | null;
+    cli_session_id: string | null;
+    pre_type_screen: string | null;
+  };
   /** Durable one-time completion after the matching boot state is repaired. */
   boot_recovery_finalized_at?: string;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */

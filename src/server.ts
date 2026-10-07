@@ -3593,6 +3593,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (!agent) {
           return { outcome: "pending" as const, reason: "target_gone" };
         }
+        const binding = receipt.boot_recovery_context;
+        // Match boot draft ownership's one-time null-to-first-session capture.
+        if (binding && binding.surface_uuid === (agent.surface_uuid ?? null) &&
+            binding.workspace_id === (agent.workspace_id ?? null) &&
+            binding.cli_session_id === null && agent.cli_session_id) binding.cli_session_id = agent.cli_session_id;
+        if (binding && ((agent.surface_uuid ?? null) !== binding.surface_uuid ||
+            (agent.workspace_id ?? null) !== binding.workspace_id ||
+            (agent.cli_session_id ?? null) !== binding.cli_session_id)) {
+          return { outcome: "pending" as const, reason: "boot_recovery_identity_changed" };
+        }
         const resolvedSnapshot =
           snapshot === undefined
             ? await readParsedSurface(
@@ -3644,7 +3654,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           }
           return { outcome: "pending" as const };
         }
-        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const baseline = receipt.boot_recovery_context?.pre_type_screen ?? context.deliveryPreTypeScreens.get(receipt.delivery_id);
         const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
         // An older identical Tab queue is not this delivery. Its continued
         // presence must not hide a fresh committed steer at the tool boundary.
@@ -3687,7 +3697,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         // receipt stays pending until its deadline.
         if (cli === "codex" || agent.cli === "codex") {
           const verified = !pending && codexScreenShowsSubmit(
-            context.deliveryPreTypeScreens.get(receipt.delivery_id), resolvedSnapshot.text, receipt.text,
+            baseline, resolvedSnapshot.text, receipt.text,
           );
           if (verified) settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
           return verified ? { outcome: "delivered" as const, submit_verified: true } : { outcome: "pending" as const };
@@ -3702,7 +3712,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             correlationTail,
           ) &&
           !pending;
-        const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
+        const relayProof = binding ? baseline != null && composerCleared && !pending &&
+          screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)
+          : receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
           (screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)) ||
           (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
         ));

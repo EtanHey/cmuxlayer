@@ -686,6 +686,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string,
     beforeMutation?: () => Promise<void>,
     maxAttempts = SEND_INPUT_RETRY_ATTEMPTS,
+    onDispatch?: () => void,
   ): Promise<DeliveryRpcMethod | null> => {
     let attempt = 0;
     let lastError: unknown;
@@ -695,6 +696,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await beforeMutation?.();
         const dispatchKey = typeof key === "string" ? key : await key();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        onDispatch?.();
         await client.sendKey(surface, dispatchKey, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -917,6 +919,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       record.boot_prompt_pending !== true || record.prompt_delivered === true) return;
     let updated = stateMgr.updateRecord(agentId, {
       boot_prompt_pending: false,
+      boot_verify_started_at: null,
       prompt_delivered: true,
       submit_verified: true,
     });
@@ -1990,9 +1993,43 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
       }
-      // An ignored or ambiguous key leaves ownership available for retry.
-      // sendKeyWithRetry throws when nothing reached the pane, so reaching the
-      // next line is the dispatch evidence the receipt was missing (#484).
+      // ACK loss cannot distinguish a consumed Return from a failed transport.
+      // Preserve owned boot uncertainty at dispatch, after all refusal gates.
+      const recoveringBootIds: string[] = [];
+      const rememberOwnedBootDispatch = () => {
+        if (!ownedBoot || !owner) return;
+        const engine = context.lifecycleSweepEngine;
+        const boot = stateMgr.readState(ownedBoot.agentId);
+        if (!engine || !boot || boot.boot_instance_id !== ownedBoot.instanceId ||
+            !bootTokenInstanceCurrent(owner) || !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity)) {
+          throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
+        }
+        for (const id of owner.deliveryIds ?? []) {
+          const original = engine.getDeliveryReceipt(id);
+          if (original?.boot_instance_id !== ownedBoot.instanceId || original.agent_id !== ownedBoot.agentId || original.text !== ownedSubmitText) continue;
+          const binding = original.boot_recovery_context;
+          if (binding && (binding.caller_agent_id !== caller || binding.surface_uuid !== (boot.surface_uuid ?? null) ||
+              binding.workspace_id !== (boot.workspace_id ?? null) || binding.cli_session_id !== null && binding.cli_session_id !== boot.cli_session_id)) {
+            throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline!.parsed);
+          }
+          engine.acceptPendingVerify({
+            delivery_id: id, agent_id: original.agent_id, text: original.text,
+            source_event: "boot_prompt", typed: true, press_enter: true,
+            retry_count: original.retry_count, rpc_methods: original.rpc_methods,
+            boot_recovery: true, boot_instance_id: ownedBoot.instanceId,
+            boot_recovery_context: original.boot_recovery_context ?? {
+              caller_agent_id: caller ?? null, surface_uuid: boot.surface_uuid ?? null,
+              workspace_id: boot.workspace_id ?? null, cli_session_id: boot.cli_session_id ?? null,
+              pre_type_screen: deliveryPreTypeScreens.get(id) ?? boot.boot_pre_type_screen ?? null,
+            },
+          });
+          recoveringBootIds.push(id);
+        }
+        if (recoveringBootIds.length) {
+          const updated = stateMgr.updateRecord(boot.agent_id, { boot_submit_dispatched: true, boot_verify_started_at: new Date().toISOString() });
+          engine.getRegistry().set(updated.agent_id, updated);
+        }
+      };
       // #879: re-check the bound boot instance at the last pre-mutation hook,
       // like the pointer path's assertOwnedPointerBeforeReturn. A newer boot
       // installed after the ownership check must not receive this Return.
@@ -2038,10 +2075,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.workspace,
           beforeKeyMutation,
           submitAttempted ? 1 : SEND_INPUT_RETRY_ATTEMPTS,
+          rememberOwnedBootDispatch,
         ),
       );
       submitDispatched = submitAttempted;
       if (keyRpcMethod) rpcMethods.add(keyRpcMethod);
+      for (const id of recoveringBootIds) {
+        const receipt = context.lifecycleSweepEngine!.getDeliveryReceipt(id)!;
+        context.lifecycleSweepEngine!.acceptPendingVerify({ ...receipt, submit_dispatched: true,
+          rpc_methods: [...new Set([...(receipt.rpc_methods ?? []), ...rpcMethods])] });
+      }
       const verification =
         submitAttempted && opts.verify_submit
           ? await timeDeliveryPhase(opts.timings, "verify", () =>

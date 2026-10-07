@@ -66,6 +66,7 @@ function snapshotDeliveryReceipt(
   const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
     ...snapshot,
+    ...(receipt.boot_recovery_context ? { boot_recovery_context: { ...receipt.boot_recovery_context } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -419,6 +420,7 @@ export class DeliveryQueue {
     submit_dispatched?: boolean;
     boot_recovery?: boolean;
     boot_instance_id?: string;
+    boot_recovery_context?: AgentDeliveryReceipt["boot_recovery_context"];
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -562,6 +564,7 @@ export class DeliveryQueue {
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = observation.submit_verified ?? true;
+          if (receipt.boot_recovery_context && receipt.submit_verified === true) receipt.submit_dispatched = true;
           receipt.error = null;
           receipt.needs_attention = false;
           receipt.attention_reason = null;
