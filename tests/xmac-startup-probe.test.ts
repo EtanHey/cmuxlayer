@@ -291,3 +291,90 @@ it("checks ownership immediately before and after every awaited RPC", async () =
   }
   expect(f.runtime.receipt.startup_probe.closed).toBe(true);
 });
+
+it("F1 retains untrusted creation UUIDs after immediate owner drift without another RPC", async () => {
+  const f = fixture(), original = f.deps.rpc;
+  f.deps.rpc = async (...args: Parameters<typeof original>) => {
+    const value = await original(...args);
+    if (args[1] === "workspace.create") { f.owner.socketIdentity = "replaced"; return { ...value, secret: "DO_NOT_CAPTURE" }; }
+    return value;
+  };
+  await expect(run(f)).rejects.toThrow("ownership changed");
+  expect(f.runtime.receipt.startup_probe).toMatchObject({ window_id: window, workspace_id: workspace, surface_id: surface,
+    creation_observation: { trusted: false, provenance: "post_await_ownership_failed" }, close: "pending", diagnostics: { status: "FAIL" } });
+  expect(f.calls.map(c => c.method)).toEqual(["workspace.create"]);
+  expect(JSON.stringify(f.runtime.receipt)).not.toContain("DO_NOT_CAPTURE");
+});
+
+it("F1 marks a normal create reply trusted only after owner and complete identity validation", async () => {
+  const f = fixture(); await run(f);
+  expect(f.runtime.receipt.startup_probe.creation_observation).toEqual({ trusted: true, provenance: "owner_and_create_identity_validated" });
+  expect(f.calls.filter(c => c.method === "workspace.close")).toHaveLength(1);
+});
+
+it.each(["invalid_surface", "anchor_reused"])("F1 retains selected UUIDs untrusted for %s with no cleanup", async failure => {
+  const f = fixture(), original = f.deps.rpc;
+  f.deps.rpc = async (...args: Parameters<typeof original>) => {
+    const value = await original(...args);
+    return args[1] === "workspace.create" ? { ...value, ...(failure === "invalid_surface" ? { surface_id: "invalid" } : { workspace_id: f.runtime.workspace }) } : value;
+  };
+  await expect(run(f)).rejects.toThrow("identity missing or anchor reused");
+  const probe = f.runtime.receipt.startup_probe;
+  expect(probe.window_id).toBe(window);
+  expect(probe.workspace_id).toBe(failure === "anchor_reused" ? f.runtime.workspace : workspace);
+  expect(probe.surface_id).toBe(failure === "invalid_surface" ? undefined : surface);
+  expect(probe.creation_observation).toEqual({ trusted: false, provenance: "create_identity_unvalidated" });
+  expect(f.calls.map(c => c.method)).toEqual(["workspace.create"]);
+});
+
+it("F1 preserves the primary rejected create error with owner drift and invents no observed UUIDs", async () => {
+  const f = fixture(), primary = new Error("create rejected first");
+  f.deps.rpc = async (_socket, method, params) => { f.calls.push({ method, params }); f.owner.socketIdentity = "replaced"; throw primary; };
+  await expect(run(f)).rejects.toBe(primary);
+  const probe = f.runtime.receipt.startup_probe;
+  expect(probe.window_id).toBeUndefined(); expect(probe.creation_observation).toBeUndefined();
+  expect(probe.diagnostics.ownership_error.value).toContain("ownership changed");
+  expect(probe.diagnostics.error.value).toBe(String(primary));
+  expect(f.calls.map(c => c.method)).toEqual(["workspace.create"]);
+});
+
+// Fixed literal prefixes make byte-boundary expectations independent of the decoder.
+const bomReady = `\ufeff\nXMAC_CODEX_${token}:/scratch/bin/codex\nXMAC_IDLE_${token}\n`;
+const prefixAt = (base: string, bytes: number) => base + "x".repeat(bytes - Buffer.byteLength(base));
+it.each(["below", "at", "partial"])("F2 preserves BOM and complete raw/success prefixes %s the cap", async boundary => {
+  const prefix = boundary === "below" ? bomReady : prefixAt(bomReady, boundary === "at" ? 2048 : 2047);
+  const text = prefix + (boundary === "partial" ? "א" : "");
+  const f = fixture(), original = f.deps.rpc;
+  f.deps.rpc = async (...args: Parameters<typeof original>) => args[1] === "surface.read_text" ? { text } : original(...args);
+  await run(f);
+  const receipt = f.runtime.receipt, facts = { original_bytes: Buffer.byteLength(text), stored_bytes: Buffer.byteLength(prefix), truncated: boundary === "partial" };
+  expect(receipt.startup_probe.diagnostics.attempts[0].text).toEqual({ value: prefix, ...facts });
+  expect(receipt.codex_probe_screen).toBe(prefix); expect(receipt.codex_probe_screen_capture).toEqual(facts);
+  expect(receipt.startup_probe.diagnostics.total_text_bytes).toBe(Buffer.byteLength(prefix));
+  expect(receipt.startup_probe.closed).toBe(true);
+});
+
+it.each(["below", "at", "partial"])("F2 preserves BOM health prefixes %s the cap and accurate field clipping", async boundary => {
+  const prefix = boundary === "below" ? "\ufeffunavailable" : prefixAt("\ufeff", boundary === "at" ? 64 : 63);
+  const value = prefix + (boundary === "partial" ? "🙂" : "");
+  const f = fixture(), original = f.deps.rpc;
+  f.deps.rpc = async (...args: Parameters<typeof original>) => args[1] === "surface.health" ?
+    { workspace_id: workspace, surfaces: [{ id: surface, socket_binding: value, render_health: value }] } : original(...args);
+  await expect(run(f)).rejects.toThrow("bound rendering idle prompt");
+  const health = f.runtime.receipt.startup_probe.diagnostics.attempts[0].health;
+  expect(health.surface).toMatchObject({ socket_binding: prefix, render_health: prefix });
+  expect(health.truncated_fields).toEqual(boundary === "partial" ? ["socket_binding", "render_health"] : []);
+  expect(f.calls.some(c => c.method === "workspace.close")).toBe(false);
+});
+
+it.each(["below", "at", "partial"])("F2 preserves BOM error prefixes %s the cap and the primary thrown value", async boundary => {
+  const prefix = boundary === "below" ? "\ufeffread failed" : prefixAt("\ufeff", boundary === "at" ? 512 : 511);
+  const primary = prefix + (boundary === "partial" ? "א" : "");
+  const f = fixture(), original = f.deps.rpc;
+  f.deps.rpc = async (...args: Parameters<typeof original>) => { if (args[1] === "surface.read_text") throw primary; return original(...args); };
+  await expect(run(f)).rejects.toBe(primary);
+  const diag = f.runtime.receipt.startup_probe.diagnostics;
+  const expected = { value: prefix, original_bytes: Buffer.byteLength(primary), stored_bytes: Buffer.byteLength(prefix), truncated: boundary === "partial" };
+  expect(diag.error).toEqual(expected); expect(diag.attempts[0].read_error).toEqual(expected);
+  expect(f.calls.some(c => c.method === "workspace.close")).toBe(false);
+});

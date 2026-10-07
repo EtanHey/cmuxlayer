@@ -10,7 +10,7 @@ const DIAGNOSTIC_LIMITS = Object.freeze({ max_attempts: 100, text_per_attempt_by
 // Decode a complete UTF-8 prefix; never trim prompt framing or split a code point.
 function boundedText(value, limit) {
   const bytes = Buffer.from(value, "utf8");
-  const text = new TextDecoder().decode(bytes.subarray(0, limit), { stream: true });
+  const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(0, limit), { stream: true });
   const stored = Buffer.byteLength(text);
   return { value: text, original_bytes: bytes.length, stored_bytes: stored, truncated: stored < bytes.length };
 }
@@ -76,14 +76,30 @@ export async function runCodexResolutionProbe(runtime, wrapper = null,
       ownershipFailed = true; diagnostics.ownership_error = diagnosticError(error); throw error;
     }
   };
+  // Observations are diagnostics only; dispatch always uses the validated local reply.
+  const retainCreateObservation = (value, provenance) => {
+    receipt.startup_probe.creation_observation = { trusted: false, provenance };
+    try {
+      for (const key of ["window_id", "workspace_id", "surface_id"]) {
+        const observed = value?.[key];
+        if (uuid(observed)) receipt.startup_probe[key] = observed;
+      }
+    } catch (error) { diagnostics.create_observation_error = diagnosticError(error); }
+  };
   // Revalidate after every await, including a rejection. The first RPC error wins.
   const guardedRequest = async (method, params) => {
     assertOwner();
     let value, failed = false, primary;
     try { value = await request(socket, method, params); }
     catch (error) { failed = true; primary = error; }
-    try { assertOwner(); } catch (error) { if (!failed) throw error; }
+    try { assertOwner(); } catch (error) {
+      if (!failed) {
+        if (method === "workspace.create") retainCreateObservation(value, "post_await_ownership_failed");
+        throw error;
+      }
+    }
     if (failed) throw primary;
+    if (method === "workspace.create") retainCreateObservation(value, "create_identity_unvalidated");
     return value;
   };
   try {
@@ -97,6 +113,7 @@ export async function runCodexResolutionProbe(runtime, wrapper = null,
     const probe = { workspace_id: created.workspace_id, surface_id: created.surface_id }, window = created.window_id;
     if (!uuid(window) || !uuid(probe.workspace_id) || !uuid(probe.surface_id) || probe.workspace_id === receipt.workspace?.workspace_id) throw new Error("startup probe created identity missing or anchor reused");
     Object.assign(receipt.startup_probe, probe, { window_id: window, owner: { ...owner, socketIdentity } });
+    receipt.startup_probe.creation_observation = { trusted: true, provenance: "owner_and_create_identity_validated" };
     let settled = false;
     for (let attempt = 0; attempt < DIAGNOSTIC_LIMITS.max_attempts; attempt++) {
       const evidence = { attempt: attempt + 1, started_at_ms: now(), predicates: {
