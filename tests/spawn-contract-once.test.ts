@@ -24,7 +24,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = "codex") {
   const root = mkdtempSync(join(tmpdir(), "spawn-contract-once-"));
   const pane = { draft: "", submitted: [] as string[], inputs: [] as string[],
-    returns: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, lostAck: false, onReturn: undefined as (() => void | Promise<void>) | undefined, onRead: undefined as (() => void | Promise<void>) | undefined, overlay: "", beforeReturn: undefined as (() => void) | undefined };
+    returns: 0, returnInvocations: 0, hidden, created: false, paste: "", initializing: 2, caller: LEAD, baselineRead: false, lostAck: false, onReturn: undefined as (() => void | Promise<void>) | undefined, onRead: undefined as (() => void | Promise<void>) | undefined, overlay: "", beforeReturn: undefined as (() => void) | undefined };
   const render = (text: string) => wrapped ? text.match(/.{1,96}/g)?.join("\n  ") ?? "" : text;
   const frame = () => [cli === "claude" ? "Claude Code" : "OpenAI Codex (v0.157.0)",
     ...pane.submitted.map(text => `${cli === "claude" ? "⏺" : "›"} ${render(text)}`),
@@ -48,6 +48,7 @@ async function setup(hidden = false, wrapped = false, cli: "codex" | "claude" = 
       return response({ surface: "surface:new", text, lines: 20, scrollback_used: false });
     }
     if (args.includes("send-key") && args.includes("return")) {
+      pane.returnInvocations++;
       await pane.onReturn?.();
       pane.returns++;
       if (!pane.hidden && pane.draft) { pane.submitted.push(pane.draft); pane.draft = ""; }
@@ -418,4 +419,202 @@ describe("Immutable recovery baseline and legacy receipts", () => {
     expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 })).toMatchObject({ terminal: present, submit_verified: present ? true : null });
     expect(t.pane.returns).toBe(before); expect(t.pane.inputs).toEqual([text]);
   });
+});
+
+// Each injection runs through real SDK/MCP dispatch and real receipt storage.
+describe("Predispatch persistence ratchet", () => {
+  const faults = ["first-receipt", "later-receipt", "boot-record"] as const;
+  it.each(faults.flatMap(fault => [false, true].map(afterWrite => ({ fault, afterWrite }))))(
+    "$fault afterWrite=$afterWrite never passively verifies an unsent Return", async ({ fault, afterWrite }) => {
+      const t = await setup(true); const boot = await t.spawn();
+      const id = boot.boot_prompt_receipt.delivery_id; const text = t.pane.draft;
+      const queue = (t.engine as unknown as { deliveryQueue: {
+        deliveryReceipts: Map<string, import("../src/engine/types.js").AgentDeliveryReceipt>;
+        persistDeliveryReceipts(): void;
+      } }).deliveryQueue;
+      if (fault === "later-receipt") {
+        const original = t.engine.getDeliveryReceipt(id)!;
+        const second = `${id}-second-owned`;
+        t.engine.resolveDelivery({ ...original, delivery_id: second });
+        const owner = [...t.context.typedDraftOwners.values()][0]!;
+        owner.texts = [text, text]; owner.deliveryIds = [id, second];
+      }
+      const ids = t.engine.listDeliveryReceipts().map(r => r.delivery_id).sort();
+      const originals = t.engine.listDeliveryReceipts();
+      const beforeReturns = t.pane.returns;
+      const beforeInvocations = t.pane.returnInvocations;
+      const primary = `synthetic ${fault} ${afterWrite ? "after-atomic-write" : "before-write"} failure`;
+      let failed = false, writes = 0;
+      let injection: ReturnType<typeof vi.spyOn>;
+      if (fault === "boot-record") {
+        const update = t.engine.stateMgr.updateRecord.bind(t.engine.stateMgr);
+        injection = vi.spyOn(t.engine.stateMgr, "updateRecord").mockImplementation((agent, fields) => {
+          if (!failed && agent === boot.agent_id && fields.boot_submit_dispatched === true) {
+            failed = true; if (afterWrite) update(agent, fields); throw new Error(primary);
+          }
+          return update(agent, fields);
+        });
+      } else {
+        const persist = queue.persistDeliveryReceipts.bind(queue);
+        injection = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+          const pending = [...queue.deliveryReceipts.values()].some(r => r.boot_recovery && r.delivery_state === "pending_verify");
+          if (!failed && pending && ++writes === (fault === "later-receipt" ? 2 : 1)) {
+            failed = true; if (afterWrite) persist(); throw new Error(primary);
+          }
+          persist();
+        });
+      }
+      t.pane.hidden = false;
+      let sent: Payload;
+      try { sent = await t.key(boot.surface_id); } finally { injection.mockRestore(); }
+      const afterFailure = t.engine.listDeliveryReceipts();
+      const persisted = JSON.parse(readFileSync(join(t.engine.stateMgr.getBaseDir(), "delivery-receipts.json"), "utf8")) as Array<{ delivery_id: string; submit_verified: boolean | null }>;
+      // A later matching observation must not create evidence of our Return.
+      t.pane.overlay = `OpenAI Codex (v0.157.0)\n› ${text}\nWorking (1s • esc to interrupt)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      await t.engine.verifyPendingDeliveries(); await t.engine.verifyPendingDeliveries();
+      const receipts = t.engine.listDeliveryReceipts();
+      const record = t.engine.getAgentState(boot.agent_id)!;
+      console.log("PREDISPATCH_WITNESS", JSON.stringify({ fault, afterWrite, failed, sent,
+        returns: t.pane.returns - beforeReturns, transport_invocations: t.pane.returnInvocations - beforeInvocations,
+        afterFailure, receipts, boot_pending: record.boot_prompt_pending,
+        boot_submit_dispatched: record.boot_submit_dispatched, prompt_delivered: record.prompt_delivered }));
+      expect(failed).toBe(true); expect(sent!).toMatchObject({ ok: false });
+      expect(JSON.stringify(sent!)).toContain(primary);
+      expect(t.pane.returns).toBe(beforeReturns); expect(t.pane.submitted).toEqual([]);
+      expect(t.pane.returnInvocations).toBe(beforeInvocations);
+      expect(t.pane.inputs).toEqual([text]);
+      expect(receipts.map(r => r.delivery_id).sort()).toEqual(ids);
+      expect(persisted.map(r => r.delivery_id).sort()).toEqual(ids);
+      expect(persisted.every(r => r.submit_verified !== true)).toBe(true);
+      expect(afterFailure).toEqual(originals); expect(persisted).toEqual(originals);
+      for (const receipt of receipts) {
+        expect(receipt.submit_verified, JSON.stringify(receipt)).not.toBe(true);
+        expect(receipt.submit_dispatched).toBe(false);
+        expect(await t.call("wait_for", { delivery_id: receipt.delivery_id, timeout_ms: 1 }))
+          .toMatchObject({ delivery_id: receipt.delivery_id, submit_verified: null, submit_dispatched: false });
+      }
+      expect(record).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: false, prompt_delivered: false });
+    },
+  );
+
+  it.each(["receipt", "record"].flatMap(fault => [false, true].map(afterWrite => ({ fault, afterWrite }))))(
+    "aborted retry $fault afterWrite=$afterWrite retains genuine earlier lost-ACK evidence", async ({ fault, afterWrite }) => {
+      const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+      const text = t.pane.draft; t.pane.hidden = false; t.pane.lostAck = true;
+      t.pane.onReturn = () => { t.pane.hidden = true; t.pane.onReturn = undefined; };
+      expect((await t.key(boot.surface_id)).ok).toBe(false);
+      const original = t.engine.getDeliveryReceipt(id)!;
+      const returns = t.pane.returns; const primary = `synthetic retry ${fault} failure`;
+      const invocations = t.pane.returnInvocations;
+      const queue = (t.engine as unknown as { deliveryQueue: { persistDeliveryReceipts(): void } }).deliveryQueue;
+      let failed = false;
+      let injection: ReturnType<typeof vi.spyOn>;
+      if (fault === "receipt") {
+        const persist = queue.persistDeliveryReceipts.bind(queue);
+        injection = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+          if (!failed) { failed = true; if (afterWrite) persist(); throw new Error(primary); }
+          persist();
+        });
+      } else {
+        const update = t.engine.stateMgr.updateRecord.bind(t.engine.stateMgr);
+        injection = vi.spyOn(t.engine.stateMgr, "updateRecord").mockImplementation((agent, fields) => {
+          if (!failed && agent === boot.agent_id && fields.boot_submit_dispatched === true) {
+            failed = true; if (afterWrite) update(agent, fields); throw new Error(primary);
+          }
+          return update(agent, fields);
+        });
+      }
+      t.pane.hidden = false;
+      let sent: Payload;
+      try { sent = await t.key(boot.surface_id); } finally { injection.mockRestore(); }
+      expect(failed).toBe(true); expect(sent!).toMatchObject({ ok: false });
+      expect(JSON.stringify(sent!)).toContain(primary);
+      expect(t.pane.returns).toBe(returns);
+      expect(t.pane.returnInvocations).toBe(invocations);
+      expect(t.engine.getDeliveryReceipt(id)).toEqual(original);
+      const disk = JSON.parse(readFileSync(join(t.engine.stateMgr.getBaseDir(), "delivery-receipts.json"), "utf8"));
+      expect(disk.find((r: { delivery_id: string }) => r.delivery_id === id)).toEqual(original);
+      expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, boot_submit_dispatched: true, prompt_delivered: false });
+      t.pane.overlay = `OpenAI Codex (v0.157.0)\n› ${text}\nWorking (1s • esc to interrupt)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+      await t.engine.verifyPendingDeliveries();
+      expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 }))
+        .toMatchObject({ delivery_id: id, terminal: true, submit_dispatched: true, submit_verified: true });
+      expect(t.pane.returns).toBe(returns); expect(t.pane.inputs).toEqual([text]);
+    },
+  );
+
+  it("rollback persistence failure restores every live entry and preserves the primary failure", async () => {
+    const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+    const text = t.pane.draft; const original = t.engine.getDeliveryReceipt(id)!;
+    const second = `${id}-second-owned`;
+    t.engine.resolveDelivery({ ...original, delivery_id: second });
+    const owner = [...t.context.typedDraftOwners.values()][0]!;
+    owner.texts = [text, text]; owner.deliveryIds = [id, second];
+    const originals = t.engine.listDeliveryReceipts(); const returns = t.pane.returns;
+    const invocations = t.pane.returnInvocations;
+    const queue = (t.engine as unknown as { deliveryQueue: {
+      deliveryReceipts: Map<string, unknown>; persistDeliveryReceipts(): void; loadDeliveryReceipts(): void;
+    } }).deliveryQueue;
+    const persist = queue.persistDeliveryReceipts.bind(queue);
+    let writes = 0;
+    const injection = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+      if (++writes === 2) throw new Error("synthetic primary later receipt failure");
+      if (writes > 2) throw new Error("synthetic secondary rollback storage failure");
+      persist();
+    });
+    t.pane.hidden = false;
+    let sent: Payload;
+    try { sent = await t.key(boot.surface_id); } finally { injection.mockRestore(); }
+    expect(sent!).toMatchObject({ ok: false });
+    expect(JSON.stringify(sent!)).toContain("synthetic primary later receipt failure");
+    expect(JSON.stringify(sent!)).not.toContain("secondary rollback");
+    expect(t.engine.listDeliveryReceipts()).toEqual(originals);
+    t.pane.overlay = `OpenAI Codex (v0.157.0)\n› ${text}\nWorking (1s • esc to interrupt)\n› \n  GPT-6.1-Sol high · ~/Gits/cmuxlayer`;
+    await t.engine.verifyPendingDeliveries();
+    expect(t.engine.listDeliveryReceipts()).toEqual(originals);
+    expect(t.pane.returns).toBe(returns); expect(t.pane.inputs).toEqual([text]);
+    // Reload the real atomic file, as a new queue does after restart. The
+    // failed rollback write left its last successful preparation on disk.
+    queue.deliveryReceipts.clear(); queue.loadDeliveryReceipts();
+    await t.engine.verifyPendingDeliveries();
+    expect(t.engine.listDeliveryReceipts().every(r => r.submit_verified !== true)).toBe(true);
+    expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+    expect(t.pane.returns).toBe(returns);
+    expect(t.pane.returnInvocations).toBe(invocations);
+  });
+
+  it.each([false, true].flatMap(lost => [false, true].map(afterWrite => ({ lost, afterWrite }))))(
+    "dispatch-marker storage failure afterWrite=$afterWrite retains actual Return (lost=$lost)", async ({ lost, afterWrite }) => {
+      const t = await setup(true); const boot = await t.spawn(); const id = boot.boot_prompt_receipt.delivery_id;
+      const text = t.pane.draft; const returns = t.pane.returns;
+      const invocations = t.pane.returnInvocations;
+      const queue = (t.engine as unknown as { deliveryQueue: { persistDeliveryReceipts(): void } }).deliveryQueue;
+      const persist = queue.persistDeliveryReceipts.bind(queue); let failed = false;
+      const injection = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+        // Only fail the final marker after all preparatory bookkeeping. Its
+        // failure must not abort transport after labeling the attempt sent.
+        if (!failed && t.engine.stateMgr.readState(boot.agent_id)?.boot_submit_dispatched === true) {
+          failed = true; if (afterWrite) persist(); throw new Error("synthetic dispatch marker storage failure");
+        }
+        persist();
+      });
+      t.pane.hidden = false; t.pane.lostAck = lost;
+      t.pane.onReturn = () => {
+        expect(failed).toBe(true);
+        expect(t.engine.getDeliveryReceipt(id)).toMatchObject({ delivery_id: id, submit_dispatched: true, terminal: false, submit_verified: null, needs_attention: true });
+      };
+      let sent: Payload;
+      try { sent = await t.key(boot.surface_id); } finally { injection.mockRestore(); }
+      expect(failed).toBe(true); expect(sent!.ok).toBe(!lost);
+      if (lost) expect(JSON.stringify(sent!)).toContain("synthetic Return ACK lost");
+      expect(t.pane.returns).toBe(returns + 1);
+      expect(t.pane.returnInvocations).toBe(invocations + 1);
+      expect(t.pane.inputs).toEqual([text]); expect(t.pane.submitted).toEqual([text]);
+      await t.engine.verifyPendingDeliveries();
+      expect(await t.call("wait_for", { delivery_id: id, timeout_ms: 1 }))
+        .toMatchObject({ delivery_id: id, terminal: true, submit_dispatched: true, submit_verified: true });
+      expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: false, prompt_delivered: true });
+      expect(t.pane.returns).toBe(returns + 1);
+    },
+  );
 });

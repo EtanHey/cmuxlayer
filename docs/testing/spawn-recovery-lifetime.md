@@ -46,3 +46,40 @@ Companion focused verification retains the existing uncertain-ACK/no-replay,
 original-ID settlement, captured-null baseline, legacy baseline, caller/boot/
 session ownership and complete payload controls. Native verification and scoped
 source review remain separate gates before publication.
+
+## Predispatch persistence ratchet
+
+Bug source: `9de63a6a9b9147ac70d1e8004ed65b6680c9d5e6`; finding
+`4212037818`. Run the `Predispatch persistence ratchet` group in the same
+test file under shared admission. Each row uses real SDK/MCP dispatch, real
+atomic receipt/state writes, and synthetic failure injection. No native or
+provider call is made.
+
+| Row | Failure boundary | Required outcome |
+| --- | --- | --- |
+| preparation-first-before-write | First receipt persistence throws before writing | Zero transport invocations; original receipt and primary failure preserved |
+| preparation-first-after-write | First atomic receipt replacement completes then throws | Same; rollback is durable |
+| preparation-later-before-write | Later owned receipt fails after an earlier receipt was prepared | Every original restored, including the failing entry |
+| preparation-later-after-write | Later receipt replacement completes then throws | Same; no passive success from a later matching screen |
+| preparation-record-before-write | Boot bookkeeping throws before update | Zero Return; pending boot retained |
+| preparation-record-after-write | Boot record update completes then throws | Restore prior boot dispatch/verification fields |
+| preparation-rollback-write-failure | Primary later-receipt failure plus failing rollback persistence | Restore all live entries before writing; reloaded durable intent cannot verify an unsent Return |
+| prior-ACK-receipt-before/after-write | Aborted retry after a genuine earlier lost ACK | Original pending receipt/context and durable uncertainty survive |
+| prior-ACK-record-before/after-write | Bookkeeping abort during that retry | Earlier dispatch remains attributable; no additional Return |
+| dispatch-marker-ACK-before/after-write | Final dispatch marker storage fails, transport acknowledges | Invoke Return once; original ID verifies without replay |
+| dispatch-marker-lost-ACK-before/after-write | Same, then transport loses ACK | Preserve actual dispatch uncertainty and primary ACK failure; passive evidence may settle once |
+
+Preparation copies the original dispatch flag: a fresh typed boot is explicitly
+undispatched; an older genuine or legacy uncertain attempt retains its evidence.
+The final marker is non-throwing and runs only after all refusal/bookkeeping
+work, immediately before transport invocation. Its storage failure must not
+label an aborted preparation as sent, or prevent the admitted transport call.
+Explicitly undispatched boot intent is excluded from passive verification,
+including after reload. Undefined remains compatible with legacy uncertainty.
+
+Rollback preserves the primary preparation error even if secondary storage
+also fails. A final-marker storage failure retains live original-ID uncertainty
+and an attention reason. If storage remains unavailable through process loss,
+durable dispatch evidence may be unavailable: the persisted false intent stays
+unverified rather than fabricating success. This ratchet does not prove disk
+failure recovery, arbitrary crash timing, or native-client behavior.

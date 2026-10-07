@@ -2018,31 +2018,67 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             !bootTokenInstanceCurrent(owner) || !draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity)) {
           throw new DeliverySafetyGateError("boot_instance_changed", submitBaseline!.parsed);
         }
-        for (const id of owner.deliveryIds ?? []) {
-          const original = engine.getDeliveryReceipt(id);
-          if (original?.boot_instance_id !== ownedBoot.instanceId || original.agent_id !== ownedBoot.agentId || original.text !== ownedSubmitText) continue;
-          const binding = original.boot_recovery_context;
-          if (binding && (binding.caller_agent_id !== caller || binding.surface_uuid !== (boot.surface_uuid ?? null) ||
-              binding.workspace_id !== (boot.workspace_id ?? null) || binding.cli_session_id !== null && binding.cli_session_id !== boot.cli_session_id)) {
-            throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline!.parsed);
+        const originals: AgentDeliveryReceipt[] = [];
+        try {
+          for (const id of new Set(owner.deliveryIds ?? [])) {
+            const original = engine.getDeliveryReceipt(id);
+            if (original?.boot_instance_id !== ownedBoot.instanceId || original.agent_id !== ownedBoot.agentId || original.text !== ownedSubmitText) continue;
+            const binding = original.boot_recovery_context;
+            if (binding && (binding.caller_agent_id !== caller || binding.surface_uuid !== (boot.surface_uuid ?? null) ||
+                binding.workspace_id !== (boot.workspace_id ?? null) || binding.cli_session_id !== null && binding.cli_session_id !== boot.cli_session_id)) {
+              throw new DeliverySafetyGateError("draft_ownership_unverified", submitBaseline!.parsed);
+            }
+            // Capture before the write: acceptPendingVerify may mutate memory
+            // and commit its atomic file replacement before it throws.
+            originals.push(original);
+            const pending = engine.acceptPendingVerify({
+              delivery_id: id, agent_id: original.agent_id, text: original.text,
+              source_event: "boot_prompt", typed: true, press_enter: true,
+              retry_count: original.retry_count, rpc_methods: original.rpc_methods,
+              // Keep prior genuine uncertainty on an explicit retry; a fresh
+              // typed boot's false flag remains durable preparation only.
+              submit_dispatched: original.submit_dispatched,
+              boot_recovery: true, boot_instance_id: ownedBoot.instanceId,
+              boot_recovery_context: original.boot_recovery_context ?? {
+                caller_agent_id: caller ?? null, surface_uuid: boot.surface_uuid ?? null,
+                workspace_id: boot.workspace_id ?? null, cli_session_id: boot.cli_session_id ?? null,
+                pre_type_screen: deliveryPreTypeScreens.get(id) ?? boot.boot_pre_type_screen ?? null,
+              },
+            });
+            recoveringBootReceipts.push(pending);
           }
-          const pending = engine.acceptPendingVerify({
-            delivery_id: id, agent_id: original.agent_id, text: original.text,
-            source_event: "boot_prompt", typed: true, press_enter: true,
-            retry_count: original.retry_count, rpc_methods: original.rpc_methods,
-            boot_recovery: true, boot_instance_id: ownedBoot.instanceId,
-            boot_recovery_context: original.boot_recovery_context ?? {
-              caller_agent_id: caller ?? null, surface_uuid: boot.surface_uuid ?? null,
-              workspace_id: boot.workspace_id ?? null, cli_session_id: boot.cli_session_id ?? null,
-              pre_type_screen: deliveryPreTypeScreens.get(id) ?? boot.boot_pre_type_screen ?? null,
-            },
-          });
-          recoveringBootReceipts.push(pending);
+          if (recoveringBootReceipts.length) {
+            const updated = stateMgr.updateRecord(boot.agent_id, { boot_submit_dispatched: true, boot_verify_started_at: new Date().toISOString() });
+            engine.getRegistry().set(updated.agent_id, updated);
+          }
+        } catch (error) {
+          // This callback is entirely before client.sendKey. Its failure is
+          // proof that this attempt never dispatched, unlike an ACK loss
+          // from the transport. Restore prior uncertainty, not guessed flags.
+          try { engine.rollbackBootRecoveryPreparation(originals); } catch {
+            // The queue restores all memory before attempting persistence.
+            // Keep the preparation error as the caller's primary failure.
+          }
+          try {
+            const current = stateMgr.readState(boot.agent_id);
+            if (current?.boot_instance_id === boot.boot_instance_id &&
+                (current.boot_submit_dispatched !== boot.boot_submit_dispatched ||
+                 current.boot_verify_started_at !== boot.boot_verify_started_at)) {
+              const restored = stateMgr.updateRecord(boot.agent_id, {
+                boot_submit_dispatched: boot.boot_submit_dispatched,
+                boot_verify_started_at: boot.boot_verify_started_at,
+              });
+              engine.getRegistry().set(restored.agent_id, restored);
+            }
+          } catch { /* Rollback failure must not replace the primary error. */ }
+          recoveringBootReceipts.length = 0;
+          throw error;
         }
-        if (recoveringBootReceipts.length) {
-          const updated = stateMgr.updateRecord(boot.agent_id, { boot_submit_dispatched: true, boot_verify_started_at: new Date().toISOString() });
-          engine.getRegistry().set(updated.agent_id, updated);
-        }
+        // All fallible refusal/bookkeeping work is complete. This marker
+        // cannot throw: client.sendKey is the next operation in the hook's
+        // caller. A transport ACK failure must retain these original IDs.
+        engine.markBootRecoveryDispatched(recoveringBootReceipts);
+        submitDispatched = submitAttempted;
       };
       // #879: re-check the bound boot instance at the last pre-mutation hook,
       // like the pointer path's assertOwnedPointerBeforeReturn. A newer boot
@@ -2136,6 +2172,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                 bootReceipt.agent_id === ownedBoot.agentId && bootReceipt.text === ownedSubmitText) {
               engine?.resolveDelivery({ ...bootReceipt, delivery_state: "submitted", terminal: true,
                 press_enter: true, submit_dispatched: true, submit_verified: true,
+                needs_attention: false, attention_reason: null,
                 rpc_methods: [...new Set([...(bootReceipt.rpc_methods ?? []), ...rpcMethods])] });
             }
           }
