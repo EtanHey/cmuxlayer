@@ -128,7 +128,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     const as = <T>(uuid: string | undefined, fn: () => Promise<T>) =>
       runWithCallerContext(uuid ? { surfaceId: uuid, workspaceId: "workspace:1" } : undefined, fn);
     const spawn = (uuid: string | undefined) => as(uuid, async () => parseToolResult(
-      await server._registeredTools.spawn_agent.handler({
+      await server._registeredTools.spawn_agent.handler({ verbose: true,
         repo: "brainlayer", model: "sonnet", cli: "claude", workspace: "workspace:1",
         prompt: "Read and follow /tmp/reviewer-brief.md", boot_prompt_timeout_ms: 2_000,
       }, {})));
@@ -144,6 +144,8 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       const spawned = await t.spawn(LEAD_UUID);
       expect(spawned.spawn_state, JSON.stringify(spawned)).toBe("boot_unsubmitted");
       expect(spawned.boot_prompt_receipt).toMatchObject({ typed: true, submit_dispatched: false });
+      expect(t.engine.listDeliveryReceipts().filter(receipt =>
+        receipt.boot_recovery && receipt.agent_id === spawned.agent_id)).toHaveLength(0);
       expect(t.pane.state.submitted).toHaveLength(0);
       expect(spawned.next_action).toContain('send_to({mode:"key"');
       const surface = spawned.next_action.match(/surface:"([^"]+)"/)?.[1];

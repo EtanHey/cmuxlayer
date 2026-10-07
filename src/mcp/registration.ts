@@ -14,6 +14,7 @@ import type { CmuxClient } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
 import type { DefaultToolPalette } from "../palette.js";
+import { shapeSpawnResponse } from "../spawn-response.js";
 import type { StateManager } from "../state-manager.js";
 import { runWithSurfaceTopologyCallScope } from "../surface-topology.js";
 import {
@@ -253,6 +254,16 @@ export function installToolRegistration(
       toolName,
       verbose,
     );
+    // Spawn's compact receipt has no transport fields, including warnings.
+    if (leanSuccessfulReceipt && toolName === "spawn_agent") {
+      // Covers terminal spawns as well as managed spawn/resume receipts.
+      const payload = shapeSpawnResponse(structured);
+      return {
+        ...toolResult,
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
+    }
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings
