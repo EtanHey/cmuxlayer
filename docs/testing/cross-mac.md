@@ -25,6 +25,13 @@ The daemon socket, state, inbox, app pointer HOME and MCP config are private.
 Shell startup restores the target CLI HOME; no auth files move between Macs.
 On NIGHTLY, `--private-home` must name a separate owned mode-0700 auth HOME.
 The target must have the required CLI binaries and reviewed launcher setup.
+Before M1 app or seat launch, the driver reads the target's launcher registry
+and checks each required launcher's registered root is a directory. A missing
+root produces `PRECONDITION_ABSENT` with the exact target path and a failed run;
+it cannot count as a behavior defect or a passing fix. The current scenarios'
+CLI requirements are known; new scenarios declare `launcherClis` explicitly
+(a nonempty array of `codex` and/or `claude`). This check never creates a root,
+changes the registry or installs a repository.
 
 `--prepare-driver` archives the committed harness SHA, transfers tracked code
 only through fixed-alias `ssh m1`, and builds inside a new mode-0700 temporary

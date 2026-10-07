@@ -8,6 +8,7 @@ import { startSoakRuntime, rpc, INSTALLED_ENTRY } from "../soak-runtime.mjs";
 import { targetOptions, shellQuote, privateBuild, distDigest, requireLauncherMode } from "./target.mjs";
 import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
+import { checkLauncherRoots } from "./launcher-preflight.mjs";
 
 
 export function boundedSpawn(args, defaults) {
@@ -28,11 +29,13 @@ export function claudeWrapper(binary, config) {
   // A registered launcher can supply its own --mcp-config. Strip ALL such flags.
   return `#!/bin/bash\nargs=()\nwhile (($#)); do\ncase "$1" in\n--mcp-config) shift; (($#)) || exit 2 ;;\n--mcp-config=*) ;;\n--strict-mcp-config) ;;\n*) args+=("$1") ;;\nesac\nshift\ndone\nexec ${shellQuote(binary)} --strict-mcp-config --mcp-config ${shellQuote(config)} "\${args[@]}"\n`;
 }
-export async function startTarget(input) {
+export async function startTarget(input, { launcherRegistry } = {}) {
   const opts = targetOptions(input);
+  if (opts.host === "m1" && hostname() !== opts.gateHost) throw new Error("SSH target hostname mismatch");
+  // Read-only target registry check before any app, daemon or model seat starts.
+  const launcherPreflight = opts.target === "m1-gate" ? await checkLauncherRoots(opts.repo, opts.launcherClis ?? ["codex", "claude"], { registry: launcherRegistry }) : null;
   const { deriveRoleColumnIndex } = await import("../../dist/layout-policy.js");
   const { agentProcessLiveness } = await import("../../dist/util/pid-alive.js");
-  if (opts.host === "m1" && hostname() !== opts.gateHost) throw new Error("SSH target hostname mismatch");
   const harness = privateBuild(opts.driverRoot, opts.driverSha);
   opts.outputRoot = join(harness.root, "evidence");
   if (!opts.buildRoot && (!/^[a-f0-9]{64}$/.test(opts.installedDistDigest) || distDigest("/opt/homebrew/opt/cmuxlayer/libexec/dist") !== opts.installedDistDigest)) throw new Error("installed exact-SHA dist digest missing or mismatched");
@@ -40,6 +43,7 @@ export async function startTarget(input) {
   let closeTarget;
   const runtime = await startSoakRuntime({ ...opts, privateAppHome: true, onSignal: fallback => closeTarget ? closeTarget() : fallback(), launcherMode: opts.target === "m1-gate", entry: opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY }, opts.outputRoot);
   runtime.receipt.release_gate = false; runtime.receipt.scope = "scenario-target-lifecycle";
+  runtime.receipt.launcher_preflight = launcherPreflight;
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
   const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
   const agents = new Map(), leads = new Set(), owned = new Set();

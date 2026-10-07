@@ -17,6 +17,9 @@ it("matches target replies by id, propagates failures, and rejects on EOF/exit",
   const bad = wire.request("call");
   child.stdout.write('{"id":2,"error":"target failed"}\n');
   await expect(bad).rejects.toThrow("target failed");
+  const absent = wire.request("start");
+  child.stdout.write('{"id":3,"error":"PRECONDITION_ABSENT","precondition":{"status":"PRECONDITION_ABSENT","kind":"launcher_root","missing":[{"path":"/synthetic/missing"}]}}\n');
+  await expect(absent).rejects.toMatchObject({ precondition: { kind: "launcher_root", missing: [{ path: "/synthetic/missing" }] } });
   const interrupted = wire.request("call");
   child.emit("exit", 1);
   await expect(interrupted).rejects.toThrow("target bridge exited");
