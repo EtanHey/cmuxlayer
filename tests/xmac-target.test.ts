@@ -7,7 +7,7 @@ import { join } from "node:path";
 it("rejects MBP production before transport or build preparation", () => {
   expect(() => targetOptions({ host: "mbp", cmux: "prod" })).toThrow("MBP");
   expect(() => targetOptions({ host: "unknown", cmux: "nightly" })).toThrow("host");
-  expect(() => targetOptions({ host: "mbp", cmux: "nightly" })).toThrow("private-home");
+  expect(targetOptions({ host: "mbp", cmux: "nightly" }).fixtureMode).toBe(true);
   expect(targetOptions({ host: "m1", cmux: "prod", dmg: "/fixture/pinned.dmg", repo: "cmuxlayer" })).toMatchObject({ target: "m1-gate", gateHost: "Locals-MacBook-Pro.local", app: "/Applications/cmux.app" });
 });
 it("uses target-host registry and PATH, retains private daemon and inbox", () => {

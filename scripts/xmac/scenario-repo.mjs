@@ -7,7 +7,7 @@ function directory(path, privateMode = false) {
   return stat;
 }
 export function createScenarioRepo(env, opts, scratch, token, lockPath) {
-  if (opts.target !== "m1-gate") {
+  if (opts.fixtureMode || opts.target !== "m1-gate") {
     const path = join(scratch, "repo"); mkdirSync(path, { mode: 0o700 });
     return { path, close() {} };
   }

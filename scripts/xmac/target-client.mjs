@@ -1,15 +1,15 @@
 import { runCodexResolutionProbe } from "./startup-probe.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, statSync, writeFileSync, readFileSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { startSoakRuntime, rpc, INSTALLED_ENTRY } from "../soak-runtime.mjs";
 import { targetOptions, shellQuote, privateBuild, distDigest, requireLauncherMode } from "./target.mjs";
 import { unwrap } from "./ctx.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
-import { checkLauncherRoots } from "./launcher-preflight.mjs";
+import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
 import { guardLaunch } from "./launch-overlay.mjs";
 import { launchRecords } from "./launch-cwd.mjs";
@@ -23,23 +23,9 @@ export function boundedSpawn(args, defaults, identities = new Map()) {
   return { ...args, repo: defaults.repo, cwd: defaults.cwd, workspace: defaults.workspace, worktree: false,
     force_new: true, mcp_profile: "sterile", cli, model, ...(cli === "codex" ? { effort: "low" } : {}) };
 }
-export function checkCliAuth(cli, env, probe = spawnSync) {
-  const binary = cli === "codex" ? "/opt/homebrew/bin/codex" : join(homedir(), ".local/bin/claude");
-  const result = probe(binary, cli === "codex" ? ["login", "status"] : ["auth", "status", "--json"], { env, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
-  let authenticated = result.status === 0;
-  if (cli === "claude") { try { authenticated &&= JSON.parse(result.stdout).loggedIn === true; } catch { authenticated = false; } }
-  if (!authenticated) throw new Error(`${cli} authentication precondition absent`);
-}
-
-export function claudeWrapper(binary, config) {
-  // A registered launcher can supply its own --mcp-config. Strip ALL such flags.
-  return `#!/bin/bash\nargs=()\nwhile (($#)); do\ncase "$1" in\n--mcp-config) shift; (($#)) || exit 2 ;;\n--mcp-config=*) ;;\n--strict-mcp-config) ;;\n*) args+=("$1") ;;\nesac\nshift\ndone\nexec ${shellQuote(binary)} --strict-mcp-config --mcp-config ${shellQuote(config)} "\${args[@]}"\n`;
-}
-export async function startTarget(input, { launcherRegistry } = {}) {
+export async function startTarget(input) {
   const opts = targetOptions(input);
   if (opts.host === "m1" && hostname() !== opts.gateHost) throw new Error("SSH target hostname mismatch");
-  // Read-only target registry check before any app, daemon or model seat starts.
-  const launcherPreflight = opts.target === "m1-gate" ? await checkLauncherRoots(opts.repo, opts.launcherClis ?? ["codex", "claude"], { registry: launcherRegistry }) : null;
   const { deriveRoleColumnIndex } = await import("../../dist/layout-policy.js");
   const { agentProcessLiveness } = await import("../../dist/util/pid-alive.js");
   const harness = privateBuild(opts.driverRoot, opts.driverSha);
@@ -47,9 +33,10 @@ export async function startTarget(input, { launcherRegistry } = {}) {
   if (!opts.buildRoot && (!/^[a-f0-9]{64}$/.test(opts.installedDistDigest) || distDigest("/opt/homebrew/opt/cmuxlayer/libexec/dist") !== opts.installedDistDigest)) throw new Error("installed exact-SHA dist digest missing or mismatched");
   const before = productionSnapshot(homedir());
   let closeTarget;
-  const runtime = await startSoakRuntime({ ...opts, privateAppHome: true, onSignal: fallback => closeTarget ? closeTarget() : fallback(), launcherMode: opts.target === "m1-gate", entry: opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY }, opts.outputRoot);
+  const runtime = await startSoakRuntime({ ...opts, privateAppHome: true, onSignal: fallback => closeTarget ? closeTarget() : fallback(), launcherMode: true, entry: opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY }, opts.outputRoot);
   runtime.receipt.release_gate = false; runtime.receipt.scope = "scenario-target-lifecycle";
-  runtime.receipt.launcher_preflight = launcherPreflight;
+  runtime.receipt.launcher_preflight = { status: "PASS", fixture_only: true, launchers: runtime.receipt.fixtures.launchers };
+  verifyFixtureLaunchers(runtime.receipt.fixtures);
   const client = new Client({ name: "xmac-under-test", version: "1.1" });
   const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
   const identities = new Map(), agents = new Map(), leads = new Set(), owned = new Set(), ownedSurfaces = new Set();
@@ -58,7 +45,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
   const call = async (name, args = {}) => {
     if (name === "spawn_agent") {
       args = boundedSpawn(args, defaults, identities);
-      checkCliAuth(args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli, runtime.env);
+      verifyFixtureLaunchers(runtime.receipt.fixtures);
       (runtime.receipt.normalized_spawn_args ??= []).push(args);
     }
     if (name === "close_surface" && args.agent_id && !agents.has(args.agent_id)) {
@@ -73,7 +60,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
         owned.add(value.agent_id);
         agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
         if (!result.isError && !args.resume_agent_id) await captureSpawnIdentity(identities, value, inspect);
-        if (opts.target === "m1-gate") {
+        if (opts.fixtureMode) {
           const state = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8"));
           requireLauncherMode(state, runtime.receipt.expected_launchers[args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli]);
           (runtime.receipt.engine_launch_cwds ??= []).push({ agent_id: value.agent_id, launch_cwd: state.launch_cwd, worktree_path: state.worktree_path });
@@ -82,7 +69,7 @@ export async function startTarget(input, { launcherRegistry } = {}) {
       return result;
     };
     try {
-      return before ? await guardLaunch(invoke, { frames: async () => {
+      return before && !opts.fixtureMode ? await guardLaunch(invoke, { frames: async () => {
         const fresh = (await surfaceList()).filter(row => ![row.id, row.ref].some(ref => ref && before.has(ref)));
         return Promise.all(fresh.map(async row => {
           const surface = row.id ?? row.ref;
@@ -125,9 +112,17 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     }
     return { receipts, enumeration_errors: errors, fallback: errors.length > 0 };
   };
+  const fixtureFor = agent => {
+    const surface = agent.surface_uuid;
+    if (!/^[a-f0-9-]{36}$/i.test(surface ?? "")) throw new Error("fixture surface identity missing");
+    const path = join(runtime.receipt.fixtures.root, "events", `${surface}.json`);
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    if (value.fixture !== true || value.surface !== surface || value.session !== agent.cli_session_id) throw new Error("fixture registration mismatch");
+    return value;
+  };
   const driver = {
     target: { host: opts.host, cmux: opts.cmux === "prod" ? "prod-0.64.22" : "nightly", cmuxVersion: runtime.receipt.app_target.version,
-      cmuxlayerSha: opts.sha, codexWrapper: opts.cmux === "nightly" && existsSync(join(opts.app, "Contents/Resources/bin/codex")) ? join(opts.app, "Contents/Resources/bin/codex") : null },
+      cmuxlayerSha: opts.sha, fixture: true, codexWrapper: opts.cmux === "nightly" && existsSync(join(opts.app, "Contents/Resources/bin/codex")) ? join(opts.app, "Contents/Resources/bin/codex") : null },
     call, sweepChildren,
     spawnLeadSeat: async args => {
       if (!runtime.receipt.private_mcp_config) throw new Error("lead private MCP config missing");
@@ -149,11 +144,19 @@ export async function startTarget(input, { launcherRegistry } = {}) {
     },
     processArgs: async id => {
       if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("invalid agent id");
-      const agent = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, id, "state.json"), "utf8"));
+      let agent;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        await inspect(id);
+        agent = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, id, "state.json"), "utf8"));
+        if (agentProcessLiveness(agent) === "alive") break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
       if (agentProcessLiveness(agent) !== "alive") throw new Error("agent PID identity unverified");
       const args = execFileSync("ps", ["-ww", "-p", String(agent.pid), "-o", "args="], { encoding: "utf8", timeout: 2000 }).trim();
       const executable = execFileSync("ps", ["-p", String(agent.pid), "-o", "comm="], { encoding: "utf8", timeout: 2000 }).trim();
-      if (!new RegExp(`/(?:${agent.cli})(?:$|[-.])`).test(executable)) throw new Error("recorded pane child is not the CLI process");
+      const fixture = fixtureFor(agent);
+      if (fixture.pid !== agent.pid || fixture.cli !== agent.cli || realpathSync(executable) !== realpathSync(process.execPath) ||
+          !args.includes(runtime.receipt.fixtures.tui) || !args.includes(`xmac-${agent.cli}`)) throw new Error("recorded pane child is not the fixture process");
       return args;
     },
     verifyClosed: async id => {
@@ -185,18 +188,14 @@ export async function startTarget(input, { launcherRegistry } = {}) {
   };
   closeTarget = driver.close;
   try {
-    const bin = join(runtime.receipt.scratch, "bin"); mkdirSync(bin, { mode: 0o700 });
     const config = join(runtime.receipt.scratch, "private-mcp.json");
     const routing = Object.fromEntries(Object.entries(runtime.env).filter(([key]) => /^(CMUXLAYER|CMUX_SOCKET|CMUX_BUNDLE|CMUX_ALLOW|CODEX_HOME|CLAUDE_CONFIG_DIR)/.test(key)));
     routing.XMAC_ENTRY = opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY;
     routing.XMAC_DEFAULTS = JSON.stringify(defaults);
-    if (opts.target === "m1-gate") routing.XMAC_EXPECTED_LAUNCHERS = JSON.stringify(runtime.receipt.expected_launchers);
+    routing.XMAC_FIXTURES = JSON.stringify(runtime.receipt.fixtures);
+    if (opts.fixtureMode) routing.XMAC_EXPECTED_LAUNCHERS = JSON.stringify(runtime.receipt.expected_launchers);
     writeFileSync(config, JSON.stringify({ mcpServers: { cmuxlayer: { command: "/opt/homebrew/opt/node/bin/node", args: [`${opts.driverRoot}/scripts/xmac/lead-proxy.mjs`], env: routing } } }), { mode: 0o600 });
-    const binary = join(homedir(), ".local/bin/claude");
-    if (!existsSync(binary)) throw new Error("target Claude binary missing");
-    writeFileSync(join(bin, "claude"), claudeWrapper(binary, config), { mode: 0o700 });
-    runtime.env.PATH = `${bin}:${runtime.env.PATH}`;
-    // App is already running, but no model seat has been launched. Update only its private zsh startup.
+    // Update the run-owned shell routing for the deterministic fixture lead.
     const zshenv = join(runtime.env.ZDOTDIR, ".zshenv");
     writeFileSync(zshenv, readFileSync(zshenv, "utf8") + "\n" + Object.entries(runtime.env).filter(([key]) => /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/.test(key)).map(([key, value]) => `export ${key}=${shellQuote(value)}`).join("\n") + "\n", { mode: 0o600 });
     runtime.receipt.private_mcp_config = config;

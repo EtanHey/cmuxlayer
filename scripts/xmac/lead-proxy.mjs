@@ -6,7 +6,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { boundedSpawn, checkCliAuth } from "./target-client.mjs";
+import { boundedSpawn } from "./target-client.mjs";
+import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { captureSpawnIdentity } from "./resume-identity.mjs";
 import { unwrap } from "./ctx.mjs";
 
@@ -23,7 +24,7 @@ server.setRequestHandler(CallToolRequestSchema, async request => {
   const { name } = request.params;
   if (!allowed.has(name)) throw new Error("tool outside scenario lead scope");
   const args = name === "spawn_agent" ? boundedSpawn(request.params.arguments ?? {}, defaults, identities) : request.params.arguments;
-  if (name === "spawn_agent") checkCliAuth(args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli, process.env);
+  if (name === "spawn_agent") verifyFixtureLaunchers(JSON.parse(process.env.XMAC_FIXTURES));
   const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 90_000 });
   if (name === "spawn_agent" && !args.resume_agent_id && !result.isError) await captureSpawnIdentity(identities, unwrap(result), async id =>
     unwrap(await client.callTool({ name: "list_agents", arguments: { agent_ids: [id], detail: "full" } }, undefined, { timeout: 90_000 })).agents?.find(agent => agent.agent_id === id));

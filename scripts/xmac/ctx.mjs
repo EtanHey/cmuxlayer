@@ -98,7 +98,7 @@ export function createContext({ driver, evidenceDir, parseScreen, onScreen = () 
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) throw new Error("busy duration must be 1..60 seconds");
       const agent = await ctx.inspectAgent(agentId);
       const receipt = await ctx.send({ agent_id: agentId, text: `Run sleep ${seconds} then reply BUSY_DONE.` });
-      await ctx.waitScreen(agent.surface_id, screen => screen.parsed?.state === "working", 10_000);
+      await ctx.waitScreen(agent.surface_id, screen => screen.parsed?.status === "working", 10_000);
       return receipt;
     },
     dispose: async () => {

@@ -9,10 +9,10 @@ export function targetOptions(opts) {
   if (!["prod", "nightly"].includes(opts.cmux)) throw new Error("cmux must be prod or nightly");
   if (opts.host === "mbp" && opts.cmux === "prod") throw new Error("MBP production launches are forbidden");
   if (opts.humanSessionQuitApproved && (opts.host !== "m1" || opts.cmux !== "prod")) throw new Error("human-session approval is M1 production only");
-  if (opts.cmux === "nightly" && !opts.privateHome) throw new Error("NIGHTLY requires --private-home");
+  if (opts.fixtureMode === false) throw new Error("cross-Mac scenarios require fixture mode");
   if (opts.cmux === "prod" && !opts.dmg) throw new Error("M1 requires pinned DMG provenance");
   if (opts.cmux === "prod" && !opts.repo) throw new Error("M1 requires a registered repoGolem repo");
-  return { ...opts, target: opts.cmux === "prod" ? "m1-gate" : "nightly",
+  return { ...opts, fixtureMode: true, target: opts.cmux === "prod" ? "m1-gate" : "nightly",
     gateHost: "Locals-MacBook-Pro.local", app: opts.cmux === "prod" ? "/Applications/cmux.app" : "/Applications/cmux NIGHTLY.app" };
 }
 export function privateBuild(root, sha) {

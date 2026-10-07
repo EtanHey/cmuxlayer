@@ -12,6 +12,7 @@ import { createScenarioRepo } from "./xmac/scenario-repo.mjs";
 import { launcherCwdStartup, launchRecords } from "./xmac/launch-cwd.mjs";
 import { assertM1CmuxMutation, observeCmuxSessions, parseHumanSessionApproval, normalizeProcessIdentity } from "./cmux-session-guard.mjs";
 import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-preferences.mjs";
+import { installFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -40,7 +41,7 @@ export function isolatedEnvironment(parent, scratch, app = "/Applications/cmux N
 export function targetEnvironment(parent, scratch, opts, home = homedir()) {
   const socket = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
   const env = isolatedEnvironment(parent, scratch, opts.app, socket);
-  if (opts.target === "m1-gate") {
+  if (opts.target === "m1-gate" && !opts.fixtureMode) {
     // Dedicated target-host auth, never a controller HOME or copied auth file.
     // These HOME-derived harness paths change; cmuxlayer state/inbox/socket do not.
     for (const key of ["HOME", "CMUXLAYER_HARNESS_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
@@ -67,7 +68,8 @@ export function shellStartup(env, opts) {
     .map(([key, value]) => `export ${key}=${quote(value)}`).join("\n") + "\n" +
     // Bootstrap repoGolem for a fresh shell, generate legacy launchers, then
     // register the modern thin wrappers LAST. Nothing in target ~/.config changes.
-    (opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\nsource ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\n` : "") + launcherCwdStartup(opts);
+    (opts.fixtureMode ? `repoGolem() { :; }\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\n` :
+      opts.launcherMode && opts.target === "m1-gate" ? `source ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\nsource ${quote(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)}\nsource ${quote(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))}\n` : "") + launcherCwdStartup(opts);
 }
 
 export function assertProcessIdentity(saved, observed) {
@@ -229,7 +231,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     const scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
     for (const dir of ["home", "zdot", "state", "inbox"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
     const env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
-    if (opts.privateHome && opts.target !== "m1-gate") {
+    if (opts.privateHome && opts.target !== "m1-gate" && !opts.fixtureMode) {
       const home = realpathSync(opts.privateHome), ownHome = realpathSync(homedir());
       if (home === ownHome || statSync(home).uid !== process.getuid() || (statSync(home).mode & 0o077)) throw new Error("private auth HOME must be separate, owned, and mode 0700");
       for (const dir of [".codex", ".claude", ".config", ".local", ".cache"]) {
@@ -241,20 +243,23 @@ export async function startSoakRuntime(opts, outputRoot) {
       }
     }
     writeFileSync(env.CMUXLAYER_FLEET_CONFIG, JSON.stringify({ coordinationDir: scratch, outbox: false, seatRegistryPath: join(scratch, "seats.yaml") }));
-    if (opts.launcherMode && opts.target === "m1-gate") {
+    scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
+    if (opts.fixtureMode) {
+      receipt.fixtures = installFixtureLaunchers(env, opts, scratch, scenarioRepo.path);
+      receipt.expected_launchers = receipt.fixtures.launchers;
+    } else if (opts.launcherMode && opts.target === "m1-gate") {
       if (!existsSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH)) throw new Error("target launcher registry missing");
       const { resolveLauncherNameFromRegistry } = await import("../dist/launcher-registry.js");
       receipt.expected_launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli,
         resolveLauncherNameFromRegistry(opts.repo ?? "cmuxlayer", cli, { sourcePath: env.CMUXLAYER_LAUNCHER_REGISTRY_PATH })]));
       if (!existsSync(join(env.HOME, ".config/ralphtools/golem-dispatch.zsh"))) throw new Error("target launcher dispatcher missing");
     } else writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, "");
-    scenarioRepo = createScenarioRepo(env, opts, scratch, token, lockPath);
     receipt.scenario_repo = { path: scenarioRepo.path, run_dir: scenarioRepo.run_dir, cleaned: false };
     const shellOpts = { ...opts, launchCwd: scenarioRepo.path, launchers: receipt.expected_launchers, launchReceipt: join(scratch, "launches.jsonl") };
     // App-created shells use only the private startup, including the final cwd wrapper.
     writeFileSync(join(scratch, "zdot/.zshenv"), shellStartup(env, shellOpts), { mode: 0o600 });
     receipt.launch_receipt_path = shellOpts.launchReceipt;
-    receipt.argv_preflight = checkLauncherArgv(env, shellOpts, receipt.expected_launchers);
+    receipt.argv_preflight = opts.fixtureMode ? null : checkLauncherArgv(env, shellOpts, receipt.expected_launchers);
     receipt.preflight_launches = launchRecords(shellOpts.launchReceipt);
     writeFileSync(shellOpts.launchReceipt, "", { mode: 0o600 });
     const launchEnv = appLaunchEnvironment(env, opts, scratch, app, socketPath);
