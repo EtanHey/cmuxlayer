@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { privateBuild, distDigest } from "../scripts/xmac/target.mjs";
 import { reviewedConfigDigest } from "../scripts/xmac/account-observer-bridge.mjs";
 import { requiredRunnerFiles, rows, runNative } from "../scripts/xmac/m1-ratchet.mjs";
@@ -58,6 +59,12 @@ it("rejects unbound direct native entry before host/account inspection", async (
 it("config digest is key-order independent and binds every setting", () => {
   const a = cfg(), b = Object.fromEntries(Object.entries(a).reverse()); expect(reviewedConfigDigest(a)).toBe(reviewedConfigDigest(b));
   expect(reviewedConfigDigest({ ...a, options: { humanSessionQuitApproved: true } })).not.toBe(reviewedConfigDigest(a));
+});
+it("consumes the node-e run argument before actual runner imports inspect argv", () => {
+  const bridge = new URL("../scripts/xmac/account-observer-bridge.mjs", import.meta.url).href, native = new URL("../scripts/xmac/m1-ratchet.mjs", import.meta.url).href;
+  const source = readFileSync("scripts/xmac/account-observer-bridge.mjs", "utf8"); expect(source).toContain("const run=process.argv.pop(); await");
+  const code = `const run=process.argv.pop(); await import(${JSON.stringify(bridge)}); await import(${JSON.stringify(native)}); process.stdout.write(run);`;
+  expect(execFileSync(process.execPath, ["--input-type=module", "-e", code, run], { encoding: "utf8", timeout: 10000 })).toBe(run);
 });
 it.each(["healthy", "bytes", "marker"])("uses actual build/digest bodies on local synthetic products (%s)", async fault => {
   const scratch = fs.realpathSync(fs.mkdtempSync(join(os.tmpdir(), "cmux-xmac-replay-a3-"))), expected: any = cfg();

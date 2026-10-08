@@ -137,7 +137,7 @@ export async function runAccountDriver(cfg, { spawnProcess = spawn } = {}) {
   let fixture;
   try {
     fixture = spawnProcess("ssh", ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-l", "test", "m1",
-      [NODE, "--input-type=module", "-e", `await (${admitReviewedFixture.toString()})(${JSON.stringify(cfg)}, process.argv[1]);`, run].map(shellQuote).join(" ")], { stdio: ["pipe", "pipe", "inherit"] });
+      [NODE, "--input-type=module", "-e", `const run=process.argv.pop(); await (${admitReviewedFixture.toString()})(${JSON.stringify(cfg)}, run);`, run].map(shellQuote).join(" ")], { stdio: ["pipe", "pipe", "inherit"] });
     const exited = new Promise(resolve => { fixture.once("error", () => resolve(-1)); fixture.once("exit", code => resolve(code)); });
     fixture.stdin.on("error", () => {}); let sequence = 0, result; const observations = [];
     for await (const line of createInterface({ input: fixture.stdout })) {
