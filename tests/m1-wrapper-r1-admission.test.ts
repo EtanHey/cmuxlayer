@@ -36,3 +36,14 @@ it("native lifecycle uses the admitted adapter with every actual boundary",()=>{
   expect(body.indexOf("verifyClosePreferences")).toBeLessThan(body.indexOf("await prepareM1AppMutation"));
   expect(body.indexOf("await prepareM1AppMutation")).toBeLessThan(body.indexOf('run("/usr/bin/open"'));
 });
+
+it("ownership drift after an awaited stage aborts before quit or launch", async () => {
+  const f = lifecycle(); let checks = 0;
+  await expect(admitAppStart(f.adapter, () => { if (++checks === 2) throw Error("synthetic owner changed"); })).rejects.toThrow("owner changed");
+  expect(f.calls).toEqual(["lock"]); expect(f.effects).toEqual([]);
+});
+it("fresh ownership refusal immediately before launch permits no launch", async () => {
+  const f = lifecycle();
+  await expect(admitAppStart(f.adapter, stage => { if (stage === "launch") throw Error("synthetic owner changed"); })).rejects.toThrow("owner changed");
+  expect(f.effects).toEqual(["quit"]);
+});

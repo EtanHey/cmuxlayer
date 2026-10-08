@@ -104,7 +104,8 @@ const production = () => processes().filter(line => {
 }).map(line => identity(Number(line.trim().split(/\s/u)[0]))).sort();
 
 export async function stopOwnedProcess({ pid, saved, target = "nightly", app = false, runReceipt }, receipt, observe = identity,
-  signal = (id, sig) => process.kill(id, sig), sleep = pause, sessions = observeCmuxSessions) {
+  signal = (id, sig) => process.kill(id, sig), sleep = pause, sessions = observeCmuxSessions,
+  ownerUid = id => run("ps", ["-p", String(id), "-o", "uid="])) {
   if (!pid || !observe(pid)) return;
   for (const sig of ["SIGTERM", "SIGKILL"]) {
     if (app && target === "m1-gate") {
@@ -113,6 +114,7 @@ export async function stopOwnedProcess({ pid, saved, target = "nightly", app = f
       if (!classified.some(row => row.pid === pid && row.identity === saved)) throw new Error("cmux PID identity/start-time mismatch");
     }
     assertProcessIdentity(saved, observe(pid));
+    if (runReceipt?.fixture_account_uid === 502 && ownerUid(pid) !== "502") throw new Error("refusing cleanup of non-fixture UID");
     if (app) assertProcessTarget(run("ps", ["-p", String(pid), "-o", "comm="]), target);
     signal(pid, sig); receipt.push({ pid, signal: sig });
     if (app && target === "m1-gate" && runReceipt?.human_session_quit_approval?.pid === pid) runReceipt.human_session_quit_approval.applied = true;
@@ -185,12 +187,16 @@ export function socketIsLive(path) {
 }
 
 export async function startSoakRuntime(opts, outputRoot) {
+  if (opts.target === "m1-gate" && opts.fixtureMode &&
+      (opts.accountContract !== "dedicated-test-502-v1" || typeof opts.assertAccount !== "function" || opts.humanSessionQuitApproved)) throw new Error("dedicated fixture account admission required");
+  opts.assertAccount?.({ phase: "before-runtime" });
   opts = { ...opts, privateAppHome: opts.privateAppHome || opts.target === "m1-gate", launcherMode: opts.launcherMode || opts.target === "m1-gate" && !opts.dryRun };
   const app = opts.app, socketPath = opts.target === "m1-gate" ? "/tmp/cmux-soak-stable.sock" : NIGHTLY_SOCKET;
   const token = randomUUID(), lockPath = join(tmpdir(), "cmuxlayer-ratchet-nightly.lock");
   const receiptPath = join(outputRoot, `${token}.lifecycle.json`);
   const receipt = { status: "FAIL", launch_token: token, target: opts.target, release_gate: opts.target === "m1-gate" && !opts.dryRun && !opts.buildRoot, dry_run: opts.dryRun, host: hostname(), processes: [], violations: [], production_start: production(),
     production_pid_11224_start: identity(11224) };
+  if (opts.accountContract === "dedicated-test-502-v1") receipt.fixture_account_uid = 502;
   let lockOwned = false, nightly, daemon, scenarioRepo, build, scratch, env, shellOpts, launchEnv;
   mkdirSync(outputRoot, { recursive: true });
   let closing;
@@ -227,6 +233,7 @@ export async function startSoakRuntime(opts, outputRoot) {
           receipt.stale_socket_at_launch = true; // Only the app handles its stale socket; never unlink it here.
         }
         scratch = mkdtempSync(join(tmpdir(), "cmux-soak-"));
+        receipt.scratch = scratch;
         for (const dir of ["home", "zdot", "state", "inbox"]) mkdirSync(join(scratch, dir), { mode: 0o700 });
         env = launcherEnvironment(targetEnvironment(process.env, scratch, opts), opts.launcherMode ? opts.target : "native");
         if (opts.privateHome && opts.target !== "m1-gate" && !opts.fixtureMode) {
@@ -303,7 +310,7 @@ export async function startSoakRuntime(opts, outputRoot) {
         run("/usr/bin/open", ["-g", "-n", "-a", app, ...Object.entries(launchEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
           "--args", "--soak-launch-token", token, ...(opts.fixtureMode ? closePreferenceArgs() : [])]);
       },
-    });
+    }, phase => opts.assertAccount?.({ receipt, env, phase }));
     const deadline = Date.now() + 10_000;
     while (!nightly && Date.now() < deadline) {
       for (const line of processes().filter(line => line.includes(`${app}/Contents/MacOS/cmux`))) {
@@ -319,12 +326,16 @@ export async function startSoakRuntime(opts, outputRoot) {
     receipt.app_process = nightly; receipt.scratch = scratch;
     let ready = false;
     while (!ready && Date.now() < deadline) {
+      opts.assertAccount?.({ receipt, env, phase: "app-started" });
       try { await rpc(socketPath, "system.ping"); ready = true; } catch { await pause(100); }
+      opts.assertAccount?.({ receipt, env, phase: ready ? "socket-ready" : "app-started" });
     }
     if (!ready) throw new Error("NIGHTLY socket not ready");
     // Confirm socket ownership; a responding socket by itself cannot establish app identity.
     if (!run("lsof", ["-n", "-U", "-a", "-p", String(nightly.pid)]).includes(socketPath)) throw new Error("NIGHTLY socket PID ownership unverified");
+    opts.assertAccount?.({ receipt, env, phase: "socket-ready" });
     const workspace = await rpc(socketPath, "workspace.create", { cwd: scenarioRepo.path, initial_command: opts.dryRun ? `/bin/sh -c 'printf SOAK_DRY_${token}; exec /bin/cat'` : "/bin/zsh -l" });
+    opts.assertAccount?.({ receipt, env, phase: "socket-ready" });
     if (!workspace.workspace_id) throw new Error("NIGHTLY workspace identity missing");
     receipt.workspace = workspace;
     if (opts.dryRun) {
@@ -349,6 +360,7 @@ export async function startSoakRuntime(opts, outputRoot) {
     while (!existsSync(env.CMUXLAYER_DAEMON_SOCKET) && !spawnError && child.exitCode === null && Date.now() < daemonDeadline) await pause(100);
     if (spawnError || !daemon?.saved || !existsSync(env.CMUXLAYER_DAEMON_SOCKET)) throw new Error("private installed daemon not ready");
     receipt.daemon = daemon;
+    opts.assertAccount?.({ receipt, env, phase: "runtime-ready" });
     return { env, workspace: workspace.workspace_id, cwd: scenarioRepo.path, receiptPath, receipt, close };
   } catch (error) {
     if (error.precondition) receipt.precondition = error.precondition;

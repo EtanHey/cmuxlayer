@@ -37,8 +37,10 @@ it("keeps behavior PASS distinct from overall marker FAIL and demands RED witnes
  expect(combineProof({...b,expected_defect:false},{...c,attribution_status:"PASS"})).toMatchObject({status:"FAIL"});
 });
 it("rejects unapproved product, runner identity collapse, missing controls and non-M1 routes",()=>{
- const cfg={nativeApproved:true,runnerSha:"a".repeat(40),runnerFiles:Object.fromEntries((requiredRunnerFiles ?? []).map((f:string)=>[f,"a".repeat(64)])),products:Object.fromEntries(rows.map((r:any)=>[r.name,{baseline:{sha:r.bug,distDigest:"c".repeat(64)},candidate:{sha:r.fix,distDigest:"d".repeat(64)}}]))};
+ const cfg={nativeApproved:true,accountContract:"dedicated-test-502-v1",runnerSha:"a".repeat(40),runnerFiles:Object.fromEntries((requiredRunnerFiles ?? []).map((f:string)=>[f,"a".repeat(64)])),products:Object.fromEntries(rows.map((r:any)=>[r.name,{baseline:{sha:r.bug,distDigest:"c".repeat(64)},candidate:{sha:r.fix,distDigest:"d".repeat(64)}}]))};
  expect(()=>validateWrapperConfig(cfg)).not.toThrow();
+ expect(()=>validateWrapperConfig({...cfg,accountContract:undefined})).toThrow();
+ expect(()=>validateWrapperConfig({...cfg,options:{humanSessionQuitApproved:"77:exact"}})).toThrow();
  for(const copy of [{...cfg,nativeApproved:false},{...cfg,runnerSha:candidate},{...cfg,host:"mbp"},
   {...cfg,products:{}},{...cfg,products:{...cfg.products,spawn_contract_once:{baseline:{sha:rows[2]?.bug},candidate:{sha:"b58063f4028c22828fb340ea03750f153a959a87"}}}}])
   expect(()=>validateWrapperConfig(copy)).toThrow();
