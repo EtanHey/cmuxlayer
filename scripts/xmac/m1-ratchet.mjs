@@ -14,7 +14,7 @@ import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { attestFixtureProcess, fileDigest } from "./fixture-attestation.mjs";
 import { bindAccountHome } from "./account-home.mjs";
 import { accountContract, createDedicatedAccountGuard } from "./dedicated-account.mjs";
-import { createFixtureObserver } from "./account-observer-bridge.mjs";
+import { checkpointSummary, reviewedConfigDigest } from "./account-observer-bridge.mjs";
 
 export const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603fc575638bd531aeb97e48038149aad78c", fix: "64260ba34ba8ee98fa7de3b71566387cecb12280", specimen: "#1007 / composer-overlays/codex-boot.txt" },
@@ -72,8 +72,10 @@ export function checkProductRegistry(build, env) {
     if(!refused) throw Error('product permits raw launcher fallback');`;
   execFileSync(process.execPath, ["--input-type=module", "-e", code], { env, encoding: "utf8", timeout: 10000 });
 }
-async function sample(cfg, row, product, outputRoot, accountHome, accountGuard) {
-  accountGuard.check();
+async function sample(cfg, row, side, product, outputRoot, accountHome, guard) {
+  const scope = `sample-${row.name}-${side}`, accountGuard = { result: () => guard.result(),
+    check: (context = {}) => guard.check({ ...context, identifiers: [scope, ...(context.identifiers ?? [])] }) };
+  accountGuard.check({ phase: "sample-start" });
   const before = accountGuard.result().after, token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
   const owned = [], reads = [], sample = { sha: product.sha, runner_sha: cfg.runnerSha, token, behavior_status: "FAIL", attribution_status: "FAIL", expected_defect: false,
     account_home: accountHome, production_before: before, lock_sha256: fileDigest(join(product.root, "bun.lock")), dist_digest: product.distDigest };
@@ -157,9 +159,10 @@ async function sample(cfg, row, product, outputRoot, accountHome, accountGuard) 
   }
   return sample;
 }
-export async function runNative(cfg, { protectedObserver } = {}) {
+export async function runNative(cfg, { protectedObserver, controllerBinding } = {}) {
   validateWrapperConfig(cfg);
   if (typeof protectedObserver !== "function") throw new Error("fresh protected SSH observer callback required");
+  if (!/^[a-f0-9]{32}$/.test(controllerBinding?.run) || controllerBinding.configDigest !== reviewedConfigDigest(cfg)) throw new Error("reviewed controller binding required");
   if (hostname() !== "Locals-MacBook-Pro.local") throw new Error("dedicated M1 only; no MBP/NIGHTLY route");
   const harness = privateBuild(cfg.driverRoot, cfg.runnerSha);
   if (realpathSync(fileURLToPath(import.meta.url)) !== join(harness.root, "scripts/xmac/m1-ratchet.mjs")) throw new Error("runner does not match reviewed driver prefix");
@@ -168,7 +171,11 @@ export async function runNative(cfg, { protectedObserver } = {}) {
     if (realpathSync(path) !== path || fileDigest(path) !== hash) throw new Error("reviewed runner source hash mismatch");
   }
   const accountHome = bindAccountHome();
-  const accountGuard = createDedicatedAccountGuard({ protectedObserver });
+  const checkpoints = [], accountGuard = createDedicatedAccountGuard({ protectedObserver: context => {
+    const receipt = protectedObserver(context);
+    if (receipt.run !== controllerBinding.run) throw new Error("protected observation controller run mismatch");
+    checkpoints.push(checkpointSummary(receipt)); return receipt;
+  } });
   const productionBefore = accountGuard.result().before;
   for (const row of rows) for (const product of Object.values(cfg.products[row.name])) {
     const build = privateBuild(product.root, product.sha), probe = mkdtempSync(join(harness.root, "registry-probe-"));
@@ -179,10 +186,11 @@ export async function runNative(cfg, { protectedObserver } = {}) {
     checkProductRegistry(build, env); // Every historical control must refuse raw fallback BEFORE any app action.
   }
   const outputRoot = join(harness.root, "evidence", `m1-ratchet-${randomUUID()}`); mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
-  const receipt = { status: "FAIL", runner_sha: cfg.runnerSha, account_home: accountHome, production_before: productionBefore, runner_files: cfg.runnerFiles, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
+  const receipt = { status: "FAIL", observer_run: controllerBinding.run, config_sha256: controllerBinding.configDigest, observer_checkpoints: checkpoints,
+    runner_sha: cfg.runnerSha, account_home: accountHome, production_before: productionBefore, runner_files: cfg.runnerFiles, runner_sha256: fileDigest(fileURLToPath(import.meta.url)), rows: [] };
   for (const row of rows) {
     const pair = cfg.products[row.name];
-    const baseline = await sample(cfg, row, pair.baseline, outputRoot, accountHome, accountGuard), candidate = await sample(cfg, row, pair.candidate, outputRoot, accountHome, accountGuard);
+    const baseline = await sample(cfg, row, "baseline", pair.baseline, outputRoot, accountHome, accountGuard), candidate = await sample(cfg, row, "candidate", pair.candidate, outputRoot, accountHome, accountGuard);
     receipt.rows.push({ ...row, baseline, candidate, ...combineProof(baseline, candidate) });
   }
   receipt.status = receipt.rows.every(row => row.status === "PASS") ? "PASS" : "FAIL";
@@ -202,9 +210,5 @@ export async function runNative(cfg, { protectedObserver } = {}) {
   return { ...receipt, outputRoot };
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv[2] !== "--execute-native" || process.argv[3] !== "--config" || process.argv[5] !== "--observer-run" || process.argv.length !== 7) throw new Error("explicit reviewed M1 admission/config required");
-  const path = realpathSync(process.argv[4]), stat = lstatSync(path);
-  if (path !== process.argv[4] || !stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077) throw new Error("unsafe native config");
-  const result = await runNative(JSON.parse(readFileSync(path, "utf8")), { protectedObserver: createFixtureObserver(process.argv[6]) });
-  console.log(JSON.stringify(result)); process.exitCode = result.status === "PASS" ? 0 : 1;
+  throw new Error("explicit reviewed controller bootstrap required; direct native CLI refused");
 }
