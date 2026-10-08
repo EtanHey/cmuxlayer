@@ -52,14 +52,14 @@ const cfg = () => ({ nativeApproved: true, accountContract: "dedicated-test-502-
   driverRoot: "/private/fixture", observerRoot: "/private/observer", fixtureConfigPath: "/private/fixture/reviewed-config.json",
   runnerFiles: Object.fromEntries(requiredRunnerFiles.map((p: string) => [p, createHash("sha256").update(readFileSync(p)).digest("hex")])),
   products: Object.fromEntries(rows.map((r: any) => [r.name, { baseline: { sha: r.bug, distDigest: "a".repeat(64) }, candidate: { sha: r.fix, distDigest: "b".repeat(64) } }])) });
-function lifecycle() {
+function lifecycle(runId = run) {
   const points = [{ phase: "baseline", identifiers: [] as string[] }];
   for (const row of rows) for (const side of ["baseline", "candidate"]) {
     const identifiers = [`sample-${row.name}-${side}`];
     for (const phase of ["sample-start", "before-runtime", ...[...admissionStages, "refreshAndQuit", "launch"].flatMap(p => [p, p]), "app-started", "socket-ready", "runtime-ready", "sample-final"]) points.push({ phase, identifiers });
   }
   points.push({ phase: "run-final", identifiers: [] });
-  return points.map((point, i) => ({ ...point, sequence: i + 1 }));
+  return points.map((point, i) => ({ ...point, run: runId, nonce: "b".repeat(32), agentIds: [], sequence: i + 1 }));
 }
 const completed = (config: any, run: string, observer_checkpoints: any[]) => ({ status: "PASS", runner_sha: config.runnerSha, runner_files: config.runnerFiles,
   runner_sha256: config.runnerFiles["scripts/xmac/m1-ratchet.mjs"], observer_run: run, config_sha256: api.reviewedConfigDigest(config), observer_checkpoints,
@@ -81,7 +81,7 @@ it.each([false, true])("routes fresh reverse requests through two fake SSH child
     });
     else {
       const run = /'([a-f0-9]{32})'$/.exec(args.at(-1)!)![1];
-      const points = lifecycle(); let index = 0;
+      const points = lifecycle(run); let index = 0;
       const next = () => {
         if (index < points.length) child.stdout.write(JSON.stringify({ observer: { ...points[index++], run, nonce: "b".repeat(32), agentIds: [] } }) + "\n");
         else { child.stdout.write(JSON.stringify(completed(config, run, points)) + "\n"); child.stdout.end(); child.emit("exit", 0); }
@@ -91,7 +91,7 @@ it.each([false, true])("routes fresh reverse requests through two fake SSH child
     return child;
   };
   const result = api.runAccountDriver(config, { spawnProcess });
-  if (unavailable) await expect(result).rejects.toThrow("observer unreachable"); else expect(await result).toMatchObject({ status: "PASS", observer_checkpoints: lifecycle() });
+  if (unavailable) await expect(result).rejects.toThrow("observer unreachable"); else expect(await result).toMatchObject({ status: "PASS", observer_checkpoints: expect.arrayContaining([expect.objectContaining({ phase: "run-final" })]) });
   expect(principals).toEqual(["happycampr", "test"]);
 });
 it.each(["runner", "config", "source", "product", "no-observations", "missing-stage-post", "missing-runtime", "wrong-scope", "reordered", "output", "foreign-run", "invented-observations"])("rejects completion fault %s", fault => {
@@ -112,6 +112,6 @@ it.each(["runner", "config", "source", "product", "no-observations", "missing-st
   expect(() => api.validateFixtureCompletion(result, config, run, points, rows.map(r => r.name), [...admissionStages, "refreshAndQuit", "launch"])).toThrow();
 });
 it("retains a provenance-bound FAIL without demanding successful runtime coverage", () => {
-  const config = cfg(), points = [{ sequence: 1, phase: "baseline", identifiers: [] }];
+  const config = cfg(), points = [{ run, nonce: "b".repeat(32), sequence: 1, phase: "baseline", identifiers: [], agentIds: [] }];
   expect(() => api.validateFixtureCompletion({ ...completed(config, run, points), status: "FAIL", error: "primary" }, config, run, points, rows.map(r => r.name), admissionStages)).not.toThrow();
 });

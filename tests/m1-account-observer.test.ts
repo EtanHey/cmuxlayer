@@ -10,7 +10,7 @@ const mirror = () => ({ path: "/tmp/cmux-last-socket-path", canonical: "/private
   aclEmpty: true, writableToFixture: false, parent: { path: "/private/tmp", kind: "directory", uid: 0, mode: 0o1777, aclEmpty: true, dev: 1, ino: 7 },
   ancestor: { path: "/private", kind: "directory", uid: 0, mode: 0o755, aclEmpty: true, dev: 1, ino: 6 } });
 const state = () => ({ fixture: {}, production: {}, processes: ["501 77 exact-start /app"], mirror: mirror() });
-const challenge = () => ({ run: "a".repeat(32), nonce: "b".repeat(32), sequence: 1, phase: "before-runtime" });
+const challenge = () => ({ run: "a".repeat(32), nonce: "b".repeat(32), sequence: 1, phase: "before-runtime", identifiers: [], agentIds: [] });
 const receipt = () => ({ ...challenge(), capturedAt: 1000, identity: { username: "happycampr", uid: 501, processUid: 501,
   home: "/Users/happycampr", dev: 1, ino: 2, source: "os.userInfo+dscl", host: "Locals-MacBook-Pro.local" }, roots: original.stateRoots?.("/Users/happycampr"),
   production: {}, processes: [], mirror: mirror(), append: { reads: [], violations: [] } });

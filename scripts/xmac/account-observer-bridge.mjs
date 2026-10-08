@@ -7,7 +7,7 @@ import { readSync, writeSync, readFileSync, realpathSync, lstatSync } from "node
 import { fileURLToPath } from "node:url";
 import { connectProcess } from "./driver.mjs";
 import { shellQuote } from "./target.mjs";
-import { createProtectedCollector, validateObserverReceipt } from "./account-observer.mjs";
+import { createProtectedCollector, validateObserverReceipt, validObservationScope } from "./account-observer.mjs";
 const NODE = "/opt/homebrew/opt/node/bin/node", limit = 1024 * 1024;
 export const observerSourceFiles = ["scripts/xmac/account-observer-bridge.mjs", "scripts/xmac/account-observer.mjs",
   "scripts/xmac/dedicated-account.mjs", "scripts/xmac/production-guard.mjs", "scripts/xmac/driver.mjs", "scripts/xmac/target.mjs"];
@@ -43,8 +43,11 @@ export async function admitReviewedFixture(expected, run, io = {}) {
   (io.finish ?? (result => { console.log(JSON.stringify(result)); process.exitCode = result.status === "PASS" ? 0 : 1; }))(result);
   return result;
 }
-export const checkpointSummary = receipt => ({ sequence: receipt.sequence, phase: receipt.phase, identifiers: receipt.identifiers });
+export const checkpointSummary = receipt => ({ run: receipt.run, nonce: receipt.nonce, sequence: receipt.sequence, phase: receipt.phase,
+  identifiers: [...receipt.identifiers], agentIds: [...receipt.agentIds] });
 export function validateFixtureCompletion(result, cfg, run, observations, rowNames, stages) {
+  if (!Array.isArray(observations) || observations.some((row, i) => row?.run !== run || !validRun(row.nonce) || row.sequence !== i + 1 ||
+      !/^[A-Za-z-]{1,64}$/.test(row.phase) || !validObservationScope(row.identifiers) || !validObservationScope(row.agentIds))) throw Error("fixture observation scope/order invalid");
   if (result.observer_run !== run || result.config_sha256 !== reviewedConfigDigest(cfg) || result.runner_sha !== cfg.runnerSha ||
       canonical(result.runner_files) !== canonical(cfg.runnerFiles) || canonical(result.observer_checkpoints) !== canonical(observations)) throw Error("fixture completion provenance mismatch");
   if (result.status !== "PASS") return;
@@ -66,8 +69,7 @@ export function validateFixtureCompletion(result, cfg, run, observations, rowNam
 }
 export function validateObserverRequest(args, run, sequence) {
   if (args?.run !== run || args.sequence !== sequence || !validRun(args.nonce) || !/^[A-Za-z-]{1,64}$/.test(args.phase) ||
-      !Array.isArray(args.identifiers) || !Array.isArray(args.agentIds) ||
-      [...args.identifiers, ...args.agentIds].some(value => typeof value !== "string" || value.length > 4096)) throw new Error("observer request binding invalid");
+      !validObservationScope(args.identifiers) || !validObservationScope(args.agentIds)) throw new Error("observer request binding invalid");
 }
 export function createFixtureObserver(run, { read = readSync, write = writeSync, clock = Date.now } = {}) {
   if (!validRun(run)) throw new Error("observer run binding invalid");

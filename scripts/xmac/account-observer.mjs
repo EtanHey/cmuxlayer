@@ -5,10 +5,14 @@ import { lstatSync, realpathSync } from "node:fs";
 import { readStatePaths, stateRoots, fixtureMarkers } from "./dedicated-account.mjs";
 import { productionSnapshot, productionChanges } from "./production-guard.mjs";
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+export const validObservationScope = values => Array.isArray(values) && values.length <= 1024 &&
+  values.every(value => typeof value === "string" && value.length > 0 && value.length <= 4096) && new Set(values).size === values.length;
 const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 }).trim();
 export function validateObserverReceipt(row, request, now = Date.now()) {
   const id = row?.identity;
   if (!row || row.error || !same([row.run, row.nonce, row.sequence, row.phase], [request.run, request.nonce, request.sequence, request.phase]) ||
+      [row.identifiers, row.agentIds, request.identifiers, request.agentIds].some(values => !validObservationScope(values)) ||
+      !same(row.identifiers, request.identifiers) || !same(row.agentIds, request.agentIds) ||
       !Number.isFinite(row.capturedAt) || now - row.capturedAt < 0 || now - row.capturedAt > 10000 ||
       id?.username !== "happycampr" || id.uid !== 501 || id.processUid !== 501 || id.home !== "/Users/happycampr" ||
       id.source !== "os.userInfo+dscl" || id.host !== "Locals-MacBook-Pro.local" ||
@@ -52,12 +56,14 @@ export function createProtectedCollector({ identity = protectedIdentity, readSta
   mirrorCapture = captureProtectedMirror, legacySnapshot = productionSnapshot, compareLegacy = productionChanges, clock = Date.now } = {}) {
   let bound, baseline;
   return request => {
+    if (!validObservationScope(request?.identifiers) || !validObservationScope(request.agentIds)) throw Error("protected observer request scope invalid");
+    const identifiers = [...request.identifiers], agentIds = [...request.agentIds];
     const id = identity(); if (bound && !same(bound, id)) throw new Error("protected observer identity changed"); bound ??= id;
     const production = readState(stateRoots(id.home)), processes = processCapture(), mirror = mirrorCapture(), after = legacySnapshot(id.home);
     baseline ??= after; const reads = [];
-    const violations = compareLegacy(baseline, after, ["/tmp/cmux-soak-stable.sock", ...(request.identifiers ?? [])], request.agentIds ?? [], reads);
+    const violations = compareLegacy(baseline, after, ["/tmp/cmux-soak-stable.sock", ...identifiers], agentIds, reads);
     if (!same(id, identity())) throw new Error("protected observer identity changed during capture");
     return { run: request.run, nonce: request.nonce, sequence: request.sequence, phase: request.phase, capturedAt: clock(),
-      identity: id, roots: stateRoots(id.home), production, processes, mirror, append: { reads, violations } };
+      identifiers, agentIds: [...agentIds], identity: id, roots: stateRoots(id.home), production, processes, mirror, append: { reads, violations } };
   };
 }
