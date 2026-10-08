@@ -33,7 +33,7 @@ describe("evidence-only current census", () => {
     const r = reads([{ ...kernel(), before: [42, 99], after: [42, 99], processes: [process(), process(99)] }]);
     const original = r.native;
     r.native = async (method, params) => method === "debug.terminals" ? { generation: "0:1", value: {
-      count: 27, terminals: Array.from({ length: 27 }, (_, n) => ({ surface_id: `s${n}`, mapped: n < 26, initial_command: "SECRET", current_directory: "/private" })),
+      count: 27, terminals: Array.from({ length: 27 }, (_, n) => ({ surface_id: n === 0 ? "s" : `s${n}`, mapped: n < 26, initial_command: "SECRET", current_directory: "/private" })),
     } } : original(method, params);
     const result = await collectCurrentSessionCensus(r, 501);
     expect(result.attempts[0].before.diagnostics.find(o => o.method === "debug.terminals")?.objects).toHaveLength(27);
@@ -154,5 +154,83 @@ describe("evidence-only current census", () => {
       await expect(client.readCensusDiagnostic("system.tree", { all_windows: true })).rejects.toThrow("connection closed");
       expect(call).toHaveBeenCalledTimes(2);
     } finally { call.mockRestore(); generation.mockRestore(); }
+  });
+  it("rejects an old response settled before transport replacement, without replay", async () => {
+    const client = new CmuxSocketClient();
+    const internal = client as unknown as { transport: CmuxPersistentSocket; transportSerial: number };
+    const old = internal.transport;
+    let settle!: (value: object) => void, enter!: () => void;
+    const started = new Promise<void>(resolve => { enter = resolve; });
+    const response = new Promise<object>(resolve => { settle = resolve; });
+    const call = vi.spyOn(old, "call").mockImplementation(() => { enter(); return response; });
+    const generation = vi.spyOn(old, "currentConnectionGeneration").mockReturnValue(7);
+    try {
+      const reading = client.readCensusDiagnostic("system.tree");
+      const rejected = expect(reading).rejects.toMatchObject({ code: "census_transport_changed" });
+      await started; settle({ from: "old" });
+      internal.transport = new CmuxPersistentSocket(); internal.transportSerial = 1;
+      await rejected; expect(call).toHaveBeenCalledTimes(1);
+    } finally { call.mockRestore(); generation.mockRestore(); }
+  });
+  it.each([[7, 8, false], [0, 2, false], [0, 1, true]])("qualifies connection generation %i→%i only when owned", async (before, after, allowed) => {
+    const generation = vi.spyOn(CmuxPersistentSocket.prototype, "currentConnectionGeneration").mockReturnValueOnce(before).mockReturnValue(after);
+    const call = vi.spyOn(CmuxPersistentSocket.prototype, "call").mockResolvedValue({ observed: true });
+    try {
+      const result = new CmuxSocketClient().readCensusDiagnostic("system.tree");
+      if (allowed) expect(await result).toEqual({ value: { observed: true }, generation: `0:${after}` });
+      else await expect(result).rejects.toMatchObject({ code: "census_transport_changed" });
+      expect(call).toHaveBeenCalledTimes(1);
+    } finally { call.mockRestore(); generation.mockRestore(); }
+  });
+  it.each([null, { ...process(), failures: [{ operation: "cwd-before", errno: "EPERM", identity: process().identityAfter }] }])("conserves valid membership and rows beside malformed kernel evidence %#", async malformed => {
+    const raw = { before: [42, 99], after: [42, 99], processes: [process(99), malformed], reason: null };
+    const result = await collectCurrentSessionCensus(reads([raw as unknown as KernelObservation, raw as unknown as KernelObservation]), 501);
+    expect(result.finalMembership).toBeNull(); expect(result.attempts[0].kernel.before).toEqual([42, 99]);
+    expect(result.attempts[0].kernel.after).toEqual([42, 99]); expect(result.observations).toContainEqual(process(99));
+    expect(result.attempts[0].kernel.invalidRows[0].index).toBe(1); expect(result.blockers).toContain("kernel output malformed");
+    if (malformed) expect(result.attempts[0].kernel.invalidRows[0].evidence.failures).toEqual([{ operation: "cwd-before", errno: "EPERM", identity: process().identityAfter }]);
+  });
+  it("retains independently available partial launch fields without requiring a tuple", async () => {
+    const partial = { pid: 42, uid: 501, startSeconds: "123", startMicroseconds: null, cwd: "/partial", failures: [{ operation: "identity-after", errno: 1, identity: { pid: 42, uid: 501 } }], secret: "PRIVATE" };
+    const raw = { before: [42], after: [42], processes: [partial, { uid: 501, startMicroseconds: "4", cwd: "/no-pid" }], reason: null };
+    const result = await collectCurrentSessionCensus(reads([raw as unknown as KernelObservation, raw as unknown as KernelObservation]), 501);
+    expect(result.observations[0]).toMatchObject({ pid: 42, uid: 501, startSeconds: "123", startMicroseconds: null, cwd: "/partial" });
+    expect(result.observations[0].failures[0]).toMatchObject({ operation: "identity-after", errno: 1, identity: { pid: 42, uid: 501 } });
+    expect(result.attempts[0].kernel.invalidRows[1].evidence.identity).toEqual({ uid: 501, startMicroseconds: "4", cwd: "/no-pid" });
+    expect(result.finalMembership).toBeNull(); expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
+  it("conserves registration references while marking null and missing-field rows malformed", async () => {
+    const r = reads(), valid = { reference: "row:1834", digest: null, disposition: "unresolved", sessionId: null };
+    r.registrations = async () => [valid, null, {}, { reference: "row:9", digest: null, sessionId: null, secret: "PRIVATE" }] as unknown as Awaited<ReturnType<NonNullable<CensusReads["registrations"]>>>;
+    const result = await collectCurrentSessionCensus(r, 501);
+    expect(result.registrations?.[0]).toEqual(valid);
+    expect(result.registrations?.slice(1).map(p => [p.reference, p.disposition])).toEqual([[null, "malformed"], [null, "malformed"], ["row:9", "malformed"]]);
+    expect(result.invalidRegistrations.map(r => r.index)).toEqual([1, 2, 3]);
+    expect(result.blockers).toContain("registration row malformed or unavailable"); expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
+  it("retains duplicate mapped terminal rows as explicit identity ambiguity", async () => {
+    const r = reads(), native = r.native, terminal = { surface_id: "s", mapped: true, runtime_surface_ready: true };
+    r.native = async (m, p) => m === "debug.terminals" ? { generation: "0:1", value: { count: 2, terminals: [terminal, { ...terminal }] } } : native(m, p);
+    const result = await collectCurrentSessionCensus(r, 501);
+    const diagnostic = result.attempts[0].before.diagnostics.find(d => d.method === "debug.terminals")!;
+    expect(diagnostic.objects).toHaveLength(2); expect(diagnostic.reason).toBe("malformed or truncated");
+    expect(result.blockers).toContain("native malformed or truncated"); expect(result.finalMembership).toBeNull();
+  });
+  it.each([{ pid: -1 }, { cwd: "relative" }, { startSeconds: "0" }, { startMicroseconds: "1000000" }, { uid: 502 }])("never resolves invalid captured historical evidence %j", async change => {
+    const identity = { ...process().identityAfter, ...change };
+    const gone = { ...process(identity.pid), identityAfter: null, errors: ["ESRCH"], failures: [{ operation: "cwd-after", errno: 3, identity }] };
+    const result = await collectCurrentSessionCensus(reads([{ before: [42], after: [], processes: [gone], reason: null }, { before: [], after: [], processes: [], reason: null }]), 501);
+    expect(result.observations[0].failures[0].identity).toEqual(identity);
+    expect(result.resolutions[0].disposition).toBe("unresolved"); expect(result.blockers).toContain("historical launch or path unknown");
+    if (change.cwd === undefined) expect(result.resolutions[0].historicalIdentityKnown).toBe(false);
+  });
+  it("requires native reconciliation to qualify the final bracket and ESRCH resolution", async () => {
+    const gone = { ...process(), identityAfter: null, errors: ["ESRCH"], failures: [{ operation: "cwd-after", errno: 3, identity: process().identityAfter }] };
+    const r = reads([{ before: [42], after: [], processes: [gone], reason: null }, { before: [], after: [], processes: [], reason: null }]), native = r.native;
+    r.native = async (m, p) => m === "surface.list" ? { generation: "0:1", value: { surfaces: [] } } : native(m, p);
+    const result = await collectCurrentSessionCensus(r, 501);
+    expect(result.attempts[1].kernel.after).toEqual([]); expect(result.attempts[1].before.reconciled).toBe(false);
+    expect(result.finalMembership).toBeNull(); expect(result.resolutions[0].disposition).toBe("unresolved");
+    expect(result.blockers).toContain("native membership mismatch");
   });
 });

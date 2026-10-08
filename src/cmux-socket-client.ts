@@ -440,9 +440,20 @@ export class CmuxSocketClient {
     if (!["system.capabilities", "system.tree", "system.top", "debug.terminals", "window.list", "workspace.list", "pane.list", "surface.list"].includes(method)) {
       throw new CmuxSocketError("Unsupported census diagnostic", "unsupported_diagnostic");
     }
+    const transport = this.transport, serial = this.transportSerial;
+    const owned = () => transport === this.transport && serial === this.transportSerial;
+    const changed = () => new CmuxSocketError("Census transport ownership changed", "census_transport_changed");
     await this.ensureAuthenticated();
-    const value = await this.transport.call(method, params, { polling: CMUX_POLLING_METHODS.has(method) });
-    return { value, generation: `${this.transportSerial}:${this.transport.currentConnectionGeneration()}` };
+    if (!owned()) throw changed();
+    const generation = transport.currentConnectionGeneration();
+    const value = await transport.call(method, params, { polling: CMUX_POLLING_METHODS.has(method) });
+    // Even an already-settled response is unqualified if ownership changed
+    // before this continuation. Never relabel it with the new connection.
+    const respondingGeneration = transport.currentConnectionGeneration();
+    // A brand-new transport may establish its first connection inside call.
+    // Any later generation advance means the responding epoch is uncertain.
+    if (!owned() || (generation !== respondingGeneration && !(generation === 0 && respondingGeneration === 1))) throw changed();
+    return { value, generation: `${serial}:${respondingGeneration}` };
   }
 
   async listTerminalMetadata(): Promise<{
