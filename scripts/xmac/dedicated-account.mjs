@@ -1,6 +1,6 @@
 // Dedicated standard-account contract. Importing never inspects or mutates a host.
 import { userInfo } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { lstatSync, realpathSync, readdirSync, openSync, fstatSync, readSync, closeSync, constants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -9,7 +9,7 @@ export const accountContract = "dedicated-test-502-v1";
 const socketPath = "/tmp/cmux-soak-stable.sock";
 export const fixtureMarkers = ["/Users/test/.local/state/cmux/last-socket-path",
   "/Users/test/Library/Application Support/cmux/last-socket-path", "/tmp/cmux-last-socket-path"];
-const stateRoots = home => [".local/state/cmux", ".local/state/cmuxlayer", ".cmux/agents", ".cmuxlayer/tickets",
+export const stateRoots = home => [".local/state/cmux", ".local/state/cmuxlayer", ".cmux/agents", ".cmuxlayer/tickets",
   "Library/Application Support/cmux", "Library/Preferences/com.cmuxterm.app.plist",
   "Library/Caches/com.cmuxterm.app", "Library/Logs/cmux"].map(path => join(home, path));
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -87,8 +87,22 @@ export function readStatePaths(paths) {
   for (const path of [...paths].sort()) walk(path);
   return records;
 }
-export function verifyDedicatedState(binding, before, after, { requireMarkers = false } = {}) {
+export function validateProtectedMirror(row) {
+  if (row?.path !== fixtureMarkers[2] || row.canonical !== "/private/tmp/cmux-last-socket-path" || row.kind !== "file" ||
+      row.uid !== 501 || row.nlink !== 1 || row.mode & 0o022 || row.flags !== 0 || row.aclEmpty !== true ||
+      row.writableToFixture !== false || !Number.isInteger(row.size) || row.size < 0 || row.size > 4096 || !/^[a-f0-9]{64}$/.test(row.hash) ||
+      row.parent?.path !== "/private/tmp" || row.parent.kind !== "directory" || row.parent.uid !== 0 || row.parent.mode !== 0o1777 || row.parent.aclEmpty !== true ||
+      row.ancestor?.path !== "/private" || row.ancestor.kind !== "directory" || row.ancestor.uid !== 0 || row.ancestor.mode & 0o022 || row.ancestor.aclEmpty !== true)
+    throw new Error("protected mirror filesystem/write-denial proof invalid");
+  return row;
+}
+export function verifyDedicatedState(binding, before, after, { requireMarkers = false, protectedMirror = false } = {}) {
   validateDedicatedIdentity(binding);
+  if (protectedMirror) {
+    validateProtectedMirror(before.mirror); validateProtectedMirror(after.mirror);
+    if (!same(before.mirror, after.mirror)) throw new Error("protected mirror changed or replaced");
+    if (before.fixture[fixtureMarkers[2]] || after.fixture[fixtureMarkers[2]]) throw new Error("protected mirror cannot be fixture state");
+  }
   if (!same(before.production, after.production) || !same(before.processes, after.processes)) throw new Error("protected production state/process changed");
   const parents = fixtureMarkers.filter(path => path.startsWith(binding.fixture.home + "/")).map(dirname);
   for (const snapshot of [before, after]) {
@@ -108,24 +122,39 @@ export function verifyDedicatedState(binding, before, after, { requireMarkers = 
     if (!before.fixture[path] && parents.includes(path) && row?.kind === "directory" && row.uid === 502 && row.mode === 0o700) continue;
     throw new Error(`unexpected fixture state write: ${path}`);
   }
-  if (requireMarkers && fixtureMarkers.some(path => !after.fixture[path])) throw new Error("documented fixture markers not all observed");
+  if (requireMarkers && fixtureMarkers.slice(0, protectedMirror ? 2 : 3).some(path => !after.fixture[path])) throw new Error("documented fixture markers not all observed");
 }
 const processes = () => run("/bin/ps", ["-axo", "uid=,pid=,lstart=,comm="]).split("\n")
   .filter(line => /^\s*501\s/.test(line)).map(line => line.trim()).sort();
-export function createDedicatedAccountGuard({ observe = observeDedicatedIdentity, capture, processQuery = run, statPath = lstatSync, realpath = realpathSync } = {}) {
+export function createDedicatedAccountGuard({ observe = observeDedicatedIdentity, capture, protectedObserver, mirrorAccess, fixtureCapture = readStatePaths, processQuery = run, statPath = lstatSync, realpath = realpathSync } = {}) {
   const binding = observe();
-  const snapshot = capture ?? (() => ({ fixture: readStatePaths([...stateRoots(binding.fixture.home), fixtureMarkers[2]]),
+  const snapshot = capture ?? (protectedObserver ? (context = {}) => {
+    const remote = protectedObserver(context), row = remote.mirror;
+    if (["uid", "home", "dev", "ino"].some(key => remote.identity[key] !== binding.production[key])) throw new Error("protected observer home identity mismatch");
+    const writable = mirrorAccess ? mirrorAccess(row) : (() => {
+      const stat = statPath(fixtureMarkers[2]);
+      if (!stat.isFile() || stat.isSymbolicLink() || ["uid", "gid", "dev", "ino", "nlink", "size"].some(key => stat[key] !== row[key]) || (stat.mode & 0o777) !== row.mode || realpath(fixtureMarkers[2]) !== row.canonical) throw new Error("protected mirror local identity mismatch");
+      const access = spawnSync("/bin/test", ["-w", fixtureMarkers[2]], { timeout: 5000 });
+      if (access.error || ![0, 1].includes(access.status)) throw new Error("protected mirror write access unavailable");
+      return access.status === 0;
+    })();
+    validateProtectedMirror({ ...row, writableToFixture: writable });
+    return { ...remote, mirror: { ...row, writableToFixture: writable }, fixture: fixtureCapture(stateRoots(binding.fixture.home)) };
+  } : () => ({ fixture: readStatePaths([...stateRoots(binding.fixture.home), fixtureMarkers[2]]),
     production: readStatePaths(stateRoots(binding.production.home)), processes: processes() }));
-  if (!capture) {
+  const verify = (a, b, options) => verifyDedicatedState(binding, a, b, { ...options, protectedMirror: !!protectedObserver });
+  if (!capture && !protectedObserver) {
     const global = { fixture: readStatePaths([fixtureMarkers[2]]), production: {}, processes: [] };
     verifyDedicatedState(binding, global, global); // Reject the shared marker before protected-tree reads.
   }
-  const before = snapshot(); verifyDedicatedState(binding, before, before);
+  const before = snapshot({ phase: "baseline" }); verify(before, before);
   let checks = 0, last = before, failure = null;
-  const check = ({ receipt, env, phase } = {}) => {
+  const check = ({ receipt, env, phase, identifiers = [], agentIds = [] } = {}) => {
     try {
       if (!same(binding, observe())) throw new Error("dedicated account identity changed");
-      last = snapshot(); verifyDedicatedState(binding, before, last, { requireMarkers: phase === "socket-ready" || phase === "runtime-ready" }); checks++;
+      last = snapshot({ phase: phase ?? "checkpoint", identifiers, agentIds });
+      if (last.append?.violations.length) throw new Error("protected production append changed");
+      verify(before, last, { requireMarkers: phase === "socket-ready" || phase === "runtime-ready" }); checks++;
       for (const process of [receipt?.app_process, receipt?.daemon].filter(Boolean)) {
         if (processQuery("/bin/ps", ["-p", String(process.pid), "-o", "uid="]) !== "502" ||
             processQuery("/bin/ps", ["-p", String(process.pid), "-o", "pid=,lstart=,comm="]).replace(/\s+/g, " ") !== process.saved.replace(/\s+/g, " ")) throw new Error("fixture process UID/identity changed");
