@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 
 const names = ["session_id", "surface_uuid", "pid", "cwd", "worktree_path", "launch_cwd", "cli", "launcher", "ts", "session_path"] as const;
 type Field = typeof names[number];
-type Claim = { kind: string; value: string | number | boolean | null; usable: boolean; numberLexeme?: string };
+type Claim = { kind: string; value: string | number | boolean | null; usable: boolean; numberLexeme?: string; numericBoundaryObserved?: boolean };
 export interface RegistrationRow {
   reference: string; registryId: string; rowNumber: number; byteOffset: number;
   byteLength: number; delimiter: "LF" | "EOF" | "UNKNOWN";
@@ -42,21 +42,40 @@ function fields(bytes: Buffer) {
   const lexical = bytes.toString("latin1");
   const decode = (raw: string) => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(raw, "latin1")));
   const token = /\s*("(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[\da-fA-F]{4}))*"|[{}\[\]:,]|[^\s"{}\[\]:,]+)/gy;
-  const tokens: string[] = []; let match: RegExpExecArray | null;
-  while ((match = token.exec(lexical))) tokens.push(match[1]);
-  const stack: { kind: string; keys: Set<string> }[] = [];
+  const tokens: { raw: string; end: number }[] = []; let match: RegExpExecArray | null;
+  while ((match = token.exec(lexical))) tokens.push({ raw: match[1], end: token.lastIndex });
+  type Phase = "key" | "colon" | "value" | "after" | "ambiguous";
+  const stack: { kind: string; keys: Set<string>; phase: Phase; root: boolean }[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t === "{" || t === "[") { stack.push({ kind: t, keys: new Set() }); continue; }
-    if (t === "}" || t === "]") { stack.pop(); continue; }
+    const t = tokens[i].raw, parent = stack.at(-1);
+    if (t === "{" || t === "[") {
+      if (parent) parent.phase = parent.phase === "value" ? "after" : "ambiguous";
+      stack.push({ kind: t, keys: new Set(), phase: "key", root: i === 0 && t === "{" });
+      continue;
+    }
+    if (t === "}" || t === "]") {
+      if (parent?.kind === (t === "}" ? "{" : "[")) stack.pop();
+      else if (parent) parent.phase = "ambiguous";
+      continue;
+    }
     const object = stack.at(-1);
-    if (object?.kind !== "{" || !t.startsWith('"') || tokens[i + 1] !== ":") continue;
+    if (object?.kind !== "{") continue;
+    // Only a member position establishes a key. Extra private value tokens stay
+    // ambiguous until an observed comma at this same object depth restores it.
+    if (t === ",") { object.phase = "key"; continue; }
+    if (t === ":") { object.phase = object.phase === "colon" ? "value" : "ambiguous"; continue; }
+    if (object.phase === "value") { object.phase = "after"; continue; }
+    if (object.phase !== "key" || !t.startsWith('"') || tokens[i + 1]?.raw !== ":") {
+      object.phase = "ambiguous";
+      continue;
+    }
+    object.phase = "colon";
     let key: string;
     try { key = decode(t); } catch { reasons.push("invalid key encoding"); continue; }
     if (object.keys.has(key)) reasons.push("duplicate key");
     object.keys.add(key);
-    if (stack.length !== 1 || !names.includes(key as Field)) continue;
-    const raw = tokens[i + 2], field = key as Field;
+    if (!object.root || !names.includes(key as Field)) continue;
+    const raw = tokens[i + 2]?.raw, field = key as Field;
     const compound = raw === "{" || raw === "[";
     let value: Claim["value"] = null;
     let kind = raw === undefined ? "incomplete" : compound ? raw === "{" ? "object" : "array" : "invalid";
@@ -64,10 +83,17 @@ function fields(bytes: Buffer) {
       try { value = decode(raw); kind = value === null ? "null" : typeof value; }
       catch { reasons.push(`invalid ${field} encoding or token`); }
     }
+    const numericAtom = kind === "number" || (kind === "invalid" && /^-?[\d.eE+-]+$/.test(raw ?? ""));
+    // EOF of a projection/read prefix is not an observed numeric terminator.
+    const numericBoundaryObserved = /[ \t\r\n,}\]]/.test(lexical[tokens[i + 2]?.end ?? lexical.length] ?? "");
+    if (numericAtom && !numericBoundaryObserved) {
+      kind = "incomplete-number"; value = null;
+      reasons.push(`incomplete ${field} numeric atom; boundary unobserved`);
+    }
     const numeric = field === "pid" || field === "ts";
-    const usable = numeric ? typeof value === "number" && Number.isSafeInteger(value) && /^(0|[1-9]\d*)$/.test(raw) && value >= (field === "pid" ? 1 : 0) : validText(value);
+    const usable = numeric ? numericBoundaryObserved && typeof value === "number" && Number.isSafeInteger(value) && /^(0|[1-9]\d*)$/.test(raw ?? "") && value >= (field === "pid" ? 1 : 0) : validText(value);
     const claim: Claim = { kind, value: typeof value === "number" && !Number.isSafeInteger(value) ? null : value, usable };
-    if (kind === "number" || (kind === "invalid" && /^-?[\d.eE+-]+$/.test(raw))) claim.numberLexeme = raw;
+    if (numericAtom) { claim.numberLexeme = raw; claim.numericBoundaryObserved = numericBoundaryObserved; }
     (claims[field] ??= []).push(claim);
     if (!usable) reasons.push(`invalid ${field} claim`);
   }

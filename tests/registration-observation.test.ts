@@ -42,6 +42,49 @@ function intercepted(action: (path: string, calls: number) => Promise<void>): Op
   } };
 }
 describe("physical registration bytes through the actual census", () => {
+  it.each([
+    '{"private":"cwd":"/PRIVATE_CANARY","session_id":"kept","launch_cwd":"/kept"}',
+    '{"private" "cwd":"/PRIVATE_CANARY","session_id":"kept","launch_cwd":"/kept"}',
+    '{"private":"p\\u0069d":1834,"session_id":"kept","launch_cwd":"/kept"}',
+    '{"private":[{"cwd":"/PRIVATE_CANARY"}],"session_id":"kept","launch_cwd":"/kept"}',
+    '{"private":{"cwd":"/PRIVATE_CANARY","cwd":"/PRIVATE_CANARY"},"session_id":"kept","launch_cwd":"/kept"}',
+  ])("keeps private/value/member contexts separate and retains independent later members: %s", async bytes => {
+    const result = await collect(reader(fixture(bytes))), row = result.registrationObservation!.rows[0];
+    expect(row.claims.cwd).toBeUndefined(); expect(row.claims.pid).toBeUndefined();
+    expect(row.sessionId).toBe("kept"); expect(row.claims.launch_cwd?.[0].value).toBe("/kept");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY"); expect(row.digest).toBe(sha(bytes));
+  });
+  it("does not reinterpret a second root object as a registration member", async () => {
+    const bytes = '{"session_id":"kept"}{"cwd":"/PRIVATE_CANARY"}';
+    const result = await collect(reader(fixture(bytes))), row = result.registrationObservation!.rows[0];
+    expect(row.sessionId).toBe("kept"); expect(row.claims.cwd).toBeUndefined();
+    expect(row.disposition).toBe("malformed"); expect(JSON.stringify(result)).not.toContain("PRIVATE_CANARY");
+  });
+  it.each(["byte-limit", "field-prefix", "read-failure", "EOF"])("retains a cut numeric lexeme with unknown value beside independent complete fields: %s", async mode => {
+    const prefix = '{"session_id":"kept","cwd":"/kept","pid":12', bytes = prefix + '3456}\n';
+    const options: Options = mode === "byte-limit" ? { maxBytes: prefix.length, maxRowBytes: prefix.length }
+      : mode === "field-prefix" ? { maxRowBytes: prefix.length } : {};
+    if (mode === "read-failure") options.io = { stat, open: async (p, flags) => {
+      const h = await open(p, flags); let calls = 0;
+      return { stat: h.stat.bind(h), close: h.close.bind(h), read: async (buffer, offset, length, position) => {
+        if (++calls > 1) throw new Error("owned injected read failure");
+        return h.read(buffer, offset, Math.min(length, prefix.length), position);
+      } };
+    } };
+    const result = await collect(reader(fixture(mode === "EOF" ? prefix : bytes), options)), row = result.registrationObservation!.rows[0];
+    expect(row.claims.pid?.[0]).toMatchObject({ kind: "incomplete-number", value: null, usable: false, numberLexeme: "12", numericBoundaryObserved: false });
+    expect(row.sessionId).toBe("kept"); expect(row.claims.cwd?.[0].value).toBe("/kept");
+    if (mode === "field-prefix") expect(row.digest).toBe(sha(bytes));
+    else if (mode === "EOF") expect(row.digest).toBe(sha(prefix));
+    else { expect(row.digest).toBeNull(); expect(row.prefixDigest).toBe(sha(prefix)); expect(result.registrationObservation?.unknownRemainder).not.toBeNull(); }
+  });
+  it.each([",", " ", "\t", "}", "}\r\n"])("retains a completed numeric claim when the actual boundary is observed: %j", async boundary => {
+    const bytes = '{"session_id":"kept","ts":1e,"pid":12' + boundary;
+    const row = (await collect(reader(fixture(bytes)))).registrationObservation!.rows[0];
+    expect(row.claims.pid?.[0]).toMatchObject({ value: 12, usable: true, numberLexeme: "12", numericBoundaryObserved: true });
+    expect(row.sessionId).toBe("kept"); expect(row.claims.ts?.[0]).toMatchObject({ kind: "invalid", usable: false, numberLexeme: "1e" });
+    expect(row.byteOffset).toBe(0); expect(row.digest).toBe(sha(bytes));
+  });
   it("distinguishes identical row bytes and computes UTF-8 offsets without an extra terminal-LF row", async () => {
     const line = '{"session_id":"שלום😀"}\n', rows = (await collect(reader(fixture(line + line)))).registrationObservation!.rows;
     expect(rows).toHaveLength(2); expect(rows[1].byteOffset).toBe(Buffer.byteLength(line));
