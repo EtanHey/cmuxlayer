@@ -49,22 +49,28 @@ export function observeDedicatedIdentity() {
   return validateDedicatedIdentity({ fixture, production, processUid: process.getuid(),
     consoleUid: lstatSync("/dev/console").uid, aqua: true, admin: false });
 }
-function safeAncestors(path) {
+function safeAncestors(path, statPath = lstatSync, canonical = realpathSync) {
   for (let current = dirname(path); current !== "/"; current = dirname(current)) {
-    const stat = absent(() => lstatSync(current));
-    if (stat?.isSymbolicLink() && !(current === "/tmp" && realpathSync(current) === "/private/tmp")) throw new Error("state ancestor symlink refused");
+    const stat = absent(() => statPath(current));
+    if (stat?.isSymbolicLink() && !(current === "/tmp" && canonical(current) === "/private/tmp")) throw new Error("state ancestor symlink refused");
   }
 }
-export function readStatePaths(paths) {
+export function readStatePaths(paths, io = {}) {
+  const statPath = io.lstatSync ?? lstatSync, list = io.readdirSync ?? readdirSync, canonical = io.realpathSync ?? realpathSync;
   const records = {}; let count = 0, total = 0;
   const walk = path => {
-    safeAncestors(path);
-    const stat = absent(() => lstatSync(path)); if (!stat) return;
+    safeAncestors(path, statPath, canonical);
+    const stat = absent(() => statPath(path)); if (!stat) return;
     if (++count > 4096 || stat.isSymbolicLink()) throw new Error("state symlink or inventory limit refused");
     const facts = { uid: stat.uid, mode: stat.mode & 0o777, dev: stat.dev, ino: stat.ino };
     if (stat.isDirectory()) {
       records[path] = { kind: "directory", ...facts };
-      for (const name of readdirSync(path).sort()) walk(join(path, name));
+      for (const name of list(path).sort()) walk(join(path, name));
+      safeAncestors(path, statPath, canonical);
+      const after = statPath(path);
+      if (!after.isDirectory() || after.isSymbolicLink() ||
+          ["uid", "gid", "mode", "dev", "ino", "nlink", "size", "mtimeMs", "ctimeMs"].some(key => after[key] !== stat[key]))
+        throw new Error("state directory changed during traversal");
     } else if (stat.isFile()) {
       if (stat.nlink !== 1 || stat.size > 4 * 1024 * 1024 || (total += stat.size) > 16 * 1024 * 1024) throw new Error("state file links or byte limit refused");
       const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
