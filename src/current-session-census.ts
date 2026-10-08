@@ -89,9 +89,14 @@ const signature = (objects: ObjectEvidence[]) => members(objects).map(o => JSON.
 type ScalarEvidence = string | number | boolean | null;
 const scalar = (v: unknown): v is ScalarEvidence => v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v));
 const identityFields = ["pid", "ppid", "uid", "startSeconds", "startMicroseconds", "cwd"] as const;
-const captured = <K extends string>(v: unknown, fields: readonly K[]): Partial<Record<K, ScalarEvidence>> => Object.fromEntries(fields.flatMap(k => {
-  const row = record(v); return row && scalar(row[k]) ? [[k, row[k]]] : [];
-}));
+const captured = <K extends string>(v: unknown, fields: readonly K[]): Partial<Record<K, ScalarEvidence>> => {
+  const result: Partial<Record<K, ScalarEvidence>> = {}, row = record(v);
+  for (const key of fields) {
+    const value = row?.[key];
+    if (scalar(value)) result[key] = value;
+  }
+  return result;
+};
 const failureFields = ["operation", "errno", "reason", "bytes", "expectedBytes"] as const;
 const readFields = ["operation", "queryBytes", "bytes", "capacityBytes", "errno", "reason"] as const;
 const integer = z.number().int().safe(), nullableInteger = integer.nullable();
