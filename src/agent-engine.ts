@@ -63,6 +63,7 @@ import {
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
+  contentFingerprint,
   readWatchRegistry,
   releaseWatchWaiter,
   sweepWatches,
@@ -3447,6 +3448,28 @@ export class AgentEngine {
     if (!Number.isFinite(startedAt) || mtime < startedAt ||
         (agent.reopen_report_mtime_ms != null && mtime <= agent.reopen_report_mtime_ms)) return null;
     return this.reportTerminalOutcome(agent);
+  }
+
+  /** Keep public observations, but route the parent's terminal revision once
+   * through the persisted report episode and its original delivery receipt. */
+  coalescesReportWatch(ownerAgentId: string, target: string, observedValue: unknown): boolean {
+    if (!this.reportOutcomeNotifications || typeof observedValue !== "string") return false;
+    const children = this.stateMgr.listStates().filter((agent) =>
+      agent.parent_agent_id === ownerAgentId && agent.report_path &&
+      resolve(agent.report_path) === resolve(target));
+    if (children.length !== 1) return false;
+    const child = children[0]!;
+    if (child.user_killed || child.deletion_intent || child.state === "error" ||
+        child.paused || child.blocked_on_prompt) return false;
+    try {
+      if (contentFingerprint(target) !== observedValue) return false;
+      const outcome = this.reportReadyOutcome(child);
+      return Boolean(outcome &&
+        (outcome === "done" ? child.report_done_delivery_id : child.report_blocked_delivery_id) &&
+        contentFingerprint(target) === observedValue);
+    } catch {
+      return false;
+    }
   }
 
   private async maybeNotifyReportOutcome(

@@ -20,7 +20,7 @@ import { AgentEngine } from "../src/agent-engine.js";
 import { AgentDiscovery } from "../src/agent-discovery.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
-import { armWatch, readWatchRegistry } from "../src/watch-spec.js";
+import { armWatch, contentFingerprint, readWatchRegistry } from "../src/watch-spec.js";
 import { ack, dispatch, writeHeartbeat } from "../src/inbox.js";
 import { AGENT_HEALTH_MONITOR_MAX_AGE_MS } from "../src/agent-health-input.js";
 import type { CmuxClient } from "../src/cmux-client.js";
@@ -3211,6 +3211,42 @@ describe("Agent reconcile", () => {
       await engine.runSweep();
     };
 
+
+    it("coalesces only the parent's exact fresh terminal revision without settling delivery", async () => {
+      await setup();
+      const owns = (owner = "lead-report-parent", digest = contentFingerprint(reportPath)) =>
+        engine.coalescesReportWatch(owner, reportPath, digest);
+      writeFileSync(reportPath, "IN_PROGRESS\n");
+      const progressDigest = contentFingerprint(reportPath);
+      expect(owns()).toBe(false);
+      writeFileSync(reportPath, "DONE_REPORT_EPISODE\nStill working\n");
+      expect(owns()).toBe(false);
+      writeFileSync(reportPath, "Complete\nDONE_REPORT_EPISODE\n");
+      expect(owns()).toBe(true);
+      expect(owns("other-owner")).toBe(false);
+      expect(owns("lead-report-parent", progressDigest)).toBe(false);
+      const episode = stateMgr.readState(childId)!;
+      for (const patch of [{ paused: true }, { blocked_on_prompt: true }, { user_killed: true },
+        { deletion_intent: true }, { state: "error" as const }, { report_done_delivery_id: null },
+        { report_episode_key: "old-episode" }, { reopen_report_mtime_ms: Date.now() + 10_000 }]) {
+        persist(patch);
+        expect(owns(), JSON.stringify(patch)).toBe(false);
+        stateMgr.writeState(episode);
+        engine.getRegistry().set(childId, episode);
+      }
+      stateMgr.writeState({ ...episode, agent_id: "ambiguous-other-child" });
+      expect(owns()).toBe(false);
+      // Retain a failed delivery as pending; coalescing never writes its ACK.
+      stateMgr.removeState("ambiguous-other-child");
+      mockClient.notifyLifecycleEvent.mockRejectedValueOnce(new Error("injected delivery failure"));
+      await finish();
+      expect(doneCalls()).toHaveLength(1);
+      expect(stateMgr.readState(childId)!.report_done_notified_episode ?? null).toBeNull();
+      expect(owns()).toBe(true);
+      await engine.runSweep();
+      expect(doneCalls()).toHaveLength(2);
+      expect(stateMgr.readState(childId)!.report_done_notified_episode).toBe(episode.report_episode_key);
+    });
 
     describe("report marker-write ratchets", () => {
       const outcomes = ["done", "blocked"] as const;

@@ -670,6 +670,13 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
                   reason: "subject_not_owned",
                 };
           }
+          if (event.provenance === "public" && event.target_kind === "file" &&
+              event.reason === "target_changed" &&
+              engine.coalescesReportWatch(owner.agent_id, event.target, event.observed_value)) {
+            // This settles only the public observation. The engine still owes
+            // completion delivery, including pending ACK verification/restart.
+            return true;
+          }
           if (owner && deps.lifecycleAgentInputDeliverer) {
             const externalFallbackAfterLocalFailure = async () => {
               if (!subjectStillBelongsToOwner(owner.agent_id)) {

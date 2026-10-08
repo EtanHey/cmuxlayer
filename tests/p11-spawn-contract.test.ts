@@ -4530,7 +4530,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.report_path).toBe(override);
   });
 
-  it.each(["normal", "marker-write failure"])("relays fast spawned BLOCKED then DONE once each and preserves public change watches (%s)", async (mode) => {
+  it.each(["normal", "marker-write failure", "watch-first"])("relays fast spawned BLOCKED then DONE once each and coalesces parent content watches (%s)", async (mode) => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -4559,7 +4559,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       "getTransportHealth",
     ).mockReturnValue({ mode: "socket", degraded: false });
     useCapturedTransport();
-    const parent = parentRecord(parentUuid);
+    const parent = { ...parentRecord(parentUuid), seat_id: "lead-seat" };
     const reportPath = join(inboxDir, "verified-report.md");
     engine.stateMgr.writeState(parent);
     engine.getRegistry().set(parent.agent_id, parent);
@@ -4590,14 +4590,24 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const pings = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
       ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[report] ${child.agent_id} done — read ${reportPath}`)),
     );
-    writeFileSync(reportPath, "Still working\n");
+    const publicWatch = await engine.armWatch({ owner: parent.seat_id, provenance: "public",
+      target: reportPath, change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const watchPings = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[watch] file changed — inspect ${reportPath}`)),
+    );
+    writeFileSync(reportPath, "IN_PROGRESS\n");
     await engine.sweepWatchesBestEffort();
     expect(pings()).toHaveLength(0);
+    expect(watchPings()).toHaveLength(1);
+    await engine.sweepWatchesBestEffort(); // Identical bytes do not repeat.
+    expect(watchPings()).toHaveLength(1);
     writeFileSync(reportPath, `Complete\n${child.done_marker}\n`);
     engine.stateMgr.transition(child.agent_id, "done");
     engine.getRegistry().set(child.agent_id, engine.stateMgr.readState(child.agent_id)!);
     await engine.runSweep();
     expect(pings()).toHaveLength(0);
+    if (mode === "watch-first") await engine.sweepWatchesBestEffort();
+    expect(watchPings()).toHaveLength(1);
     // Pending DONE survives a daemon restart before the worker becomes resting.
     await server.close();
     server = createServer(options);
@@ -4661,8 +4671,67 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     await engine.sweepWatchesBestEffort();
     expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforePublic).some(
       ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[watch] file changed — inspect ${reportPath}`)),
-    )).toBe(true);
+    )).toBe(false);
     expect(pings()).toHaveLength(1);
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+      (watch) => watch.watch_id === publicWatch.watch_id,
+    )).toMatchObject({ provenance: "public", state: "armed", notification_pending: false });
+    // A different owner still receives the same completed revision.
+    const other = { ...parent, agent_id: "other-lead", seat_id: "other-seat", surface_id: childSurface.ref,
+      surface_uuid: childUuid };
+    engine.stateMgr.writeState(other);
+    engine.getRegistry().set(other.agent_id, other);
+    await engine.armWatch({ owner: other.agent_id, provenance: "public", target: reportPath,
+      change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const beforeOther = watchPings().length;
+    writeFileSync(reportPath, `Other owner revision\n${child.done_marker}\n`);
+    await engine.sweepWatchesBestEffort();
+    expect(watchPings()).toHaveLength(beforeOther + 1);
+  });
+
+  it("coalescing a report watch preserves its pending ACK receipt across restart", async () => {
+    await server.close();
+    const parent = parentRecord();
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined,
+      [], parent.surface_uuid!);
+    const options = withTestSurfaceObserver({ exec, stateDir: STATE_DIR,
+      disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath });
+    server = createServer(options);
+    let engine = engineForTests(server);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const reportPath = join(inboxDir, "pending-report.md");
+    writeFileSync(reportPath, "IN_PROGRESS\n");
+    const child = { ...parent, agent_id: "pending-child", surface_id: "surface:child",
+      surface_uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", parent_agent_id: parent.agent_id,
+      report_path: reportPath, done_marker: "DONE_PENDING_CHILD", state: "done" as const,
+      boot_instance_id: "pending-boot", report_episode_key: "pending-boot:0",
+      report_episode_started_at: new Date(Date.now() - 1000).toISOString(),
+      report_done_delivery_id: "original-uncertain-completion" };
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    await engine.armWatch({ owner: parent.agent_id, provenance: "public", target: reportPath,
+      change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const receipt = engine.acceptPendingVerify({ delivery_id: child.report_done_delivery_id,
+      agent_id: parent.agent_id, text: `[report] ${child.agent_id} done — read ${reportPath}`,
+      press_enter: true, source_event: "report_to_parent", retry_count: 0,
+      typed: true, submit_dispatched: true });
+    writeFileSync(reportPath, "Complete\nDONE_PENDING_CHILD\n");
+    await engine.sweepWatchesBestEffort();
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)).toEqual(receipt);
+    expect(sentText(exec)).not.toContain("[watch] file changed");
+    expect(sentText(exec)).not.toContain(receipt.text);
+    await server.close();
+    server = createServer(options);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    engine = engineForTests(server);
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({
+      delivery_id: receipt.delivery_id, delivery_state: "pending_verify", typed: true,
+      submit_dispatched: true, agent_id: parent.agent_id, text: receipt.text });
+    await engine.sweepWatchesBestEffort();
+    expect(engine.getDeliveryReceipt(receipt.delivery_id)?.delivery_state).toBe("pending_verify");
+    expect(sentText(exec)).not.toContain("[watch] file changed");
+    expect(sentText(exec)).not.toContain(receipt.text);
   });
 
   it("W5 refuses a shared collab as a worker report target before launch", async () => {
@@ -4803,6 +4872,35 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       }),
     );
     expect(isSubjectSideReportWatchPruneEligible(retainedPublic!)).toBe(false);
+  });
+
+  it.each(["same child", "foreign child", "unknown path"])("report reservation handles a subjectless public watch on resume (%s)", async (mode) => {
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    const engine = engineForTests(server);
+    const reportPath = join(inboxDir, "resume-report.md");
+    writeFileSync(reportPath, "IN_PROGRESS\n");
+    const parent = parentRecord();
+    const child = { ...parent, agent_id: "resume-child", parent_agent_id: parent.agent_id,
+      role: "worker" as const, state: "done" as const, report_path: mode === "unknown path"
+        ? join(inboxDir, "different-report.md") : reportPath };
+    for (const record of [parent, child]) {
+      engine.stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+    }
+    const watch = await engine.armWatch({ owner: parent.agent_id, provenance: "public",
+      ...(mode === "foreign child" ? { subject_agent_id: "foreign-child" } : {}),
+      target: reportPath, change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const resume = vi.spyOn(engine, "resumeAgent").mockRejectedValue(new Error("RESUME_REACHED"));
+    vi.spyOn(engine, "resolveResumeAgent").mockReturnValue(child);
+    const result = await runWithCallerContext({ workspaceId: "workspace:1" }, () =>
+      server._registeredTools.spawn_agent.handler({ resume_agent_id: child.agent_id,
+        report_path: reportPath }, {} as never));
+    const data = result.structuredContent ?? JSON.parse(result.content[0].text);
+    expect(resume).toHaveBeenCalledTimes(mode === "same child" ? 1 : 0);
+    expect(mode === "same child" ? data.error : data.error_code).toBe(
+      mode === "same child" ? "RESUME_REACHED" : "REPORT_PATH_IN_USE");
+    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches).toContainEqual(watch);
+    expect(existsSync(`${watchRegistryPath}.report-path-reservations.json`)).toBe(false);
   });
 
   it("rejects a shared explicit report_path before launching a second child", async () => {
