@@ -127,5 +127,24 @@ class Evidence(unittest.TestCase):
         self.assertEqual([r["pid"] for r in result["processes"]], [42, 99])
         self.assertIn("NOT_PROBED", result["processes"][1]["errors"])
 
+    def test_full_byte_result_and_observed_errno_are_independent(self):
+        for flavor, operation, expected in [(3, "identity-before", 136), (9, "cwd-before", 2352)]:
+            f = Fake(); value, count, _ = f.reads[flavor][0]; f.reads[flavor][0] = (value, count, 1)
+            row = self.scan(f)["processes"][0]; witness = row["failures"][0]
+            self.assertEqual((witness["operation"], witness["errno"], witness["bytes"], witness["expectedBytes"]), (operation, 1, expected, expected))
+            self.assertEqual(witness["reason"], "OBSERVED_ERRNO")  # not a proved EPERM syscall failure
+            self.assertEqual((row["uid"], row["startSeconds"], row["cwd"]), (501, "123", "/synthetic"))
+            if flavor == 9: self.assertEqual(witness["identity"]["cwd"], "/synthetic")
+
+    def test_invalid_membership_preserves_values_indexes_and_valid_processes(self):
+        f = Fake(); original = f.proc_listpids
+        def listpids(kind, uid, buffer, size):
+            if buffer is None: C.set_errno(0); return 8
+            original(kind, uid, buffer, size); C.memmove(buffer, (C.c_int * 2)(42, -7), 8); return 8
+        f.proc_listpids = listpids; result = self.scan(f)
+        self.assertIsNone(result["before"]); self.assertIsNone(result["after"])
+        self.assertEqual(result["membershipReads"][0]["invalidEntries"], [{"index": 1, "value": -7}])
+        self.assertEqual(result["processes"][0]["pid"], 42)
+
 
 if __name__ == "__main__": unittest.main()

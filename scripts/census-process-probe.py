@@ -60,7 +60,7 @@ def collect_owner(uid, lib=None, actual_uid=None):
     def membership(operation):
         C.set_errno(0); required = lib.proc_listpids(4, uid, None, 0); error = C.get_errno()
         item = dict(operation=operation, observedPids=[], membership=None, queryBytes=required,
-                    bytes=None, capacityBytes=None, errno=error, reason=None)
+                    bytes=None, capacityBytes=None, errno=error, reason=None, invalidEntries=[])
         result["membershipReads"].append(item)
         if error or required <= 0 or required % 4 or required > 16 * 1024 * 1024 - 1024:
             item["reason"] = "ENUMERATION_QUERY_INVALID"
@@ -68,8 +68,10 @@ def collect_owner(uid, lib=None, actual_uid=None):
             capacity = required + 1024; buffer = (C.c_int * (capacity // 4))()
             C.set_errno(0); count = lib.proc_listpids(4, uid, buffer, capacity); item["errno"] = C.get_errno()
             item.update(bytes=count, capacityBytes=capacity)
-            item["observedPids"] = [pid for pid in buffer[:max(0, min(count, capacity)) // 4] if pid > 0]
-            if item["errno"] or count <= 0 or count % 4 or count >= capacity or not item["observedPids"] or any(pid < 0 for pid in buffer[:max(0, min(count, capacity)) // 4]) or len(set(item["observedPids"])) != len(item["observedPids"]):
+            entries = buffer[:max(0, min(count, capacity)) // 4]
+            item["observedPids"] = [pid for pid in entries if pid > 0]
+            item["invalidEntries"] = [dict(index=i, value=pid) for i, pid in enumerate(entries) if pid <= 0]
+            if item["errno"] or count <= 0 or count % 4 or count >= capacity or not item["observedPids"] or item["invalidEntries"] or len(set(item["observedPids"])) != len(item["observedPids"]):
                 item["reason"] = "ENUMERATION_SATURATED" if count >= capacity else "ENUMERATION_READ_INVALID"
             else: item["membership"] = item["observedPids"]
         if item["reason"]: result["reason"] = "MEMBERSHIP_UNOBSERVED"
@@ -81,6 +83,12 @@ def collect_owner(uid, lib=None, actual_uid=None):
             errors.append(code)
             failures.append(dict(operation=operation, errno=error, identity=dict(identity) if identity else None,
                                  reason=code, bytes=count, expectedBytes=expected))
+        def observed_errno(operation, error, identity, count, expected):
+            # The symbol names the observed errno, NOT a proved failed syscall.
+            # Preserve its independent full/short byte result with explicit semantics.
+            errors.append(errno.errorcode.get(error, "OBSERVED_ERRNO"))
+            failures.append(dict(operation=operation, errno=error, identity=dict(identity),
+                                 reason="OBSERVED_ERRNO", bytes=count, expectedBytes=expected))
         def read(flavor, cls, operation):
             buffer = cls(); expected = C.sizeof(buffer)
             C.set_errno(0); count = lib.proc_pidinfo(pid, flavor, 0, C.byref(buffer), expected)
@@ -98,6 +106,7 @@ def collect_owner(uid, lib=None, actual_uid=None):
             if count != expected:
                 code = errno.errorcode.get(error, "SHORT_READ") if count <= 0 and error else "SHORT_READ"
                 fail(operation, code, error, prior or (value if count > 0 else None), count, expected)
+            if count > 0 and error: observed_errno(operation, error, value, count, expected)
             if actual is not None and actual != pid: fail(operation, "PID_MISMATCH", 0, value)
             if value["uid"] is not None and value["uid"] != uid: fail(operation, "UID_MISMATCH", 0, value)
             if field("seconds") == 0 or (field("microseconds") is not None and field("microseconds") >= 1000000):
@@ -117,6 +126,7 @@ def collect_owner(uid, lib=None, actual_uid=None):
                 value["cwd"] = path
             except (ValueError, UnicodeError):
                 if count > 0: fail(operation, "INVALID_CWD", 0, value, count, expected)
+            if count > 0 and error: observed_errno(operation, error, value, count, expected)
         before = identity("identity-before"); directory("cwd-before", before)
         after = identity("identity-after", before); directory("cwd-after", after, before)
         if all(before[k] is not None and after[k] is not None for k in ("startSeconds", "startMicroseconds", "uid")) and any(before[k] != after[k] for k in ("pid", "ppid", "uid", "startSeconds", "startMicroseconds")):
