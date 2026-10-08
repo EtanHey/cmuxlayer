@@ -14,7 +14,10 @@ describe("saved resume directory evidence", () => {
   const row = (type: string, payload: unknown) => JSON.stringify({ type, payload }) + "\n";
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "resume-cwd-"));
-    record = { cli: "codex", cli_session_id: id, cli_session_path: join(root, "rollout.jsonl"), launch_cwd: "/stale" } as AgentRecord;
+    const store = join(root, ".codex", "sessions", "2026", "10", "08");
+    mkdirSync(store, { recursive: true });
+    vi.stubEnv("CODEX_HOME", join(root, ".codex"));
+    record = { cli: "codex", cli_session_id: id, cli_session_path: join(store, `rollout-2026-10-08T00-00-00-${id}.jsonl`), launch_cwd: "/stale" } as AgentRecord;
     writeFileSync(record.cli_session_path!, row("session_meta", { id, cwd: root }));
   });
   afterEach(() => { vi.unstubAllEnvs(); rmSync(root, { recursive: true, force: true }); });
@@ -25,9 +28,6 @@ describe("saved resume directory evidence", () => {
     expect(await resolveSavedResumeCwd(record)).toBe(cwd);
   });
   it("finds the UUID-addressed canonical transcript when no path was captured", async () => {
-    const dir = join(root, ".codex", "sessions", "2026", "10", "08"); mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `rollout-${id}.jsonl`), row("session_meta", { id, cwd: root }));
-    vi.stubEnv("CMUXLAYER_HARNESS_HOME", root); vi.stubEnv("CODEX_HOME", join(root, ".codex"));
     expect(await resolveSavedResumeCwd({ ...record, cli_session_path: null })).toBe(root);
   });
   it.each(["missing", "duplicate", "null", "omitted"])("refuses %s current directory evidence", async kind => {
@@ -37,6 +37,36 @@ describe("saved resume directory evidence", () => {
       : meta + row("turn_context", kind === "null" ? { cwd: null } : {});
     writeFileSync(record.cli_session_path!, content);
     await expect(resolveSavedResumeCwd(record)).rejects.toThrow(/identity|absolute/);
+  });
+  it("refuses a divergent captured copy rather than overriding UUID-selected cwd", async () => {
+    const captured = join(root, "captured-old.jsonl");
+    const stale = join(root, "old"); mkdirSync(stale);
+    writeFileSync(captured, row("session_meta", { id, cwd: stale }));
+    await expect(resolveSavedResumeCwd({ ...record, cli_session_path: captured })).rejects.toThrow(/captured.*canonical|captured.*differ/);
+  });
+  it("allows a captured copy whose verified cwd agrees with the unique canonical transcript", async () => {
+    const captured = join(root, "captured.jsonl");
+    writeFileSync(captured, row("session_meta", { id, cwd: root }));
+    expect(await resolveSavedResumeCwd({ ...record, cli_session_path: captured })).toBe(root);
+  });
+  it.each(["different-cwd", "same-cwd", "reverted", "archived"])("refuses duplicate UUID candidates: %s", async kind => {
+    const dir = kind === "archived" ? join(root, ".codex", "archived_sessions") : join(root, ".codex", "sessions", "2026", "10", "09");
+    mkdirSync(dir, { recursive: true });
+    const suffix = kind === "reverted" ? "_aaaaaaaa-bbbb-4333-8444-555555555555" : "";
+    writeFileSync(join(dir, `rollout-2026-10-09T00-00-00-${id}${suffix}.jsonl`), row("session_meta", { id, cwd: kind === "different-cwd" ? "/old" : root }));
+    await expect(resolveSavedResumeCwd({ ...record, cli_session_path: null })).rejects.toThrow(/multiple.*ambiguous/);
+  });
+  it("refuses a captured-only path that the configured UUID store cannot address", async () => {
+    const captured = join(root, "Drive-restored-copy.jsonl");
+    writeFileSync(captured, row("session_meta", { id, cwd: root }));
+    rmSync(record.cli_session_path!);
+    await expect(resolveSavedResumeCwd({ ...record, cli_session_path: captured })).rejects.toThrow(/UUID-addressed.*unavailable/);
+  });
+  it("ignores other UUIDs while retaining current and metadata-only valid contexts", async () => {
+    writeFileSync(join(root, ".codex", "sessions", "rollout-2026-10-08T00-00-00-aaaaaaaa-bbbb-4333-8444-555555555555.jsonl"), row("session_meta", { id: "aaaaaaaa-bbbb-4333-8444-555555555555", cwd: "/unrelated" }));
+    expect(await resolveSavedResumeCwd(record)).toBe(root);
+    writeFileSync(record.cli_session_path!, row("session_meta", { id, cwd: root }) + row("turn_context", { cwd: root }));
+    expect(await resolveSavedResumeCwd(record)).toBe(root);
   });
   it("verifies a recorded branch against real Git without changing HEAD", async () => {
     execFileSync("git", ["init", "-b", "saved", root], { stdio: "ignore" });

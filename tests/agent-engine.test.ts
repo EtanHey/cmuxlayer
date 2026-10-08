@@ -4826,7 +4826,7 @@ describe("AgentEngine", () => {
           JSON.stringify({ type: "session_meta", payload: { id: options.id ?? session, cwd: TEST_DIR } }),
           JSON.stringify({ type: "turn_context", payload: { cwd, model: "gpt-6.1-sol", effort: "high" } }),
         ].join("\n") + "\n" + (options.tail ?? ""));
-        harnessHome.give("codex", session);
+        harnessHome.give("codex", session, cwd);
         stateMgr.writeState(makeRecord({ agent_id: "saved-cwd", state: "done", pid: DEAD_PID,
           surface_id: "surface:old", workspace_id: "ws:1", cli: "codex", cli_session_id: session,
           cli_session_path: file, worktree_branch: options.branch, launcher_name: options.launcher === undefined ? "brainlayerCodex" : options.launcher,
