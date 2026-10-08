@@ -3462,6 +3462,8 @@ export class AgentEngine {
       fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
       const before = fstatSync(fd, { bigint: true });
       if (!before.isFile() || before.size > 1024n * 1024n) return null;
+      // Match existing statSync().mtimeMs floors, within the same revision bracket.
+      const mtimeMs = fstatSync(fd).mtimeMs;
       const bytes = Buffer.alloc(Number(before.size) + 1);
       const length = readSync(fd, bytes, 0, bytes.length, 0);
       const after = fstatSync(fd, { bigint: true });
@@ -3470,7 +3472,7 @@ export class AgentEngine {
         [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
       if (length !== Number(before.size) || revision(before) !== revision(after) ||
           revision(after) !== revision(currentPath)) return null;
-      return { bytes: bytes.subarray(0, length), mtimeMs: Number(before.mtimeNs) / 1e6 };
+      return { bytes: bytes.subarray(0, length), mtimeMs };
     } catch {
       return null;
     } finally {

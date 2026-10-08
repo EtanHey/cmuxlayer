@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AgentEngine } from "../src/agent-engine.js";
@@ -20,6 +21,30 @@ beforeEach(() => {
   vi.mocked(readSync).mockClear();
 });
 afterEach(() => rmSync(directory, { recursive: true, force: true }));
+
+it("preserves unchanged legacy reopen floors across actual timestamp samples", () => {
+  const bytes = Buffer.from("Complete\nDONE_LEGACY_CHILD\n");
+  writeFileSync(path, bytes);
+  const child = { agent_id: "legacy-child", parent_agent_id: "parent", report_path: path,
+    done_marker: "DONE_LEGACY_CHILD", state: "working", boot_instance_id: "boot",
+    report_episode_key: "boot:0", report_done_delivery_id: "original-done",
+    report_episode_started_at: "", reopen_report_mtime_ms: 0 };
+  const engine = Object.assign(Object.create(AgentEngine.prototype), {
+    stateMgr: { listStates: () => [child] }, reportOutcomeNotifications: true,
+  }) as AgentEngine;
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const base = Math.floor(Date.now() / 1000) - 20;
+  for (let i = 1; i <= 64; i++) {
+    const seconds = base + i / 1_000_000;
+    utimesSync(path, seconds, seconds);
+    const legacy = statSync(path).mtimeMs;
+    child.reopen_report_mtime_ms = legacy;
+    child.report_episode_started_at = new Date(legacy - 1000).toISOString();
+    expect(snapshot(path)!.mtimeMs).toBe(legacy);
+    expect(engine.coalescesReportWatch("parent", path, digest), `sample=${i}; floor=${legacy}`).toBe(false);
+    expect(child.report_done_delivery_id).toBe("original-done");
+  }
+});
 
 it.each([0, 1024 * 1024])("reads a stable %i-byte snapshot once", (size) => {
   const bytes = Buffer.alloc(size, "a");
