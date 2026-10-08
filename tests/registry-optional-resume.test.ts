@@ -25,7 +25,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
       }),
-    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
+    ).toBe(`cd '/srv/repos/brainlayer' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION} --cd '/srv/repos/brainlayer'`);
     expect(
       buildRawResumeCommand("cursor", "brainlayer", SESSION, {
         cwd: "/srv/repos/brainlayer",
@@ -38,7 +38,7 @@ describe("raw resume commands carry a working directory", () => {
       buildRawResumeCommand("codex", "brainlayer", SESSION, {
         cwd: "/tmp/a b'c",
       }),
-    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`);
+    ).toBe(`cd '/tmp/a b'\\''c' && codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION} --cd '/tmp/a b'\\''c'`);
   });
 
   it("lets an explicit cwd override the kiro ~/Gits assumption", () => {

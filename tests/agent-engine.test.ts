@@ -4816,6 +4816,62 @@ describe("AgentEngine", () => {
     // Issue #392: a registry-less spawn records no launcher, so crash recovery
     // must resume through the raw CLI in the recorded cwd -- never through a
     // guessed `<repo>Codex` binary that does not exist on a fresh install.
+    describe("saved Codex resume cwd", () => {
+      const session = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      async function prepare(options: { launcher?: string | null; cwd?: string; id?: string; tail?: string; branch?: string } = {}) {
+        const cwd = options.cwd ?? join(harnessHome.path(), "current chat's worktree ");
+        if (!options.cwd) mkdirSync(cwd, { recursive: true });
+        const file = join(harnessHome.path(), "rollout.jsonl");
+        writeFileSync(file, [
+          JSON.stringify({ type: "session_meta", payload: { id: options.id ?? session, cwd: TEST_DIR } }),
+          JSON.stringify({ type: "turn_context", payload: { cwd, model: "gpt-6.1-sol", effort: "high" } }),
+        ].join("\n") + "\n" + (options.tail ?? ""));
+        harnessHome.give("codex", session);
+        stateMgr.writeState(makeRecord({ agent_id: "saved-cwd", state: "done", pid: DEAD_PID,
+          surface_id: "surface:old", workspace_id: "ws:1", cli: "codex", cli_session_id: session,
+          cli_session_path: file, worktree_branch: options.branch, launcher_name: options.launcher === undefined ? "brainlayerCodex" : options.launcher,
+          launch_cwd: TEST_DIR, worktree_path: join(TEST_DIR, "stale-worktree") }));
+        await engine.getRegistry().reconstitute();
+        liveSurfaces = [makeSurface("surface:witness")];
+        return cwd;
+      }
+      it.each(["brainlayerCodex", null])("launches %s in current session cwd with explicit chooser override", async launcher => {
+        const cwd = await prepare({ launcher });
+        const result = await engine.resumeAgent("saved-cwd");
+        const command = (mockClient.send as ReturnType<typeof vi.fn>).mock.calls[0][1];
+        expect(command).toContain(`--cd '${cwd.replaceAll("'", "'\\''")}'`);
+        if (launcher) expect(command).toContain(`-w '${cwd.replaceAll("'", "'\\''")}'`);
+        expect(command).toContain(`resume ${session}`);
+        expect(command).not.toContain("--last");
+        expect(command).not.toContain("stale-worktree");
+        expect(result.cwd).toBe(cwd);
+        expect(result.state).toBe("booting");
+        expect(result.agent_id).toBe("saved-cwd");
+        expect(engine.getAgentState("saved-cwd")?.launch_cwd).toBe(cwd);
+      });
+      it("refuses a changed saved branch without checking out or opening a pane", async () => {
+        await prepare({ branch: "saved-branch" });
+        execFileMock.mockImplementation((_file, _args, _opts, callback) => callback(null, "other-branch\n", ""));
+        await expect(engine.resumeAgent("saved-cwd")).rejects.toThrow(/saved branch.*differs/);
+        expect(execFileMock).toHaveBeenCalledWith("git", ["-C", expect.any(String), "symbolic-ref", "--short", "HEAD"], expect.anything(), expect.any(Function));
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+      });
+      it.each([
+        { cwd: "/missing-saved-resume-cwd", error: /directory.*restore|restore.*directory/i },
+        { cwd: "relative/path", error: /absolute.*directory/i },
+        { id: "11111111-2222-4333-8444-555555555555", error: /session identity/i },
+        { tail: '{"type":"turn_context","payload":', error: /incomplete|invalid/i },
+      ])("refuses uncertain cwd before pane creation: $error", async ({ error, ...options }) => {
+        await prepare(options);
+        await expect(engine.resumeAgent("saved-cwd")).rejects.toThrow(error);
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        expect(mockClient.newSurface).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+        expect(engine.getAgentState("saved-cwd")?.state).toBe("done");
+      });
+    });
+
     it("explicitly resumes a captured session on a new surface without changing the public agent id", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -4841,7 +4897,7 @@ describe("AgentEngine", () => {
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        `brainlayerCodex -w '${harnessHome.path()}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e --cd '${harnessHome.path()}'`,
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe(
@@ -7161,7 +7217,7 @@ Session ID: ${sessionId}`,
         session_id: sessionId,
         resumable: true,
         resume_command:
-          "cmuxlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fec96-588d-7000-8000-000000000000",
+          `cmuxlayerCodex -w '${spawnedRecord?.launch_cwd}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019fec96-588d-7000-8000-000000000000 --cd '${spawnedRecord?.launch_cwd}'`,
       });
       vi.unstubAllEnvs();
     });

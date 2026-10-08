@@ -15,7 +15,7 @@ import { resetResumeArtifactResolver } from "../../src/resume-verification.js";
 
 export interface HarnessHome {
   /** Create the transcript that makes `sessionId` a resumable session. */
-  give(cli: CliType, sessionId: string): void;
+  give(cli: CliType, sessionId: string, cwd?: string): void;
   path(): string;
 }
 
@@ -39,10 +39,12 @@ export function useHarnessHome(): HarnessHome {
 
   return {
     path: () => home,
-    give(cli, sessionId) {
+    give(cli, sessionId, cwd = home) {
       const write = (dir: string, file: string): void => {
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, file), `{"session_id":"${sessionId}"}\n`);
+        writeFileSync(join(dir, file), cli === "codex"
+          ? JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd } }) + "\n"
+          : `{"session_id":"${sessionId}"}\n`);
       };
       switch (cli) {
         case "claude":

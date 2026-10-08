@@ -116,13 +116,8 @@ export function rawResumeSupported(cli: CliType): boolean {
 
 export interface ResumeCommandOptions {
   /**
-   * Directory the resumed harness must run in. Honoured only by the raw-CLI
-   * form: repoGolem launchers already cd themselves, and adding a cd would
-   * change behaviour for existing registered installs.
-   *
-   * AIDEV-NOTE: this is not cosmetic for Claude Code — its transcripts are
-   * keyed by cwd (~/.claude/projects/<slugified-cwd>), so `claude --resume`
-   * from the wrong directory cannot find the session.
+   * Saved working directory. Codex launchers receive -w to preserve shell cwd
+   * and --cd to explicitly bypass the harness cwd chooser.
    */
   cwd?: string | null;
   /**
@@ -164,11 +159,11 @@ export function buildResumeCommand(
     case "claude":
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "codex":
-      return `${launcher}${
+      return `${launcher}${opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : ""}${
         bypass
           ? " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
           : ""
-      } resume ${sessionId}`;
+      } resume ${sessionId}${opts?.cwd ? ` --cd ${shellQuote(opts.cwd)}` : ""}`;
     case "gemini":
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "kiro":
@@ -202,7 +197,7 @@ export function buildRawResumeCommand(
         `launcher for this repo, or resume the session by hand.`,
     );
   }
-  const cwd = opts?.cwd?.trim();
+  const cwd = opts?.cwd;
   const cd = cwd ? `cd ${shellQuote(cwd)} && ` : "";
   // The approval bypass must survive a resume; see RAW_SKIP_APPROVALS. An
   // install that chose the prompting mode gets no bypass on either command.
@@ -214,7 +209,7 @@ export function buildRawResumeCommand(
     // Codex takes global options BEFORE the subcommand -- matching the
     // launcher form `<L> --dangerously-bypass-approvals-and-sandbox resume`.
     case "codex":
-      return `${cd}codex ${skip}resume ${sessionId}`;
+      return `${cd}codex ${skip}resume ${sessionId}${cwd ? ` --cd ${shellQuote(cwd)}` : ""}`;
     // `cursor agent` exposes `--resume [chatId]`; it has no `--session` flag
     // (`error: unknown option '--session'`). Verified against `cursor agent --help`.
     case "cursor":

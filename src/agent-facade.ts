@@ -24,13 +24,13 @@ export type AgentStatePayload = AgentRecord & {
 };
 
 /**
- * Directory a resumed harness must be started in. Only the raw-CLI resume form
- * consumes it — launchers cd themselves.
+ * Recorded directory for advertised resume commands. Explicit Codex resume
+ * refreshes it from the captured session before launching.
  */
 export function resumeCwdForAgent(
   record: Pick<AgentRecord, "launch_cwd" | "worktree_path">,
 ): string | null {
-  return record.worktree_path?.trim() || record.launch_cwd?.trim() || null;
+  return record.worktree_path || record.launch_cwd || null;
 }
 
 /**

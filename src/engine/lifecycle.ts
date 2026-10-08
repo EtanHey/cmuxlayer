@@ -3,6 +3,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { resolveSavedResumeCwd } from "../resume-cwd.js";
 import { resolve } from "node:path";
 import type { AgentEngine } from "../agent-engine.js";
 import { resumeInvocationForAgent, toPublicAgent } from "../agent-facade.js";
@@ -613,7 +614,6 @@ export async function resumeAgent(
         `${resumeInvocation.reason}`,
     );
   }
-  const resumeCommand = resumeInvocation.command;
   const requestedWorkspace =
     opts?.workspace ?? agent.workspace_id ?? undefined;
   // Match spawn's metadata-aware default while retaining legacy initialization.
@@ -639,6 +639,13 @@ export async function resumeAgent(
     agent,
     opts?.force === true,
   );
+
+  const resumeCwd = await resolveSavedResumeCwd(agent);
+  const resolvedInvocation = resumeInvocationForAgent({
+    ...agent, launch_cwd: resumeCwd, worktree_path: resumeCwd,
+  });
+  if (resolvedInvocation.command === null) throw new Error(resolvedInvocation.reason);
+  const resumeCommand = resolvedInvocation.command;
 
   let surface: CreatedAgentSurface | null = null;
   let surfaceBound = false;
@@ -674,6 +681,8 @@ export async function resumeAgent(
     recordReopened = true;
     this.registry.set(agent.agent_id, creating);
     const rebound = this.stateMgr.updateRecord(agent.agent_id, {
+      launch_cwd: resumeCwd,
+      ...(agent.worktree_path ? { worktree_path: resumeCwd } : {}),
       surface_id: surface.surface,
       surface_uuid: surface.surface_id ?? null,
       surface_observer_id: surface.observerId,
@@ -719,7 +728,7 @@ export async function resumeAgent(
       workspace_id: workspace,
       state: "booting",
       model: agent.model,
-      cwd: agent.launch_cwd ?? undefined,
+      cwd: resumeCwd ?? undefined,
     };
   } catch (error) {
     if (surface && !surfaceBound) {

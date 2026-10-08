@@ -161,7 +161,7 @@ function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string 
 function expectedResume(cli: CliType, path: LauncherPath, root: string): string {
   if (path === "registry") {
     return cli === "codex"
-      ? `${EXPECTED_LAUNCHER_NAME[cli]} --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`
+      ? `${EXPECTED_LAUNCHER_NAME[cli]} -w '${root}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION} --cd '${root}'`
       : `${EXPECTED_LAUNCHER_NAME[cli]} -s --resume ${SESSION}`;
   }
   const cd = `cd '${root}' && `;
@@ -169,7 +169,7 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions --resume ${SESSION}`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION}`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume ${SESSION} --cd '${root}'`;
     case "cursor":
       return `${cd}cursor agent --force --resume ${SESSION}`;
     default:
@@ -241,6 +241,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       vi.stubEnv("CMUXLAYER_REPO_HOME", repoHome);
       delete process.env.CMUXLAYER_REQUIRE_LAUNCHER_REGISTRY;
 
+      harnessHome.give("codex", SESSION, repoRoot);
       stateMgr = new StateManager(TEST_DIR);
       client = makeMockClient();
       liveSurfaces = [];
