@@ -10,6 +10,11 @@ const markers = ["/Users/happycampr/.local/state/cmux/last-socket-path", "/Users
 const uuid = value => /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value ?? "");
 const digest = value => createHash("sha256").update(canonical(value)).digest("hex");
 export const happycamprPlanDigest = plan => { const copy = structuredClone(plan); delete copy.binding.config; return digest(copy); };
+export function protectedEndpoint(plan, id, row) {
+  if (plan.composition?.transport !== "private-daemon-v1") return false;
+  return [plan.composition.topologyPeer?.socket, plan.composition.topologyPeer?.nativeSocket].some(socket =>
+    socket?.path === id && same(row, { kind: "socket", canonical: id, uid: socket.uid, mode: socket.mode, dev: socket.dev, ino: socket.ino }));
+}
 function identity(row) {
   if (row?.username !== "happycampr" || row.uid !== 501 || row.processUid !== 501 || row.consoleUid !== 501 || row.home !== "/Users/happycampr" ||
       row.source !== "os.userInfo+dscl" || row.host !== "Locals-MacBook-Pro.local" || row.aqua !== true || !Number.isInteger(row.dev) || !Number.isInteger(row.ino)) throw Error("happycampr501 identity witness invalid");
@@ -44,6 +49,12 @@ export function validateHappycamprPlan(plan, expectedBinding) {
   if (!/^\/Users\/happycampr\/Library\/Caches\/cmuxlayer-native-[A-Za-z0-9-]+$/.test(scratch?.path) || scratch.canonical !== scratch.path ||
       scratch.uid !== 501 || scratch.mode !== 0o700 || !Number.isInteger(scratch.dev) || !Number.isInteger(scratch.ino)) throw Error("owned501 cache scratch invalid");
   const ids = new Set();
+  if (plan.composition?.transport === "private-daemon-v1") {
+    const endpoints = [plan.composition.topologyPeer?.socket, plan.composition.topologyPeer?.nativeSocket];
+    if (!endpoints[0] || !endpoints[1] || endpoints[0].path === endpoints[1].path) throw Error("distinct protected observation endpoints required");
+    for (const socket of endpoints) resource("socket", socket.path, { ...socket, kind: "socket", canonical: socket.path }, plan);
+    if (plan.effects.some(effect => endpoints.some(socket => socket.path === effect.id))) throw Error("observation endpoint cannot become an owned cleanup effect");
+  }
   for (const effect of plan.effects) {
     if (typeof effect.id !== "string" || ids.has(effect.id) || !Object.hasOwn(effect, "before")) throw Error("duplicate/missing effect identity"); ids.add(effect.id);
     resource(effect.kind, effect.id, effect.owned, plan);
@@ -83,6 +94,7 @@ export function planHappycamprCleanup(plan, before, current, expected) {
         effect.kind === "process" ? "stop-exact-pid-start" : ["workspace", "surface"].includes(effect.kind) ? "close-exact-uuid-epoch" : "unlink-exact-identity" });
   }
   for (const id of new Set([...Object.keys(before.resources), ...Object.keys(current.resources)])) if (!plan.effects.some(row => row.id === id) &&
-      (id.startsWith(plan.scratch.path + "/") || !same(before.resources[id], current.resources[id]))) pending.push(id);
+      (id.startsWith(plan.scratch.path + "/") || !same(before.resources[id], current.resources[id])) &&
+      !(protectedEndpoint(plan, id, before.resources[id]) && protectedEndpoint(plan, id, current.resources[id]))) pending.push(id);
   return { status: pending.length ? "PENDING" : "READY", actions, preserved: pending, executes: false };
 }

@@ -152,22 +152,26 @@ export async function guardedM1AppReplacement(opts, receipt, replace, sessions =
   return replace();
 }
 
-export function rpc(socketPath, method, params = {}) {
+export function rpc(socketPath, method, params = {}, bounds = {}) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath); socket.setEncoding("utf8"); let buffer = "", settled = false;
+    const socket = (bounds.connect ?? net.createConnection)(socketPath); socket.setEncoding("utf8"); let buffer = "", settled = false;
     const finish = (error, result) => {
-      if (settled) return; settled = true; clearTimeout(timer); socket.destroy();
+      if (settled) return; settled = true; clearTimeout(timer); bounds.signal?.removeEventListener("abort", abort); socket.destroy();
       error ? reject(error) : resolve(result);
     };
-    const timer = setTimeout(() => finish(new Error(`${method} timeout`)), 3000);
+    const abort = () => finish(new Error(`${method} aborted`));
+    const timer = setTimeout(() => finish(new Error(`${method} timeout`)), bounds.timeoutMs ?? 3000);
+    bounds.signal?.addEventListener("abort", abort, { once: true });
+    if (bounds.signal?.aborted) abort();
     socket.on("error", error => finish(error));
     socket.on("end", () => finish(new Error(`${method} ended without reply`)));
     socket.on("connect", () => socket.write(JSON.stringify({ id: 1, method, params }) + "\n"));
     socket.on("data", chunk => {
       buffer += chunk;
+      if (bounds.maxBytes && Buffer.byteLength(buffer) > bounds.maxBytes) return finish(new Error(`${method} response limit`));
       if (!buffer.includes("\n")) return;
       try { const message = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
-        finish(message.error || message.ok === false ? new Error(JSON.stringify(message)) : null, message.result);
+        finish(message.error || message.ok === false || bounds.maxBytes && message.id !== 1 ? new Error(bounds.maxBytes ? "RPC response rejected" : JSON.stringify(message)) : null, message.result);
       } catch (error) { finish(error); }
     });
   });

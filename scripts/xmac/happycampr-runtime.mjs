@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createProtectedCollector, protectedIdentity, validateScopeReceipt } from "./account-observer.mjs";
 import { validateObserverRequest, checkpointSummary, observerSourceFiles } from "./account-observer-bridge.mjs";
-import { validateHappycamprPlan, verifyHappycamprEffects, planHappycamprCleanup, happycamprContract } from "./happycampr-effects.mjs";
+import { validateHappycamprPlan, verifyHappycamprEffects, planHappycamprCleanup, happycamprContract, protectedEndpoint } from "./happycampr-effects.mjs";
 import { admitAppStart } from "./app-admission.mjs";
 const canonical = value => JSON.stringify(value, (_key, row) => row && typeof row === "object" && !Array.isArray(row) ? Object.fromEntries(Object.keys(row).sort().map(key => [key, row[key]])) : row);
 const same = (a, b) => canonical(a) === canonical(b);
@@ -37,8 +37,7 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
     if (["dev", "ino", "uid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"].some(key => stat[key] !== after[key])) throw Error("scoped file changed during read");
     return row;
   };
-  const capture = () => {
-    const id = identity(), topology = io.topology?.();
+  const captureTopology = (id, topology) => {
     if (!topology || topology.epoch !== plan.observerEpoch) throw Error("scoped RPC observer unavailable/foreign");
     const resources = {}, processes = new Map();
     for (const effect of plan.effects.filter(row => row.kind === "process")) {
@@ -97,8 +96,15 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
     if (workspace !== null && !workspaces.has(workspace) ||
         surface !== null && (workspace === null || !surfaces.has(surface) || surfaces.get(surface) !== workspace)) throw Error("focus relationship unresolved");
     resources["protected-focus"] = { workspace: focus.workspace, surface: focus.surface };
-    if (!same(id, identity()) || !same(topology, io.topology())) throw Error("501 identity/topology changed during snapshot");
-    return { identity: id, binding: structuredClone(expected), observerEpoch: topology.epoch, resources };
+    const finish = after => {
+      if (!same(id, identity()) || !same(topology, after)) throw Error("501 identity/topology changed during snapshot");
+      return { identity: id, binding: structuredClone(expected), observerEpoch: topology.epoch, resources };
+    };
+    const after = io.topology(); return after?.then ? after.then(finish) : finish(after);
+  };
+  const capture = () => {
+    const id = identity(), topology = io.topology?.();
+    return topology?.then ? topology.then(value => captureTopology(id, value)) : captureTopology(id, topology);
   };
   const attest = () => {
     validateHappycamprPlan(plan, expected);
@@ -132,20 +138,21 @@ export async function startHappycamprRuntime(opts) {
     if (opts.target !== "m1-gate" || opts.fixtureMode !== true || opts.accountContract !== happycamprContract || opts.humanSessionQuitApproved) throw Error("explicit501 runtime routing required");
     const adapter = createHappycamprSnapshotAdapter(plan, expected, opts.happycamprIO), collect = createProtectedCollector({ identity: adapter.identity, captureEffects: adapter.capture });
     let sequence = 0, channelFailed = false;
-    observe = phase => {
+    observe = async phase => {
       fresh = false;
       if (channelFailed) throw Error("501 observer channel already failed");
       let row;
       try {
         adapter.attest();
         const request = { run: plan.run, nonce: randomUUID().replaceAll("-", ""), sequence: ++sequence, phase, identifiers: ["runtime501"], agentIds: [...(plan.agentIds ?? [])] };
-        validateObserverRequest(request, plan.run, sequence); row = validateScopeReceipt(collect(request), request);
+        validateObserverRequest(request, plan.run, sequence);
+        const emitted = collect(request); row = validateScopeReceipt(emitted?.then ? await emitted : emitted, request);
       } catch (error) { channelFailed = true; throw error; }
       last = row.snapshot; fresh = true;
       observations.push(checkpointSummary(row));
       if (!same(last.identity, plan.identity)) throw Error("501 snapshot account mismatch");
       before ??= structuredClone(last);
-      if (Object.keys(before.resources).some(id => id.startsWith(plan.scratch.path + "/") && !plan.effects.some(row => row.id === id))) throw Error("501 unmanifested scratch baseline");
+      if (Object.keys(before.resources).some(id => id.startsWith(plan.scratch.path + "/") && !plan.effects.some(row => row.id === id) && !protectedEndpoint(plan, id, before.resources[id]))) throw Error("501 unmanifested scratch baseline");
       for (const effect of plan.effects) {
         if (!same(before.resources[effect.id] ?? null, effect.before)) throw Error("501 baseline owned witness mismatch");
         const current = last.resources[effect.id] ?? null;
@@ -153,9 +160,9 @@ export async function startHappycamprRuntime(opts) {
       }
       for (const id of new Set([...Object.keys(before.resources), ...Object.keys(last.resources)])) if (!same(before.resources[id], last.resources[id]) && !plan.effects.some(row => row.id === id)) throw Error("501 unresolved foreign effect");
     };
-    observe("baseline");
+    await observe("baseline");
     await admitAppStart(opts.happycamprStages, observe);
-    observe("runtime-ready"); verifyHappycamprEffects(plan, before, last, expected); result.status = "PASS";
+    await observe("runtime-ready"); verifyHappycamprEffects(plan, before, last, expected); result.status = "PASS";
   } catch (error) { primary = String(error); result.error = primary; }
   const finish = () => {
     result.before = before; result.after = last; result.binding = expected; result.run = plan?.run;
@@ -166,7 +173,7 @@ export async function startHappycamprRuntime(opts) {
   };
   finish(); let closing;
   return { receipt: result, close: () => closing ??= (async () => {
-    try { if (observe) observe("run-final"); } catch (error) { primary ??= String(error); }
+    try { if (observe) await observe("run-final"); } catch (error) { primary ??= String(error); }
     return finish();
   })() }; // Fresh proposals only; no host signals, unlink or restore.
 }

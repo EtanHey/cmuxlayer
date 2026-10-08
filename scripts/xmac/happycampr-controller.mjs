@@ -17,21 +17,21 @@ export function createBoundTopologyReader(plan, source) {
   if (!source || typeof source.observePeer !== "function" || typeof source.readTopology !== "function" ||
       peer?.epoch !== plan.observerEpoch || !same(peer.product, plan.binding.product) ||
       !Number.isSafeInteger(process?.pid) || process.pid <= 1 || process.uid !== 501 || typeof process.start !== "string" || !process.start ||
-      process.executable !== plan.runtime.node || process.entry !== plan.scratch.path + "/candidate/dist/index.js" ||
+      process.executable !== plan.runtime.node || process.entry !== plan.scratch.path + "/candidate/dist/" + (plan.composition.transport === "private-daemon-v1" ? "daemon.js" : "index.js") ||
       socket?.uid !== 501 || socket.mode !== 0o600 || !Number.isSafeInteger(socket.dev) || !Number.isSafeInteger(socket.ino) ||
       typeof socket.path !== "string" || posix.normalize(socket.path) !== socket.path || !socket.path.startsWith(plan.scratch.path + "/")) throw Error("bound independent topology adapter required");
-  return () => {
-    const before = structuredClone(source.observePeer());
+  return async () => {
+    const before = structuredClone(await source.observePeer());
     if (!same(before, peer)) throw Error("topology peer/source/product/socket identity mismatch");
     // No requested IDs or request arguments are passed back as observation evidence.
-    const raw = source.readTopology();
+    const raw = await source.readTopology();
     if (!keys(raw, ["complete", "epoch", "workspaces", "surfaces", "focus"]) || raw.complete !== true || raw.epoch !== peer.epoch ||
         Buffer.byteLength(JSON.stringify(raw)) > 1024 * 1024 ||
         !Array.isArray(raw.workspaces) || raw.workspaces.length > 1024 || !Array.isArray(raw.surfaces) || raw.surfaces.length > 1024 ||
         raw.workspaces.some(row => !keys(row, ["uuid"])) || raw.surfaces.some(row => !keys(row, ["uuid", "workspace"])) ||
         !keys(raw.focus, ["workspace", "surface"])) throw Error("complete minimal topology observation unavailable");
     const topology = structuredClone({ epoch: raw.epoch, workspaces: raw.workspaces, surfaces: raw.surfaces, focus: raw.focus });
-    if (!same(before, source.observePeer())) throw Error("topology peer changed during observation");
+    if (!same(before, await source.observePeer())) throw Error("topology peer changed during observation");
     return topology; // Every member goes to the accepted R1 relationship validator.
   };
 }

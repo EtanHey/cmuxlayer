@@ -67,8 +67,11 @@ export function createProtectedCollector({ identity = protectedIdentity, capture
     const id = identity(); if (bound && !same(bound, id)) throw new Error("protected observer identity changed"); bound ??= id;
     if (captureEffects) {
       const snapshot = captureEffects();
-      if (!same(id, identity()) || !same(snapshot.identity, id)) throw Error("owned observer identity changed during capture");
-      return { run: request.run, nonce: request.nonce, sequence: request.sequence, phase: request.phase, capturedAt: clock(), identifiers, agentIds, identity: id, snapshot };
+      const finish = snapshot => {
+        if (!same(id, identity()) || !same(snapshot.identity, id)) throw Error("owned observer identity changed during capture");
+        return { run: request.run, nonce: request.nonce, sequence: request.sequence, phase: request.phase, capturedAt: clock(), identifiers, agentIds, identity: id, snapshot };
+      };
+      return snapshot?.then ? snapshot.then(finish) : finish(snapshot);
     }
     const production = readState(stateRoots(id.home)), processes = processCapture(), mirror = mirrorCapture(), after = legacySnapshot(id.home);
     baseline ??= after; const reads = [];
