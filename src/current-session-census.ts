@@ -110,10 +110,11 @@ const identityWitness = z.record(evidenceScalar);
 const failureWitness = z.object({ operation: evidenceScalar.optional(), errno: evidenceScalar.optional(), reason: evidenceScalar.optional(),
   bytes: evidenceScalar.optional(), expectedBytes: evidenceScalar.optional(), identity: identityWitness });
 const readWitness = z.object(Object.fromEntries(readFields.map(k => [k, evidenceScalar.optional()])))
-  .extend({ invalidEntries: z.array(invalidEntry) });
+  .extend({ observedPids: z.array(integer.positive()).optional(), membership: z.array(integer.positive()).nullable().optional(),
+    invalidEntries: z.array(invalidEntry) });
 const diagnosticShape = z.object({
   membershipReads: z.array(membershipRead).optional(),
-  rejectedRows: z.array(z.object({ index: integer.nonnegative(), pid: integer.positive().nullable(), digest: z.string(),
+  rejectedRows: z.array(z.object({ index: integer.nonnegative(), pid: integer.positive().nullable(), digest: z.string().regex(/^[a-f0-9]{64}$/),
     evidence: z.object({ before: identityWitness, after: identityWitness, failures: z.array(failureWitness) }) })).optional(),
   rejectedMembershipReads: z.array(z.object({ index: integer.nonnegative(), evidence: readWitness })).optional(),
   helperOutputDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), helperExitCode: nullableInteger.optional(),
@@ -154,8 +155,10 @@ function diagnosticEvidence(raw: Record<string, unknown> | null) {
     ...(raw && "membershipReads" in raw ? { membershipReads: list(raw.membershipReads, read) } : {}),
     ...(raw && "rejectedRows" in raw ? { rejectedRows: list(raw.rejectedRows, v => {
       const row = record(v), e = record(row?.evidence);
-      return { ...witness(v, ["index", "pid", "digest"]), evidence: { before: witness(e?.before, identityFields),
-        after: witness(e?.after, identityFields), failures: list(e?.failures, failure) } };
+      return { ...witness(v, ["index", "pid", "digest"]), evidence: {
+        ...(e && "before" in e ? { before: e.before === null ? null : witness(e.before, identityFields) } : {}),
+        ...(e && "after" in e ? { after: e.after === null ? null : witness(e.after, identityFields) } : {}),
+        failures: list(e?.failures, failure) } };
     }) } : {}),
     ...(raw && "rejectedMembershipReads" in raw ? { rejectedMembershipReads: list(raw.rejectedMembershipReads, v => {
       const row = record(v); return { ...witness(v, ["index"]), evidence: read(row?.evidence) };
