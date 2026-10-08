@@ -85,8 +85,18 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
       if (row?.domain !== "com.cmuxterm.app" || !/^[A-Za-z0-9_.-]{1,64}$/.test(row.key) || effect.id !== `setting:${row.domain}:${row.key}`) throw Error("scoped settings key invalid");
       resources[effect.id] = { kind: "setting", domain: row.domain, key: row.key, value: run("/usr/bin/defaults", ["read", row.domain, row.key]) };
     }
-    if (!uuid(topology.focus?.workspace) || !uuid(topology.focus.surface)) throw Error("focus witness missing");
-    resources["protected-focus"] = { workspace: topology.focus.workspace, surface: topology.focus.surface };
+    // Validate the complete topology before accepting any baseline or later observation.
+    const workspaces = new Set(topology.workspaces.map(row => row.uuid.toLowerCase()));
+    const surfaces = new Map(topology.surfaces.map(row => [row.uuid.toLowerCase(), row.workspace.toLowerCase()]));
+    if (workspaces.size !== topology.workspaces.length || surfaces.size !== topology.surfaces.length ||
+        [...surfaces.values()].some(workspace => !workspaces.has(workspace))) throw Error("scoped topology relationship missing/ambiguous");
+    const focus = topology.focus;
+    if (!focus || focus.workspace !== null && !uuid(focus.workspace) || focus.surface !== null && !uuid(focus.surface)) throw Error("focus witness missing");
+    const workspace = focus.workspace === null ? null : focus.workspace.toLowerCase();
+    const surface = focus.surface === null ? null : focus.surface.toLowerCase();
+    if (workspace !== null && !workspaces.has(workspace) ||
+        surface !== null && (workspace === null || !surfaces.has(surface) || surfaces.get(surface) !== workspace)) throw Error("focus relationship unresolved");
+    resources["protected-focus"] = { workspace: focus.workspace, surface: focus.surface };
     if (!same(id, identity()) || !same(topology, io.topology())) throw Error("501 identity/topology changed during snapshot");
     return { identity: id, binding: structuredClone(expected), observerEpoch: topology.epoch, resources };
   };
