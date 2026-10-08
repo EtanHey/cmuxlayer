@@ -8,12 +8,18 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export const validObservationScope = values => Array.isArray(values) && values.length <= 1024 &&
   values.every(value => typeof value === "string" && value.length > 0 && value.length <= 4096) && new Set(values).size === values.length;
 const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 }).trim();
-export function validateObserverReceipt(row, request, now = Date.now()) {
-  const id = row?.identity;
+export function validateScopeReceipt(row, request, now = Date.now()) {
   if (!row || row.error || !same([row.run, row.nonce, row.sequence, row.phase], [request.run, request.nonce, request.sequence, request.phase]) ||
       [row.identifiers, row.agentIds, request.identifiers, request.agentIds].some(values => !validObservationScope(values)) ||
       !same(row.identifiers, request.identifiers) || !same(row.agentIds, request.agentIds) ||
       !Number.isFinite(row.capturedAt) || now - row.capturedAt < 0 || now - row.capturedAt > 10000 ||
+      Buffer.byteLength(JSON.stringify(row)) > 1024 * 1024) throw Error("observer scope receipt invalid");
+  return row;
+}
+export function validateObserverReceipt(row, request, now = Date.now()) {
+  try { validateScopeReceipt(row, request, now); } catch { throw Error("protected observer receipt invalid, stale, foreign or unreachable"); }
+  const id = row.identity;
+  if (
       id?.username !== "happycampr" || id.uid !== 501 || id.processUid !== 501 || id.home !== "/Users/happycampr" ||
       id.source !== "os.userInfo+dscl" || id.host !== "Locals-MacBook-Pro.local" ||
       !same(row.roots, stateRoots(id.home)) || !row.production || !Array.isArray(row.processes) || !row.mirror ||
@@ -25,7 +31,7 @@ export function validateObserverReceipt(row, request, now = Date.now()) {
         record.kind === "file" && (record.nlink !== 1 || !Number.isInteger(record.size) || record.size < 0 || record.size > 4 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(record.hash)))) throw new Error("protected observer receipt invalid, stale, foreign or unreachable");
   return row;
 }
-function protectedIdentity() {
+export function protectedIdentity() {
   const info = userInfo(), home = info.homedir;
   const api = run("/usr/bin/dscl", ["/Search", "-read", "/Users/happycampr", "UniqueID", "NFSHomeDirectory"]);
   const stat = lstatSync(home);
@@ -52,13 +58,18 @@ export function captureProtectedMirror() {
     flags: Number(run("/usr/bin/stat", ["-f", "%f", path])), aclEmpty: facts(path).aclEmpty,
     parent: facts("/private/tmp"), ancestor: facts("/private") };
 }
-export function createProtectedCollector({ identity = protectedIdentity, readState = readStatePaths, processCapture = protectedProcesses,
+export function createProtectedCollector({ identity = protectedIdentity, captureEffects, readState = readStatePaths, processCapture = protectedProcesses,
   mirrorCapture = captureProtectedMirror, legacySnapshot = productionSnapshot, compareLegacy = productionChanges, clock = Date.now } = {}) {
   let bound, baseline;
   return request => {
     if (!validObservationScope(request?.identifiers) || !validObservationScope(request.agentIds)) throw Error("protected observer request scope invalid");
     const identifiers = [...request.identifiers], agentIds = [...request.agentIds];
     const id = identity(); if (bound && !same(bound, id)) throw new Error("protected observer identity changed"); bound ??= id;
+    if (captureEffects) {
+      const snapshot = captureEffects();
+      if (!same(id, identity()) || !same(snapshot.identity, id)) throw Error("owned observer identity changed during capture");
+      return { run: request.run, nonce: request.nonce, sequence: request.sequence, phase: request.phase, capturedAt: clock(), identifiers, agentIds, identity: id, snapshot };
+    }
     const production = readState(stateRoots(id.home)), processes = processCapture(), mirror = mirrorCapture(), after = legacySnapshot(id.home);
     baseline ??= after; const reads = [];
     const violations = compareLegacy(baseline, after, ["/tmp/cmux-soak-stable.sock", ...identifiers], agentIds, reads);

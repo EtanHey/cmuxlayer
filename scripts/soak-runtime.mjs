@@ -15,6 +15,7 @@ import { closePreferenceArgs, verifyClosePreferences } from "./xmac/close-prefer
 import { installFixtureLaunchers, verifyFixtureLaunchers } from "./xmac/fixture-launchers.mjs";
 import { verifyFixtureShell } from "./xmac/fixture-shell.mjs";
 import { admitAppStart } from "./xmac/app-admission.mjs";
+import { startHappycamprRuntime } from "./xmac/happycampr-runtime.mjs";
 
 export const NIGHTLY_SOCKET = "/tmp/cmux-nightly.sock";
 export const INSTALLED_ENTRY = "/opt/homebrew/opt/cmuxlayer/bin/cmuxlayer";
@@ -187,6 +188,7 @@ export function socketIsLive(path) {
 }
 
 export async function startSoakRuntime(opts, outputRoot) {
+  if (opts.accountContract === "happycampr-owned-effects-v1") return startHappycamprRuntime(opts);
   if (opts.target === "m1-gate" && opts.fixtureMode &&
       (opts.accountContract !== "dedicated-test-502-v1" || typeof opts.assertAccount !== "function" || opts.humanSessionQuitApproved)) throw new Error("dedicated fixture account admission required");
   opts.assertAccount?.({ phase: "before-runtime" });
