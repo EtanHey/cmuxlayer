@@ -36,6 +36,7 @@ import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 import { appendDaemonLog, focusRpcLogFields } from "./daemon-log.js";
+import type { DiagnosticMethod } from "./current-session-census.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -434,12 +435,21 @@ export class CmuxSocketClient {
 
   declare listSurfaceRuntimeMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
 
+  /** Opt-in raw read diagnostics. No CLI fallback/reconnect replay; generation changes invalidate the bracket. */
+  async readCensusDiagnostic(method: DiagnosticMethod, params: Record<string, unknown> = {}): Promise<{ value: unknown; generation: string }> {
+    if (!["system.capabilities", "system.tree", "system.top", "debug.terminals", "window.list", "workspace.list", "pane.list", "surface.list"].includes(method)) {
+      throw new CmuxSocketError("Unsupported census diagnostic", "unsupported_diagnostic");
+    }
+    await this.ensureAuthenticated();
+    const value = await this.transport.call(method, params, { polling: CMUX_POLLING_METHODS.has(method) });
+    return { value, generation: `${this.transportSerial}:${this.transport.currentConnectionGeneration()}` };
+  }
+
   async listTerminalMetadata(): Promise<{
     terminals: CmuxTerminalMetadata[];
   }> {
-    // The V2 socket has no debug-terminals RPC. Surface/workspace payloads
-    // already carry the directory fallback used by callers, so do not hide a
-    // CLI subprocess inside an otherwise socket-only observation.
+    // Ordinary callers retain their existing fallback behavior. Census callers
+    // explicitly opt into debug.terminals through readCensusDiagnostic.
     return { terminals: [] };
   }
 
