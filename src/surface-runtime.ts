@@ -1,5 +1,16 @@
 import type { CmuxTerminalMetadata } from "./types.js";
 
+/** A wrapper method is not evidence that the native backend exposes metadata. */
+export async function runtimeMetadataAvailable(client: {
+  listSurfaceRuntimeMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
+  listTerminalMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
+}): Promise<boolean> {
+  const read = client.listSurfaceRuntimeMetadata ?? client.listTerminalMetadata;
+  return !!read && await readRuntimeMetadata(() => read.call(client))
+    .then(({ terminals }) => terminals.some(item => typeof item.runtime_surface_ready === "boolean"))
+    .catch(() => false);
+}
+
 export async function readRuntimeMetadata(
   read: () => Promise<{ terminals: CmuxTerminalMetadata[] }>,
   timeoutMs = 2_000,
@@ -19,7 +30,7 @@ export async function readRuntimeMetadata(
 
 export class SurfaceRuntimeNotStartedError extends Error {
   constructor(surface: string) {
-    super(`surface_runtime_not_started (surface_not_realized): ${surface}; cmux runtime did not initialize after input demand (cmux #9769)`);
+    super(`surface_runtime_not_started (surface_not_realized): ${surface}; background runtime readiness could not be proven (cmux #9769); use focus:true to permit initialization focus`);
     this.name = "SurfaceRuntimeNotStartedError";
   }
 }
@@ -35,8 +46,14 @@ export async function initializeNewSurfaceRuntime(
   timeoutMs = 2_000,
   beforeMutation?: () => Promise<void>,
   surfaceUuid?: string,
-): Promise<"unsupported" | "already_ready" | "input_demand"> {
-  if (!client.listTerminalMetadata) return "unsupported";
+  focusFallback?: () => Promise<void>,
+): Promise<"unsupported" | "already_ready" | "input_demand" | "focus"> {
+  if (!client.listTerminalMetadata) {
+    if (!focusFallback) return "unsupported";
+    await beforeMutation?.();
+    await focusFallback();
+    return "focus";
+  }
   const read = async (remaining = Math.min(timeoutMs, 2_000)) => {
     const metadata = await readRuntimeMetadata(() => client.listTerminalMetadata!(), remaining);
     return metadata.terminals.find((item) =>
@@ -52,10 +69,31 @@ export async function initializeNewSurfaceRuntime(
     !/^0x0+$/i.test(state.ghostty_surface_ptr);
   let state = await read().catch(() => undefined);
   if (ready(state)) return "already_ready";
+  const focus = async (): Promise<"focus"> => {
+    await beforeMutation?.();
+    await focusFallback!();
+    // Legacy/unknown metadata uses focused shell readiness. If metadata is
+    // available, focus must actually realize the owned runtime as well.
+    const deadline = Date.now() + Math.min(timeoutMs, 2_000);
+    do {
+      state = await read(Math.max(1, deadline - Date.now())).catch(() => undefined);
+      if (typeof state?.runtime_surface_ready !== "boolean" || ready(state)) return "focus";
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, remaining)));
+    } while (Date.now() <= deadline);
+    throw new SurfaceRuntimeNotStartedError(surface);
+  };
+  if (focusFallback && typeof state?.runtime_surface_ready !== "boolean") return focus();
   await beforeMutation?.();
   // Input demand creates cmux's hidden bootstrap window. Ctrl-U leaves no
   // shell text and submits nothing; never use it on an existing surface.
-  await client.sendKey(surface, "ctrl-u", { workspace });
+  try {
+    await client.sendKey(surface, "ctrl-u", { workspace });
+  } catch {
+    if (focusFallback) return focus();
+    throw new SurfaceRuntimeNotStartedError(surface);
+  }
   const deadline = Date.now() + Math.min(timeoutMs, 2_000);
   do {
     state = await read(Math.max(1, deadline - Date.now())).catch(() => undefined);
@@ -64,5 +102,6 @@ export async function initializeNewSurfaceRuntime(
     if (remaining <= 0) break;
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
   } while (Date.now() <= deadline);
+  if (focusFallback) return focus();
   throw new SurfaceRuntimeNotStartedError(surface);
 }
