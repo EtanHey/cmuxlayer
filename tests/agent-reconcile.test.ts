@@ -3212,6 +3212,27 @@ describe("Agent reconcile", () => {
     };
 
 
+    it.each(["done", "blocked"])("report snapshot ABA binds marker to the observed bytes (%s)", async (outcome) => {
+      await setup();
+      const progress = "IN_PROGRESS - observed snapshot A\n";
+      writeFileSync(reportPath, progress);
+      const observed = contentFingerprint(reportPath);
+      const marker = outcome === "done" ? "DONE_REPORT_EPISODE" : "BLOCKED_REPORT_EPISODE_CHILD";
+      const reader = engine as unknown as { readReportWatchSnapshot: (path: string) => unknown };
+      const original = reader.readReportWatchSnapshot.bind(engine);
+      const read = vi.spyOn(reader, "readReportWatchSnapshot").mockImplementation((path) => {
+        writeFileSync(path, `Transient snapshot B\n${marker}\n`);
+        const actual = original(path);
+        writeFileSync(path, progress);
+        return actual;
+      });
+      try {
+        expect(engine.coalescesReportWatch("lead-report-parent", reportPath, observed)).toBe(false);
+        expect(read).toHaveBeenCalledOnce();
+        expect(readFileSync(reportPath, "utf8")).toBe(progress);
+      } finally { read.mockRestore(); }
+    });
+
     it("coalesces only the parent's exact fresh terminal revision without settling delivery", async () => {
       await setup();
       const owns = (owner = "lead-report-parent", digest = contentFingerprint(reportPath)) =>

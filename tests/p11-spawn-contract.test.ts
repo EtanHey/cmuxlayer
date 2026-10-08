@@ -4689,6 +4689,51 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(watchPings()).toHaveLength(beforeOther + 1);
   });
 
+  it.each(["stable", "done ABA", "blocked ABA"])("report snapshot ABA callback preserves public progress (%s)", async (mode) => {
+    await server.close();
+    const parent = parentRecord();
+    exec = makeExec("Claude Code\nWhat can I help you with?\n❯ ", "parent-pane", undefined,
+      [], parent.surface_uuid!);
+    server = createServer(withTestSurfaceObserver({ exec, stateDir: STATE_DIR,
+      disableSpawnPreflight: true, inboxBaseDir: inboxDir, watchRegistryPath }));
+    const engine = engineForTests(server);
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const reportPath = join(inboxDir, "independent-report.md");
+    writeFileSync(reportPath, "Old progress baseline\n");
+    const child = { ...parent, agent_id: "independent-child", surface_id: "surface:child",
+      surface_uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", parent_agent_id: parent.agent_id,
+      report_path: reportPath, done_marker: "DONE_INDEPENDENT_CHILD", state: "working" as const,
+      boot_instance_id: "independent-boot", report_episode_key: "independent-boot:0",
+      report_episode_started_at: new Date(Date.now() - 1000).toISOString(),
+      report_done_delivery_id: "original-independent-done",
+      report_blocked_delivery_id: "original-independent-blocked" };
+    engine.stateMgr.writeState(child);
+    engine.getRegistry().set(child.agent_id, child);
+    const watch = await engine.armWatch({ owner: parent.agent_id, provenance: "public",
+      target: reportPath, change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const progress = "IN_PROGRESS - new observed revision A\n";
+    writeFileSync(reportPath, progress);
+    const original = (engine as any).readReportWatchSnapshot.bind(engine);
+    const read = mode === "stable" ? null : vi.spyOn(engine as any, "readReportWatchSnapshot").mockImplementation((path: string) => {
+      if (path !== reportPath) return original(path);
+      const marker = mode === "done ABA" ? child.done_marker : "BLOCKED_INDEPENDENT_CHILD";
+      writeFileSync(reportPath, `Transient revision B\n${marker}\n`);
+      const actual = original(path);
+      writeFileSync(reportPath, progress);
+      return actual;
+    });
+    await engine.sweepWatchesBestEffort();
+    read?.mockRestore();
+    await engine.sweepWatchesBestEffort();
+    const row = readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(w => w.watch_id === watch.watch_id)!;
+    expect(row).toMatchObject({ state: "armed", notification_pending: false });
+    expect(readFileSync(reportPath, "utf8")).toBe(progress);
+    expect(sentText(exec)).not.toContain(`[report] ${child.agent_id} done`);
+    expect(sentText(exec)).not.toContain(`[report] ${child.agent_id} blocked`);
+    expect(sentText(exec)).toContain(`[watch] file changed — inspect ${reportPath}`);
+  });
+
   it("coalescing a report watch preserves its pending ACK receipt across restart", async () => {
     await server.close();
     const parent = parentRecord();

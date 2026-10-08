@@ -3,10 +3,15 @@
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  openSync,
   readFileSync,
+  readSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -63,7 +68,6 @@ import {
 import type { CloseForensicsSweepResult } from "./close-forensics.js";
 import {
   armWatch as armDeclaredWatch,
-  contentFingerprint,
   readWatchRegistry,
   releaseWatchWaiter,
   sweepWatches,
@@ -3450,6 +3454,30 @@ export class AgentEngine {
     return this.reportTerminalOutcome(agent);
   }
 
+  /** One bounded read binds marker, digest and freshness to the same bytes.
+   * Changed descriptor/path metadata is ambiguous, even if bytes return to A. */
+  private readReportWatchSnapshot(path: string): { bytes: Buffer; mtimeMs: number } | null {
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+      const before = fstatSync(fd, { bigint: true });
+      if (!before.isFile() || before.size > 1024n * 1024n) return null;
+      const bytes = Buffer.alloc(Number(before.size) + 1);
+      const length = readSync(fd, bytes, 0, bytes.length, 0);
+      const after = fstatSync(fd, { bigint: true });
+      const currentPath = statSync(path, { bigint: true });
+      const revision = (stat: typeof before) =>
+        [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+      if (length !== Number(before.size) || revision(before) !== revision(after) ||
+          revision(after) !== revision(currentPath)) return null;
+      return { bytes: bytes.subarray(0, length), mtimeMs: Number(before.mtimeNs) / 1e6 };
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
   /** Keep public observations, but route the parent's terminal revision once
    * through the persisted report episode and its original delivery receipt. */
   coalescesReportWatch(ownerAgentId: string, target: string, observedValue: unknown): boolean {
@@ -3462,11 +3490,17 @@ export class AgentEngine {
     if (child.user_killed || child.deletion_intent || child.state === "error" ||
         child.paused || child.blocked_on_prompt) return false;
     try {
-      if (contentFingerprint(target) !== observedValue) return false;
-      const outcome = this.reportReadyOutcome(child);
-      return Boolean(outcome &&
-        (outcome === "done" ? child.report_done_delivery_id : child.report_blocked_delivery_id) &&
-        contentFingerprint(target) === observedValue);
+      const snapshot = this.readReportWatchSnapshot(target);
+      if (!snapshot || createHash("sha256").update(snapshot.bytes).digest("hex") !== observedValue ||
+          !child.done_marker || child.report_episode_key !==
+            `${child.boot_instance_id ?? child.created_at}:${child.reopen_count ?? 0}`) return false;
+      const startedAt = Date.parse(child.report_episode_started_at ?? "");
+      if (!Number.isFinite(startedAt) || snapshot.mtimeMs < startedAt ||
+          (child.reopen_report_mtime_ms != null && snapshot.mtimeMs <= child.reopen_report_mtime_ms)) return false;
+      const finalLine = this.extractFinalNonEmptyLine(
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(snapshot.bytes));
+      return Boolean(finalLine === child.done_marker ? child.report_done_delivery_id
+        : finalLine === coordinationBlockedMarker(child.agent_id) && child.report_blocked_delivery_id);
     } catch {
       return false;
     }
