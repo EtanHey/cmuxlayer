@@ -146,6 +146,9 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       expect(spawned.boot_prompt_receipt).toMatchObject({ typed: true, submit_dispatched: false });
       expect(t.engine.listDeliveryReceipts().filter(receipt =>
         receipt.boot_recovery && receipt.agent_id === spawned.agent_id)).toHaveLength(0);
+      expect(t.engine.getDeliveryReceipt(spawned.boot_prompt_receipt.delivery_id))
+        .toMatchObject({ delivery_state: "typed", typed: true,
+          submit_dispatched: false, submit_verified: null, terminal: true });
       expect(t.pane.state.submitted).toHaveLength(0);
       expect(spawned.next_action).toContain('send_to({mode:"key"');
       const surface = spawned.next_action.match(/surface:"([^"]+)"/)?.[1];

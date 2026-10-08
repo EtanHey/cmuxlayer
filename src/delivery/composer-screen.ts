@@ -1385,13 +1385,14 @@ export function composeBootDeliveryText(
 ): string {
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
   if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
-  // Claude and Antigravity (cli "gemini", #801) can treat a paragraph break in
-  // a pasted boot payload as a submit boundary. Keep the brief and pointer in
+  // Codex initialization, Claude and Antigravity (cli "gemini", #801) can
+  // treat a paragraph break in a pasted boot payload as a submit boundary.
+  // Keep the brief and pointer in
   // one composer message so the brief cannot run while the engine-issued
   // contract remains unsent. A multi-line brief without a paragraph break has
   // the same boundary risk.
   if (
-    (cli === "claude" || cli === "gemini") &&
+    (cli === "codex" || cli === "claude" || cli === "gemini") &&
     !/\r?\n\s*\r?\n/.test(callerDeliveryText) &&
     !/\r?\n\s*\r?\n/.test(injectedPrompt)
   ) {
