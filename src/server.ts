@@ -3547,11 +3547,16 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           message: `report_path ${reportPath} is already assigned to live child ${existingLiveChild.agent_id}; each child requires a distinct report path`,
         };
       }
+      const existingSubject = childAgentId ? stateMgr.readState(childAgentId) : null;
       const registryReservation = await reserveWatchReportPath(
         {
           owner: parentAgentId,
           target: reportPath,
           ...(childAgentId ? { subject_agent_id: childAgentId } : {}),
+          ...(existingSubject?.parent_agent_id === parentAgentId && existingSubject.report_path
+            ? { existing_subject: { agent_id: existingSubject.agent_id,
+                parent_agent_id: parentAgentId, report_path: existingSubject.report_path } }
+            : {}),
         },
         { registryPath: watchRegistryPath },
       );

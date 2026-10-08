@@ -729,6 +729,29 @@ describe("WatchSpec arm contract", () => {
     ).resolves.toMatchObject({ ok: false, conflict_kind: "watch" });
   });
 
+  it.each(["public", "legacy", "foreign", "wrong owner", "wrong path", "live reservation"])(
+    "requires persisted same-child identity to pass an unscoped watch (%s)", async (mode) => {
+      const target = join(TEST_DIR, "existing-child-report.md");
+      writeFileSync(target, "before");
+      const watch = await armWatch({ owner: "lead-a", target, change: "content", deadline: 60_000,
+        ...(mode === "legacy" ? {} : { provenance: "public" as const }),
+        ...(mode === "foreign" ? { subject_agent_id: "foreign-child" } : {}),
+      }, { registryPath: registryPath(), now: () => 1_000 });
+      const input = { owner: "lead-a", target, subject_agent_id: "child-a",
+        existing_subject: { agent_id: "child-a", parent_agent_id: mode === "wrong owner"
+          ? "other-lead" : "lead-a", report_path: mode === "wrong path" ? `${target}.other` : target } };
+      const options = { registryPath: registryPath() };
+      const held = mode === "live reservation" ? await reserveWatchReportPath(input, options) : null;
+      const result = await reserveWatchReportPath(input, options);
+      expect(result.ok).toBe(mode === "public" || mode === "legacy");
+      if (mode === "live reservation") expect(result).toMatchObject({ ok: false, conflict_kind: "reservation" });
+      expect(readWatchRegistry(options).watches).toEqual([watch]);
+      if (result.ok) await releaseWatchReportPathReservation(result.reservation.reservation_id, options);
+      if (held?.ok) await releaseWatchReportPathReservation(held.reservation.reservation_id, options);
+      expect(existsSync(`${registryPath()}.report-path-reservations.json`)).toBe(false);
+    },
+  );
+
   it("reclaims a reservation whose PID was recycled after it was created", async () => {
     const target = join(TEST_DIR, "recycled-pid-report.md");
     const sidecar = `${registryPath()}.report-path-reservations.json`;

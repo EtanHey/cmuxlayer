@@ -580,7 +580,7 @@ function countMarker(path: string, marker: string): number {
   return count;
 }
 
-function contentFingerprint(
+export function contentFingerprint(
   path: string,
   io: WatchContentFingerprintIo = {
     stat: (target) => statSync(target, { bigint: true }),
@@ -819,7 +819,8 @@ export function readWatchRegistry(
 }
 
 export function reserveWatchReportPath(
-  input: { owner: string; target: string; subject_agent_id?: string },
+  input: { owner: string; target: string; subject_agent_id?: string;
+    existing_subject?: { agent_id: string; parent_agent_id: string; report_path: string } },
   opts: WatchRegistryOptions = {},
 ): Promise<WatchReportPathReservationResult> {
   const owner = cleanString(input.owner);
@@ -833,6 +834,10 @@ export function reserveWatchReportPath(
     );
   }
   const normalizedTarget = resolve(target);
+  const existingSubjectOwnsTarget = Boolean(subjectAgentId &&
+    input.existing_subject?.agent_id === subjectAgentId &&
+    input.existing_subject.parent_agent_id === owner &&
+    resolve(input.existing_subject.report_path) === normalizedTarget);
   const registryPath = registryPathFor(opts);
   const reservationPath = reportPathReservationFile(registryPath);
   return withWriteLock(registryPath, () => {
@@ -862,7 +867,10 @@ export function reserveWatchReportPath(
         watch.target === normalizedTarget &&
         watch.change === "content" &&
         watch.state !== "failed" &&
-        watch.subject_agent_id !== subjectAgentId,
+        watch.subject_agent_id !== subjectAgentId &&
+        // An unscoped observer is not a foreign child assignment when persisted
+        // identity proves this same child already owns the requested contract.
+        !(existingSubjectOwnsTarget && !watch.subject_agent_id),
     );
     if (conflictingWatch) {
       writeReportPathReservations(reservationPath, activeReservations);
