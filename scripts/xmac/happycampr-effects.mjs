@@ -82,7 +82,7 @@ export function planHappycamprCleanup(plan, before, current, expected) {
       operation: effect.before != null ? "restore-if-unchanged" : effect.kind === "directory" ? "rmdir-if-empty" :
         effect.kind === "process" ? "stop-exact-pid-start" : ["workspace", "surface"].includes(effect.kind) ? "close-exact-uuid-epoch" : "unlink-exact-identity" });
   }
-  for (const id of Object.keys(current.resources)) if (!plan.effects.some(row => row.id === id) &&
+  for (const id of new Set([...Object.keys(before.resources), ...Object.keys(current.resources)])) if (!plan.effects.some(row => row.id === id) &&
       (id.startsWith(plan.scratch.path + "/") || !same(before.resources[id], current.resources[id]))) pending.push(id);
   return { status: pending.length ? "PENDING" : "READY", actions, preserved: pending, executes: false };
 }

@@ -58,3 +58,29 @@ it.each(["path-traversal", "existing-workspace", "links", "foreign-owner", "sock
   f.plan.binding.config = happycamprPlanDigest(f.plan);
   expect(() => validateHappycamprPlan(f.plan, structuredClone(f.plan.binding))).toThrow();
 });
+it.each(["foreign/protected", "unrelated-focus", "auth/config/BrainLayer", root + "/before-only"])("keeps undeclared deletion %s pending without proposing cleanup for it", id => {
+  const f = fixture(), safe = planHappycamprCleanup(f.plan, f.before, f.after, f.expected).actions;
+  f.before.resources[id] = { hash }; delete f.after.resources[id];
+  expect(() => verifyHappycamprEffects(f.plan, f.before, f.after, f.expected)).toThrow(/foreign effect/);
+  const c = planHappycamprCleanup(f.plan, f.before, f.after, f.expected);
+  expect(c.status).toBe("PENDING"); expect(c.preserved).toEqual([id]); expect(c.executes).toBe(false);
+  expect(c.actions).toEqual(safe); expect(c.actions.some((a: any) => a.id === id)).toBe(false);
+});
+it.each([6, 7])("keeps absent declared baseline resource %s pending without inventing a restore", index => {
+  const f = fixture(), id = f.plan.effects[index].id, safe = planHappycamprCleanup(f.plan, f.before, f.after, f.expected).actions;
+  expect(f.before.resources[id]).toEqual(f.plan.effects[index].before); delete f.after.resources[id];
+  const c = planHappycamprCleanup(f.plan, f.before, f.after, f.expected);
+  expect(c.status).toBe("PENDING"); expect(c.preserved).toEqual([id]); expect(c.executes).toBe(false);
+  expect(c.actions).toEqual(safe.filter((a: any) => a.id !== id));
+});
+it("retains readiness and identical safe proposals for an unchanged external resource", () => {
+  const f = fixture(), safe = planHappycamprCleanup(f.plan, f.before, f.after, f.expected);
+  f.before.resources["foreign/protected"] = { hash }; f.after.resources["foreign/protected"] = { hash };
+  expect(planHappycamprCleanup(f.plan, f.before, f.after, f.expected)).toEqual(safe);
+});
+it("preserves an unchanged undeclared scratch entry without proposing its removal", () => {
+  const f = fixture(), id = root + "/foreign", safe = planHappycamprCleanup(f.plan, f.before, f.after, f.expected).actions;
+  f.before.resources[id] = { hash }; f.after.resources[id] = { hash };
+  const c = planHappycamprCleanup(f.plan, f.before, f.after, f.expected);
+  expect(c.status).toBe("PENDING"); expect(c.preserved).toEqual([id]); expect(c.executes).toBe(false); expect(c.actions).toEqual(safe);
+});
