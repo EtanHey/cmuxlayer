@@ -12,9 +12,9 @@ import { privateBuild, targetOptions, shellQuote, distDigest } from "./target.mj
 import { runCodexResolutionProbe, observeProbeOwner } from "./startup-probe.mjs";
 import { verifyFixtureLaunchers } from "./fixture-launchers.mjs";
 import { attestFixtureProcess, fileDigest } from "./fixture-attestation.mjs";
-import { productionChanges, productionSnapshot } from "./production-guard.mjs";
 import { bindAccountHome } from "./account-home.mjs";
 import { accountContract, createDedicatedAccountGuard } from "./dedicated-account.mjs";
+import { createFixtureObserver } from "./account-observer-bridge.mjs";
 
 export const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603fc575638bd531aeb97e48038149aad78c", fix: "64260ba34ba8ee98fa7de3b71566387cecb12280", specimen: "#1007 / composer-overlays/codex-boot.txt" },
@@ -23,9 +23,9 @@ export const rows = [
 ];
 export const requiredRunnerFiles = ["scripts/xmac/m1-ratchet.mjs", "scripts/xmac/fixture-launchers.mjs", "scripts/xmac/fixture-attestation.mjs",
   "scripts/ratchet-fixture-tui.mjs", "scripts/soak-runtime.mjs", "scripts/soak-app-guard.mjs", "scripts/cmux-session-guard.mjs",
-  "scripts/xmac/production-guard.mjs", "scripts/xmac/account-home.mjs", "scripts/xmac/dedicated-account.mjs", "scripts/xmac/fixture-shell.mjs", "scripts/xmac/app-admission.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
+  "scripts/xmac/production-guard.mjs", "scripts/xmac/account-home.mjs", "scripts/xmac/dedicated-account.mjs", "scripts/xmac/account-observer.mjs", "scripts/xmac/account-observer-bridge.mjs", "scripts/xmac/driver.mjs", "scripts/xmac/fixture-shell.mjs", "scripts/xmac/app-admission.mjs", "scripts/xmac/startup-probe.mjs", "scripts/xmac/close-preferences.mjs", "scripts/xmac/close-preferences.swift", "scripts/xmac/target.mjs", "scripts/xmac/argv-preflight.mjs", "scripts/xmac/scenario-repo.mjs", "scripts/xmac/launch-cwd.mjs", "bun.lock", "package.json"];
 export function validateWrapperConfig(cfg) {
-  if (cfg.nativeApproved !== true || cfg.accountContract !== accountContract || cfg.options?.humanSessionQuitApproved || !/^[a-f0-9]{40}$/.test(cfg.runnerSha) || cfg.host && cfg.host !== "m1" ||
+  if (cfg.nativeApproved !== true || cfg.accountContract !== accountContract || cfg.accountObserverContract !== "protected-ssh-mirror-v1" || cfg.options?.humanSessionQuitApproved || !/^[a-f0-9]{40}$/.test(cfg.runnerSha) || cfg.host && cfg.host !== "m1" ||
       cfg.cmux && cfg.cmux !== "prod" || rows.some(row => cfg.runnerSha === row.fix || cfg.runnerSha === row.bug) ||
       Object.keys(cfg.products ?? {}).sort().join() !== rows.map(row => row.name).sort().join() ||
       Object.keys(cfg.runnerFiles ?? {}).sort().join() !== [...requiredRunnerFiles].sort().join() ||
@@ -74,22 +74,22 @@ export function checkProductRegistry(build, env) {
 }
 async function sample(cfg, row, product, outputRoot, accountHome, accountGuard) {
   accountGuard.check();
-  const before = productionSnapshot(accountGuard.binding.production.home), token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
+  const before = accountGuard.result().after, token = `RATCHET_${row.fixture}_${product.sha.slice(0, 8)}_${randomUUID()}`;
   const owned = [], reads = [], sample = { sha: product.sha, runner_sha: cfg.runnerSha, token, behavior_status: "FAIL", attribution_status: "FAIL", expected_defect: false,
     account_home: accountHome, production_before: before, lock_sha256: fileDigest(join(product.root, "bun.lock")), dist_digest: product.distDigest };
   let runtime, client;
   try {
     const opts = targetOptions({ ...cfg.options, host: "m1", cmux: "prod", repo: "ratchet", driverRoot: cfg.driverRoot, driverSha: cfg.runnerSha,
       buildRoot: product.root, sha: product.sha, fixtureRow: row.fixture, accountContract,
-      assertAccount: context => accountGuard.check(context) });
+      assertAccount: context => accountGuard.check({ ...context, identifiers: [token], agentIds: owned }) });
     runtime = await startSoakRuntime(opts, outputRoot);
     verifyFixtureLaunchers(runtime.receipt.fixtures, runtime.env);
     checkProductRegistry(privateBuild(product.root, product.sha), runtime.env);
-    const observe = () => { accountGuard.check(runtime); return observeProbeOwner(runtime); };
+    const observe = () => { accountGuard.check({ ...runtime, identifiers: [token], agentIds: owned }); return observeProbeOwner(runtime); };
     await runCodexResolutionProbe(runtime, runtime.receipt.fixtures.binaries.codex, { observe });
     const owner = observeProbeOwner(runtime);
     const assertOwner = () => {
-      accountGuard.check(runtime);
+      accountGuard.check({ ...runtime, identifiers: [token], agentIds: owned });
       const current = observeProbeOwner(runtime);
       if (!current.socketOwned || Object.keys(owner).some(key => current[key] !== owner[key])) throw new Error("M1 app/socket ownership changed");
       verifyFixtureLaunchers(runtime.receipt.fixtures, runtime.env);
@@ -140,9 +140,9 @@ async function sample(cfg, row, product, outputRoot, accountHome, accountGuard) 
     catch (error) { sample.error = String(error); }
     try {
       const local = [token, runtime?.receipt.launch_token, runtime?.receipt.scratch, runtime?.env.CMUX_SOCKET_PATH, runtime?.env.CMUXLAYER_DAEMON_SOCKET, ...owned].filter(Boolean);
-      accountGuard.check();
-      const after = productionSnapshot(accountGuard.binding.production.home);
-      const violations = productionChanges(before, after, local, owned, reads);
+      accountGuard.check({ identifiers: local, agentIds: owned, phase: "sample-final" });
+      const after = accountGuard.result().after, violations = after.append.violations;
+      reads.push(...after.append.reads);
       const path = runtime && join(runtime.env.CMUXLAYER_STATE_DIR, "daemon.log");
       const bytes = path && existsSync(path) ? statSync(path).size : 0;
       const positive = { path, bytes, status: bytes > 0 ? "PASS" : "FAIL" };
@@ -157,8 +157,9 @@ async function sample(cfg, row, product, outputRoot, accountHome, accountGuard) 
   }
   return sample;
 }
-export async function runNative(cfg) {
+export async function runNative(cfg, { protectedObserver } = {}) {
   validateWrapperConfig(cfg);
+  if (typeof protectedObserver !== "function") throw new Error("fresh protected SSH observer callback required");
   if (hostname() !== "Locals-MacBook-Pro.local") throw new Error("dedicated M1 only; no MBP/NIGHTLY route");
   const harness = privateBuild(cfg.driverRoot, cfg.runnerSha);
   if (realpathSync(fileURLToPath(import.meta.url)) !== join(harness.root, "scripts/xmac/m1-ratchet.mjs")) throw new Error("runner does not match reviewed driver prefix");
@@ -167,8 +168,8 @@ export async function runNative(cfg) {
     if (realpathSync(path) !== path || fileDigest(path) !== hash) throw new Error("reviewed runner source hash mismatch");
   }
   const accountHome = bindAccountHome();
-  const accountGuard = createDedicatedAccountGuard();
-  const productionBefore = productionSnapshot(accountGuard.binding.production.home);
+  const accountGuard = createDedicatedAccountGuard({ protectedObserver });
+  const productionBefore = accountGuard.result().before;
   for (const row of rows) for (const product of Object.values(cfg.products[row.name])) {
     const build = privateBuild(product.root, product.sha), probe = mkdtempSync(join(harness.root, "registry-probe-"));
     if (distDigest(join(build.root, "dist")) !== product.distDigest) throw new Error("compiled product digest mismatch");
@@ -188,9 +189,9 @@ export async function runNative(cfg) {
   const reads = [], samples = receipt.rows.flatMap(row => [row.baseline, row.candidate]);
   const ids = samples.flatMap(sample => [sample.token, sample.result?.agent_id, sample.lifecycle?.launch_token, sample.lifecycle?.scratch]).filter(Boolean);
   try {
-    accountGuard.check();
-    const productionAfter = productionSnapshot(accountGuard.binding.production.home);
-    const violations = productionChanges(productionBefore, productionAfter, [...ids, "/tmp/cmux-soak-stable.sock"], samples.map(sample => sample.result?.agent_id).filter(Boolean), reads);
+    accountGuard.check({ identifiers: ids, agentIds: samples.map(sample => sample.result?.agent_id).filter(Boolean), phase: "run-final" });
+    const productionAfter = accountGuard.result().after, violations = productionAfter.append.violations;
+    reads.push(...productionAfter.append.reads);
     receipt.production_guard = { account_home: accountHome, before: productionBefore, after: productionAfter, reads, violations, status: violations.length ? "FAIL" : "PASS" };
     if (violations.length) receipt.status = "FAIL";
   } catch (error) {
@@ -201,9 +202,9 @@ export async function runNative(cfg) {
   return { ...receipt, outputRoot };
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv[2] !== "--execute-native" || process.argv[3] !== "--config" || process.argv.length !== 5) throw new Error("explicit reviewed M1 admission/config required");
+  if (process.argv[2] !== "--execute-native" || process.argv[3] !== "--config" || process.argv[5] !== "--observer-run" || process.argv.length !== 7) throw new Error("explicit reviewed M1 admission/config required");
   const path = realpathSync(process.argv[4]), stat = lstatSync(path);
   if (path !== process.argv[4] || !stat.isFile() || stat.uid !== process.getuid() || stat.mode & 0o077) throw new Error("unsafe native config");
-  const result = await runNative(JSON.parse(readFileSync(path, "utf8")));
+  const result = await runNative(JSON.parse(readFileSync(path, "utf8")), { protectedObserver: createFixtureObserver(process.argv[6]) });
   console.log(JSON.stringify(result)); process.exitCode = result.status === "PASS" ? 0 : 1;
 }
