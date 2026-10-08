@@ -4839,6 +4839,7 @@ describe("AgentEngine", () => {
         const cwd = await prepare({ launcher });
         const result = await engine.resumeAgent("saved-cwd");
         const command = (mockClient.send as ReturnType<typeof vi.fn>).mock.calls[0][1];
+        expect(command).toContain(`CODEX_HOME='${join(harnessHome.path(), ".codex")}'`);
         expect(command).toContain(`--cd '${cwd.replaceAll("'", "'\\''")}'`);
         if (launcher) expect(command).toContain(`-w '${cwd.replaceAll("'", "'\\''")}'`);
         expect(command).toContain(`resume ${session}`);
@@ -4897,7 +4898,7 @@ describe("AgentEngine", () => {
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        `brainlayerCodex -w '${harnessHome.path()}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e --cd '${harnessHome.path()}'`,
+        `CODEX_HOME='${join(harnessHome.path(), ".codex")}' brainlayerCodex -w '${harnessHome.path()}' --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e --cd '${harnessHome.path()}'`,
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe(

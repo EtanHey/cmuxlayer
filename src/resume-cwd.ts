@@ -83,16 +83,25 @@ async function readCwdEvidence(path: string, sessionId: string, refuse: Refuse) 
   return { cwd, stamp: stamp(after) };
 }
 
-/** Explicit resume binds fresh cwd evidence to the unique UUID-addressed local rollout. */
-export async function resolveSavedResumeCwd(record: AgentRecord): Promise<string | null> {
-  if (record.cli !== "codex") return record.worktree_path ?? record.launch_cwd ?? null;
+export interface SavedResumeContext {
+  cwd: string | null;
+  /** Absolute store inspected for this UUID; bind it on the launch invocation. */
+  codexHome?: string;
+}
+
+/** Explicit resume binds fresh cwd evidence to the unique UUID-addressed local store. */
+export async function resolveSavedResumeContext(record: AgentRecord): Promise<SavedResumeContext> {
+  if (record.cli !== "codex") return { cwd: record.worktree_path ?? record.launch_cwd ?? null };
   const refuse: Refuse = reason => {
     throw new Error(`Cannot restore saved Codex directory: ${reason}. Restore the session file/directory or correct its captured identity, then retry resume_agent_id; no pane was opened`);
   };
   const sessionId = record.cli_session_id;
   if (!sessionId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sessionId)) return refuse("session identity is invalid");
   const home = process.env.CMUXLAYER_HARNESS_HOME ?? homedir();
-  const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
+  const configuredHome = process.env.CODEX_HOME ?? join(home, ".codex");
+  if (!configuredHome || /[\r\n\0]/.test(configuredHome)) return refuse("configured session store is invalid");
+  // Relative roots must not be reinterpreted after the pane changes directory.
+  const codexHome = resolve(configuredHome);
   const candidates = await uuidCandidates(codexHome, sessionId, refuse);
   if (candidates.length !== 1) return refuse(candidates.length
     ? "multiple UUID candidates are ambiguous in the configured active/archive stores; reconcile conflicting copies"
@@ -121,5 +130,10 @@ export async function resolveSavedResumeCwd(record: AgentRecord): Promise<string
   const currentCandidates = await uuidCandidates(codexHome, sessionId, refuse);
   const finalState = await stat(selected.path).catch(() => null);
   if (currentCandidates.length !== 1 || currentCandidates[0].path !== selected.path || !finalState || stamp(finalState) !== evidence.stamp) return refuse("UUID session evidence changed during verification; retry after it is settled");
-  return verifiedCwd;
+  return { cwd: verifiedCwd, codexHome };
+}
+
+/** Cwd-only compatibility projection; launch consumers must carry the context. */
+export async function resolveSavedResumeCwd(record: AgentRecord): Promise<string | null> {
+  return (await resolveSavedResumeContext(record)).cwd;
 }

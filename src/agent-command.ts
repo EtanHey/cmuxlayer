@@ -120,6 +120,8 @@ export interface ResumeCommandOptions {
    * and --cd to explicitly bypass the harness cwd chooser.
    */
   cwd?: string | null;
+  /** Verified Codex session store, scoped to this invocation's environment. */
+  codexHome?: string;
   /**
    * Whether the resumed harness bypasses its approval prompt. Defaults to the
    * machine's `CMUXLAYER_SPAWN_PERMISSION_MODE` (skip-permissions unless the
@@ -159,7 +161,7 @@ export function buildResumeCommand(
     case "claude":
       return `${launcher}${skipArg} --resume ${sessionId}`;
     case "codex":
-      return `${launcher}${opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : ""}${
+      return `${opts?.codexHome ? `CODEX_HOME=${shellQuote(opts.codexHome)} ` : ""}${launcher}${opts?.cwd ? ` -w ${shellQuote(opts.cwd)}` : ""}${
         bypass
           ? " --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
           : ""
@@ -209,7 +211,7 @@ export function buildRawResumeCommand(
     // Codex takes global options BEFORE the subcommand -- matching the
     // launcher form `<L> --dangerously-bypass-approvals-and-sandbox resume`.
     case "codex":
-      return `${cd}codex ${skip}resume ${sessionId}${cwd ? ` --cd ${shellQuote(cwd)}` : ""}`;
+      return `${cd}${opts?.codexHome ? `CODEX_HOME=${shellQuote(opts.codexHome)} ` : ""}codex ${skip}resume ${sessionId}${cwd ? ` --cd ${shellQuote(cwd)}` : ""}`;
     // `cursor agent` exposes `--resume [chatId]`; it has no `--session` flag
     // (`error: unknown option '--session'`). Verified against `cursor agent --help`.
     case "cursor":

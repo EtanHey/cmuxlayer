@@ -55,6 +55,7 @@ export function resumeInvocationForAgent(
     | "launch_cwd"
     | "worktree_path"
   >,
+  codexHome?: string,
 ): { command: string; reason: null } | { command: null; reason: string } {
   if (!record.cli_session_id) {
     return { command: null, reason: "no CLI session has been captured" };
@@ -97,7 +98,7 @@ export function resumeInvocationForAgent(
       record.repo,
       record.cli_session_id,
       record.launcher_name,
-      { cwd },
+      { cwd, codexHome },
     );
   } catch (error) {
     return {

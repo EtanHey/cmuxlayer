@@ -3,7 +3,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { resolveSavedResumeCwd } from "../resume-cwd.js";
+import { resolveSavedResumeContext } from "../resume-cwd.js";
 import { resolve } from "node:path";
 import type { AgentEngine } from "../agent-engine.js";
 import { resumeInvocationForAgent, toPublicAgent } from "../agent-facade.js";
@@ -640,10 +640,11 @@ export async function resumeAgent(
     opts?.force === true,
   );
 
-  const resumeCwd = await resolveSavedResumeCwd(agent);
+  const resumeContext = await resolveSavedResumeContext(agent);
+  const resumeCwd = resumeContext.cwd;
   const resolvedInvocation = resumeInvocationForAgent({
     ...agent, launch_cwd: resumeCwd, worktree_path: resumeCwd,
-  });
+  }, resumeContext.codexHome);
   if (resolvedInvocation.command === null) throw new Error(resolvedInvocation.reason);
   const resumeCommand = resolvedInvocation.command;
 

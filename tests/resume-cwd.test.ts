@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { resolveSavedResumeCwd } from "../src/resume-cwd.js";
-import { buildRawResumeCommand } from "../src/agent-command.js";
+import { join, relative, resolve } from "node:path";
+import { resolveSavedResumeCwd, resolveSavedResumeContext } from "../src/resume-cwd.js";
+import { buildResumeCommand, shellQuote } from "../src/agent-command.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 describe("saved resume directory evidence", () => {
@@ -74,11 +74,34 @@ describe("saved resume directory evidence", () => {
     await expect(resolveSavedResumeCwd({ ...record, worktree_branch: "other" })).rejects.toThrow(/differs/);
     expect(execFileSync("git", ["-C", root, "symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim()).toBe("saved");
   });
-  it("raw shell execution preserves spaces, apostrophes and trailing whitespace", () => {
+  it("carries the harness-home default store when CODEX_HOME is absent", async () => {
+    vi.stubEnv("CODEX_HOME", undefined);
+    vi.stubEnv("CMUXLAYER_HARNESS_HOME", root);
+    expect(await resolveSavedResumeContext(record)).toEqual({ cwd: root, codexHome: resolve(root, ".codex") });
+  });
+  it("makes a relative configured store absolute before any pane cd", async () => {
+    vi.stubEnv("CODEX_HOME", relative(process.cwd(), join(root, ".codex")));
+    expect(await resolveSavedResumeContext(record)).toEqual({ cwd: root, codexHome: resolve(root, ".codex") });
+  });
+  it.each([
+    { launcher: null, permissionMode: "default" },
+    { launcher: null, permissionMode: "skip-permissions" },
+    { launcher: "fixtureCodex", permissionMode: "default" },
+    { launcher: "fixtureCodex", permissionMode: "skip-permissions" },
+  ] as const)("binds quoted store and cwd for $launcher/$permissionMode without changing shell env", async ({ launcher, permissionMode }) => {
     const cwd = join(root, "chat's cwd "); mkdirSync(cwd);
-    writeFileSync(join(root, "codex"), '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({cwd:process.cwd(),argv:process.argv.slice(2)}));', { mode: 0o700 });
-    const command = buildRawResumeCommand("codex", "test", id, { cwd, permissionMode: "default" });
-    const result = JSON.parse(execFileSync("/bin/zsh", ["-c", command], { encoding: "utf8", env: { ...process.env, PATH: `${root}:${process.env.PATH}` } }));
-    expect(result).toEqual({ cwd: realpathSync(cwd), argv: ["resume", id, "--cd", cwd] });
+    const codexHome = join(root, "chat's store ");
+    mkdirSync(join(codexHome, "sessions"), { recursive: true });
+    writeFileSync(join(codexHome, "sessions", `rollout-2026-10-08T00-00-00-${id}.jsonl`), row("session_meta", { id, cwd }));
+    vi.stubEnv("CODEX_HOME", codexHome);
+    const context = await resolveSavedResumeContext({ ...record, cli_session_path: null });
+    writeFileSync(join(root, "codex"), '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({store:process.env.CODEX_HOME,cwd:process.cwd(),argv:process.argv.slice(2)}));', { mode: 0o700 });
+    const command = buildResumeCommand("codex", "test", id, launcher, { ...context, permissionMode });
+    const setup = 'fixtureCodex() { cd "$2"; shift 2; codex "$@"; }\n';
+    const result = execFileSync("/bin/zsh", ["-f", "-c", setup + command + '\nprint\nprint -r -- "$CODEX_HOME"'], { encoding: "utf8", env: { ...process.env, CODEX_HOME: "/synthetic-pane-store", PATH: `${root}:${process.env.PATH}` } }).trim().split("\n");
+    const flags = permissionMode === "default" ? [] : ["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"];
+    expect(JSON.parse(result[0])).toEqual({ store: codexHome, cwd: realpathSync(cwd), argv: [...flags, "resume", id, "--cd", cwd] });
+    expect(result[1]).toBe("/synthetic-pane-store");
+    expect(command).toContain(`CODEX_HOME=${shellQuote(context.codexHome!)}`);
   });
 });
