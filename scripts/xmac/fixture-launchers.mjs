@@ -1,3 +1,4 @@
+import * as nativeFs from "node:fs";
 import { mkdirSync, writeFileSync, realpathSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -22,7 +23,9 @@ export function fixtureLaunchArgs(cli, args) {
   return { cwd, argv, worker };
 }
 
-export function installFixtureLaunchers(env, opts, scratch, cwd) {
+export function installFixtureLaunchers(env, opts, scratch, cwd, io = {}) {
+  const { mkdirSync, writeFileSync, realpathSync, readFileSync } = io.fs ?? nativeFs;
+  const node = io.node ?? process.execPath;
   const root = realpathSync(scratch), bin = join(root, "bin");
   if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(opts.repo ?? "")) throw new Error("fixture registry prefix invalid");
   if (!realpathSync(cwd).startsWith(root + "/")) throw new Error("fixture cwd escapes scratch");
@@ -31,14 +34,14 @@ export function installFixtureLaunchers(env, opts, scratch, cwd) {
     else if (typeof env[key] === "string") env[key] = env[key].replaceAll(scratch + "/", root + "/");
   }
   mkdirSync(bin, { mode: 0o700 });
-  const source = fileURLToPath(import.meta.url), tui = fileURLToPath(new URL("../ratchet-fixture-tui.mjs", import.meta.url));
+  const source = io.helper ?? fileURLToPath(import.meta.url), tui = io.tui ?? fileURLToPath(new URL("../ratchet-fixture-tui.mjs", import.meta.url));
   const row = opts.fixtureRow;
   if (row && !["banner", "boot", "contract"].includes(row)) throw new Error("ratchet fixture row unsupported");
   const launchers = Object.fromEntries(["codex", "claude"].map(cli => [cli, opts.repo + (cli === "codex" ? "Codex" : "Claude")]));
   const fixtureBinaries = Object.fromEntries(["codex", "claude"].map(cli => {
     const path = join(bin, cli);
     writeFileSync(path, row ? `#!/bin/sh\nprintf '%s\\n' ${shellQuote(cli)} >> ${shellQuote(join(root, "model-trap.log"))}\nexit 86\n` :
-      `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(source)} native ${cli} "$@"\n`, { mode: 0o700 });
+      `#!/bin/sh\nexec ${shellQuote(node)} ${shellQuote(source)} native ${cli} "$@"\n`, { mode: 0o700 });
     return [cli, path];
   }));
   env.CMUXLAYER_LAUNCHER_REGISTRY_PATH = join(root, "fixture-launchers.zsh");
@@ -57,24 +60,34 @@ export function installFixtureLaunchers(env, opts, scratch, cwd) {
     if (row) throw Object.assign(new Error("ratchet uses private traps"), { code: "ENOENT" });
     if (!readFileSync(realpathSync(bundleWrapper), "utf8").includes("CMUX_CUSTOM_CODEX_PATH")) throw new Error("bundle wrapper fixture delegation unsupported");
   } catch (error) { if (error.code !== "ENOENT") throw error; }
-  const functions = Object.entries(launchers).map(([cli, name]) => `${name}() { ${shellQuote(process.execPath)} ${shellQuote(source)} launcher ${cli} "$@"; }`).join("\n");
+  const functions = Object.entries(launchers).map(([cli, name]) => `${name}() { ${shellQuote(node)} ${shellQuote(source)} launcher ${cli} "$@"; }`).join("\n");
   writeFileSync(env.CMUXLAYER_LAUNCHER_REGISTRY_PATH, `repoGolem ${opts.repo} ${shellQuote(realpathSync(cwd))}\n${functions}\n`, { mode: 0o600 });
   const receipt = sealFixtureInstall({ status: "PASS", fixture_only: true, root, tui, row,
     events: join(root, "ratchet-events.json"), binaries: fixtureBinaries, launchers,
-    hashes: Object.fromEntries(Object.entries(fixtureBinaries).map(([cli, path]) => [cli, digest(path)])) }, env, source);
+    hashes: Object.fromEntries(Object.entries(fixtureBinaries).map(([cli, path]) => [cli, digest(path, io)])) }, env, source, io);
   writeFileSync(env.CMUXLAYER_FIXTURE_MANIFEST, JSON.stringify(receipt), { mode: 0o600 });
   return receipt;
 }
-const digest = path => createHash("sha256").update(readFileSync(path)).digest("hex");
-export function verifyFixtureLaunchers(receipt, env) {
+const digest = (path, io = {}) => createHash("sha256").update((io.fs ?? nativeFs).readFileSync(path)).digest("hex");
+export function verifyFixtureLaunchers(receipt, env, io = {}) {
+  const { realpathSync, lstatSync } = io.fs ?? nativeFs;
   if (receipt?.fixture_only !== true || realpathSync(receipt.root) !== receipt.root ||
       Object.keys(receipt.binaries ?? {}).sort().join(",") !== "claude,codex") throw new Error("fixture installation missing");
   for (const [cli, path] of Object.entries(receipt.binaries)) {
     const stat = lstatSync(path);
     if (path !== join(receipt.root, "bin", cli) || !stat.isFile() || stat.isSymbolicLink() ||
-        stat.uid !== process.getuid() || stat.mode & 0o077 || !(stat.mode & 0o100) || digest(path) !== receipt.hashes[cli]) throw new Error("fixture binary identity changed");
+        stat.uid !== (io.uid ?? process.getuid)() || stat.mode & 0o077 || !(stat.mode & 0o100) || digest(path, io) !== receipt.hashes[cli]) throw new Error("fixture binary identity changed");
   }
-  attestFixtureInstall(receipt, env);
+  attestFixtureInstall(receipt, env, io);
+}
+
+// Explicit captured-state launcher; never resolves or executes a model CLI.
+export function launchFixtureSession(receipt, env, cli, args, io = {}) {
+  verifyFixtureLaunchers(receipt, env, io);
+  const fs = io.fs ?? nativeFs, parsed = fixtureLaunchArgs(cli, args);
+  const cwd = fs.realpathSync(parsed.cwd ?? receipt.root);
+  if (!receipt.row || cli !== "codex" || cwd !== receipt.root && !cwd.startsWith(receipt.root + "/")) throw Error("owned fixture launch routing invalid");
+  return (io.spawnProcess ?? spawn)(receipt.attestation.files.node.path, [receipt.tui, receipt.row, receipt.events], { cwd, env, stdio: "inherit" });
 }
 
 async function main() {
