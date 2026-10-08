@@ -4,6 +4,7 @@ import { posix } from "node:path";
 import { startSoakRuntime } from "../soak-runtime.mjs";
 import { runAccountDriver } from "./account-observer-bridge.mjs";
 import { happycamprContract, validateHappycamprPlan } from "./happycampr-effects.mjs";
+import { createHappycamprSnapshotAdapter } from "./happycampr-runtime.mjs";
 import { admissionStages } from "./app-admission.mjs";
 import { installFixtureLaunchers, verifyFixtureLaunchers, launchFixtureSession, fixtureLaunchArgs } from "./fixture-launchers.mjs";
 import { fileDigest } from "./fixture-attestation.mjs";
@@ -59,30 +60,43 @@ export async function runFixtureController(cfg, adapters = {}) {
   if (fixtureIO.uid() !== 501 || fileDigest(fixtureIO.node, fixtureIO) !== plan.runtime.sha256) throw Error("fixture account/Node witness mismatch");
   const topology = createBoundTopologyReader(plan, adapters.topology);
   const env = { ...adapters.env }; let install, activeStage, launched = false;
+  const lifecycle = adapters.stages.lifecycle;
+  const ownedIO = { ...io, topology, lifecycle };
   const context = {
+    env,
+    captureOwned: () => createHappycamprSnapshotAdapter(plan, expected, ownedIO).capture(),
+    get fixtureEnvironment() { return Object.fromEntries(Object.entries(env).filter(([key]) => /^(CMUXLAYER_(LAUNCHER|REQUIRE|FIXTURE|SESSION|XMAC)|CMUX_CUSTOM_|PATH)/.test(key))); },
+    installFixture: () => {
+      if (activeStage !== "fixture" || install) throw Error("fixture installation order/no-replay violation");
+      const ownedFs = lifecycle?.creationFs ?? fixtureIO.fs;
+      install = installFixtureLaunchers(env, { repo: fixture.repo, fixtureRow: fixture.row, app: fixture.app }, plan.scratch.path, fixture.cwd, { ...fixtureIO, fs: ownedFs });
+      verifyFixtureLaunchers(install, env, fixtureIO);
+      return install;
+    },
     run: plan.run, effects: structuredClone(plan.effects),
     get fixtureInstall() { return install && structuredClone(install); },
-    launchFixture: () => {
+    launchFixture: dispatch => {
       if (activeStage !== "launch" || launched || !install) throw Error("fixture launch order/single-dispatch violation");
       verifyFixtureLaunchers(install, env, fixtureIO);
       launched = true; // Ambiguous or failed dispatch is never replayed.
-      return launchFixtureSession(install, env, "codex", parsed.cwd ? fixture.args : ["-w", fixture.cwd, ...fixture.args], fixtureIO);
+      return launchFixtureSession(install, env, "codex", parsed.cwd ? fixture.args : ["-w", fixture.cwd, ...fixture.args], dispatch && lifecycle ? { ...fixtureIO, spawnProcess: dispatch } : fixtureIO);
     },
   };
   const ownedStages = Object.fromEntries(stages.map(name => [name, async () => {
     activeStage = name;
     try {
-      if (name === "fixture") {
+      if (name === "fixture" && !lifecycle) {
         install = installFixtureLaunchers(env, { repo: fixture.repo, fixtureRow: fixture.row, app: fixture.app }, plan.scratch.path, fixture.cwd, fixtureIO);
         verifyFixtureLaunchers(install, env, fixtureIO);
         if (install.attestation.files.node.sha256 !== plan.runtime.sha256) throw Error("fixture Node witness mismatch");
       }
+      if (name === "environment" && lifecycle && !install) throw Error("owned fixture installation missing");
       if (["environment", "shell", "preferences", "refreshAndQuit", "launch"].includes(name)) verifyFixtureLaunchers(install, env, fixtureIO);
       const value = await adapters.stages[name](context);
       if (name === "launch" && !launched) throw Error("fixture launcher dispatch missing");
       return value;
     } finally { activeStage = null; }
   }]));
-  const instance = await startSoakRuntime({ ...cfg, happycamprPlan: plan, expectedBinding: expected, happycamprIO: { ...io, topology }, happycamprStages: ownedStages });
+  const instance = await startSoakRuntime({ ...cfg, happycamprPlan: plan, expectedBinding: expected, happycamprIO: ownedIO, happycamprStages: ownedStages });
   return { receipt: instance.receipt, close: instance.close, get fixtureInstall() { return install && structuredClone(install); } };
 }

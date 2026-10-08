@@ -69,31 +69,47 @@ export function validateHappycamprPlan(plan, expectedBinding) {
   }
   return plan;
 }
+function createdEffects(plan, effects) {
+  if (!Array.isArray(effects) || effects.length > 64) throw Error("created effects limit");
+  const ids = new Set(plan.effects.map(row => row.id));
+  for (const effect of effects) {
+    if (ids.has(effect.id) || effect.before !== null || !plan.composition?.ownedStages) throw Error("created effect duplicate/adoption"); ids.add(effect.id);
+    if (effect.kind === "process" && effect.owned.entry === plan.sourceManifest.root + "/scripts/ratchet-fixture-tui.mjs") {
+      const row = effect.owned;
+      if (row.uid !== 501 || !Number.isSafeInteger(row.pid) || row.pid <= 1 || effect.id !== "pid:" + row.pid || !row.start || row.executable !== plan.runtime.node ||
+          row.argv !== [plan.runtime.node, row.entry, plan.composition.fixture.row, plan.scratch.path + "/ratchet-events.json"].join(" ")) throw Error("fixture PID identity invalid");
+    } else resource(effect.kind, effect.id, effect.owned, plan);
+    if (["file", "directory", "socket"].includes(effect.kind) && !plan.composition.ownedStages.paths.some(row => row.path === effect.id && row.kind === effect.kind)) throw Error("created path outside manifest");
+    if (effect.kind === "socket" && (!/^[0-9]+$/.test(effect.owned.birthtimeNs ?? "") || !/^[0-9]+$/.test(effect.owned.ctimeNs ?? "") || effect.owned.ownedEpoch !== `owned501:${effect.id}#${effect.owned.dev}:${effect.owned.ino}:${effect.owned.birthtimeNs}:${effect.owned.ctimeNs}@pid=${effect.owned.pid}:${effect.owned.start}`)) throw Error("created socket epoch invalid");
+    if (effect.kind === "socket" && !effects.some(row => row.kind === "process" && row.owned.pid === effect.owned.pid && row.owned.start === effect.owned.start)) throw Error("created socket owner unbound");
+    if (effect.kind === "surface" && !effects.some(row => row.kind === "workspace" && row.owned.uuid === effect.owned.workspace)) throw Error("created surface parent unbound");
+  }
+}
 function snapshot(plan, row, expected) {
   identity(row?.identity);
   if (!same(row.identity, plan.identity) || !same(row.binding, expected) || row.observerEpoch !== plan.observerEpoch ||
       !row.resources || typeof row.resources !== "object" || Array.isArray(row.resources) || Object.keys(row.resources).length > 4096) throw Error("snapshot source/account/observer identity changed");
 }
-export function verifyHappycamprEffects(plan, before, after, expected) {
-  validateHappycamprPlan(plan, expected); snapshot(plan, before, expected); snapshot(plan, after, expected);
-  for (const effect of plan.effects) if (!same(before.resources[effect.id] ?? null, effect.before) || !same(after.resources[effect.id], effect.owned)) throw Error("before/after effect witness mismatch");
+export function verifyHappycamprEffects(plan, before, after, expected, created = []) {
+  validateHappycamprPlan(plan, expected); createdEffects(plan, created); snapshot(plan, before, expected); snapshot(plan, after, expected);
+  for (const effect of [...plan.effects, ...created]) if (!same(before.resources[effect.id] ?? null, effect.before) || !same(after.resources[effect.id], effect.owned)) throw Error("before/after effect witness mismatch");
   for (const id of new Set([...Object.keys(before.resources), ...Object.keys(after.resources)])) {
     if (same(before.resources[id], after.resources[id])) continue;
-    const effect = plan.effects.find(row => row.id === id);
+    const effect = [...plan.effects, ...created].find(row => row.id === id);
     if (!effect || !same(after.resources[id], effect.owned)) throw Error("unresolved/foreign effect: " + id);
   }
   return { status: "PASS", contract: plan.contract, run: plan.run, config: expected.config };
 }
-export function planHappycamprCleanup(plan, before, current, expected) {
-  validateHappycamprPlan(plan, expected); snapshot(plan, before, expected); snapshot(plan, current, expected);
+export function planHappycamprCleanup(plan, before, current, expected, created = []) {
+  validateHappycamprPlan(plan, expected); createdEffects(plan, created); snapshot(plan, before, expected); snapshot(plan, current, expected);
   const actions = [], pending = [];
-  for (const effect of plan.effects) {
+  for (const effect of [...plan.effects, ...created]) {
     if (!same(before.resources[effect.id] ?? null, effect.before) || !same(current.resources[effect.id], effect.owned)) { pending.push(effect.id); continue; }
     actions.push({ id: effect.id, kind: effect.kind, identity: effect.owned, restore: effect.before,
       operation: effect.before != null ? "restore-if-unchanged" : effect.kind === "directory" ? "rmdir-if-empty" :
         effect.kind === "process" ? "stop-exact-pid-start" : ["workspace", "surface"].includes(effect.kind) ? "close-exact-uuid-epoch" : "unlink-exact-identity" });
   }
-  for (const id of new Set([...Object.keys(before.resources), ...Object.keys(current.resources)])) if (!plan.effects.some(row => row.id === id) &&
+  for (const id of new Set([...Object.keys(before.resources), ...Object.keys(current.resources)])) if (![...plan.effects, ...created].some(row => row.id === id) &&
       (id.startsWith(plan.scratch.path + "/") || !same(before.resources[id], current.resources[id])) &&
       !(protectedEndpoint(plan, id, before.resources[id]) && protectedEndpoint(plan, id, current.resources[id]))) pending.push(id);
   return { status: pending.length ? "PENDING" : "READY", actions, preserved: pending, executes: false };

@@ -39,20 +39,21 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
   };
   const captureTopology = (id, topology) => {
     if (!topology || topology.epoch !== plan.observerEpoch) throw Error("scoped RPC observer unavailable/foreign");
-    const resources = {}, processes = new Map();
-    for (const effect of plan.effects.filter(row => row.kind === "process")) {
+    const resources = {}, processes = new Map(), effects = [...plan.effects, ...(io.lifecycle?.targets() ?? [])];
+    for (const effect of effects.filter(row => row.kind === "process")) {
       const raw = run("/bin/ps", ["-p", String(effect.owned.pid), "-o", "uid=,lstart=,comm="]);
       if (!raw) continue;
       const match = /^\s*(\d+)\s+(.+?)\s+(\/\S+)\s*$/.exec(raw); if (!match) throw Error("owned process witness unavailable");
       const args = run("/bin/ps", ["-p", String(effect.owned.pid), "-o", "args="]);
-      if (args !== plan.runtime.node + " " + effect.owned.entry) throw Error("owned process entry/argv mismatch");
+      if (args !== (effect.owned.argv ?? plan.runtime.node + " " + effect.owned.entry)) throw Error("owned process entry/argv mismatch");
       const row = { kind: "process", uid: Number(match[1]), pid: effect.owned.pid, start: match[2], executable: match[3], entry: effect.owned.entry, distManifest: plan.binding.product.manifest };
+      if (effect.owned.argv) row.argv = args;
       resources[effect.id] = row; processes.set(row.pid, row);
     }
     let count = 0;
     const walk = path => {
       if (++count > 1024) throw Error("scoped scratch inventory limit");
-      const declared = plan.effects.find(row => row.id === path), row = readPath(path, declared?.kind, !!declared);
+      const declared = [...effects, ...(io.lifecycle?.paths ?? []).map(row => ({ id: row.path, kind: row.kind }))].find(row => row.id === path), row = readPath(path, declared?.kind, !!declared);
       if (!row) return; resources[path] = row;
       if (row.kind === "directory") for (const name of fs.readdirSync(path)) {
         if (name.includes("/") || name === "." || name === "..") throw Error("scoped directory entry invalid"); walk(path + "/" + name);
@@ -62,13 +63,19 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
     // Scratch root is an admission witness, not an implicit cleanup effect.
     const scratch = resources[plan.scratch.path]; delete resources[plan.scratch.path];
     if (!scratch || !same({ ...plan.scratch, kind: "directory" }, { ...scratch, path: scratch.canonical })) throw Error("scratch identity changed");
-    for (const effect of plan.effects) {
+    for (const effect of effects) {
       if (effect.kind === "marker") { const row = readPath(effect.id, "marker"); if (row) resources[effect.id] = row; }
       if (effect.kind === "socket" && resources[effect.id]) {
         const owner = processes.get(effect.owned.pid); if (!owner) throw Error("owned socket process missing");
         const files = run("/usr/sbin/lsof", ["-n", "-U", "-a", "-p", String(owner.pid), "-Fpn"]).split("\n");
         if (!files.includes(`p${owner.pid}`) || !files.includes(`n${effect.id}`)) throw Error("owned socket owner mismatch");
         Object.assign(resources[effect.id], { pid: owner.pid, start: owner.start });
+        if (io.lifecycle) {
+          const stat = fs.lstatSync(effect.id, { bigint: true });
+          if (stat.birthtimeNs === undefined || stat.ctimeNs === undefined || Number(stat.dev) !== resources[effect.id].dev || Number(stat.ino) !== resources[effect.id].ino) throw Error("created socket epoch unavailable/changed");
+          Object.assign(resources[effect.id], { birthtimeNs: String(stat.birthtimeNs), ctimeNs: String(stat.ctimeNs),
+            ownedEpoch: `owned501:${effect.id}#${stat.dev}:${stat.ino}:${stat.birthtimeNs}:${stat.ctimeNs}@pid=${owner.pid}:${owner.start}` });
+        }
       }
     }
     for (const kind of ["workspace", "surface"]) {
@@ -116,7 +123,8 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
     if (hash(canonical(Object.fromEntries(observerSourceFiles.map(path => [path, source.files[path]])))) !== expected.observer ||
         (plan.protectedSettings ?? []).length > 64) throw Error("501 observer manifest mismatch");
     for (const [path, digest] of Object.entries(source.files)) {
-      if (!/^(scripts\/[A-Za-z0-9_./-]+|package.json|bun.lock)$/.test(path) || path.split("/").includes("..") || readPath(source.root + "/" + path, "file")?.hash !== digest) throw Error("501 source bytes mismatch");
+      const ownedCapture = plan.composition?.ownedStages && ["tests/fixtures/composer-overlays/codex-boot.txt", "tests/fixtures/codex-0.157/idle-empty.txt", "tests/fixtures/codex-0.157/idle-submitted-working.txt"].includes(path);
+      if ((!/^(scripts\/[A-Za-z0-9_./-]+|package.json|bun.lock)$/.test(path) && !ownedCapture) || path.split("/").includes("..") || readPath(source.root + "/" + path, "file")?.hash !== digest) throw Error("501 source bytes mismatch");
     }
     const node = (io.runtimeIdentity ?? (() => ({ node: fs.realpathSync(process.execPath), sha256: hash(fs.readFileSync(plan.runtime.node)) })))();
     if (!same(node, plan.runtime)) throw Error("501 running Node mismatch");
@@ -133,6 +141,7 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
 export async function startHappycamprRuntime(opts) {
   const plan = structuredClone(opts.happycamprPlan), expected = structuredClone(opts.expectedBinding), observations = [];
   const result = { status: "FAIL", observer_checkpoints: observations, cleanup: { status: "PENDING", actions: [], executes: false }, native: "NOT_PROVEN" };
+  const lifecycle = opts.happycamprIO?.lifecycle;
   let before, last, primary, observe, fresh = false;
   try {
     if (opts.target !== "m1-gate" || opts.fixtureMode !== true || opts.accountContract !== happycamprContract || opts.humanSessionQuitApproved) throw Error("explicit501 runtime routing required");
@@ -152,28 +161,31 @@ export async function startHappycamprRuntime(opts) {
       observations.push(checkpointSummary(row));
       if (!same(last.identity, plan.identity)) throw Error("501 snapshot account mismatch");
       before ??= structuredClone(last);
+      lifecycle?.check(last);
+      const created = lifecycle?.effects() ?? [];
       if (Object.keys(before.resources).some(id => id.startsWith(plan.scratch.path + "/") && !plan.effects.some(row => row.id === id) && !protectedEndpoint(plan, id, before.resources[id]))) throw Error("501 unmanifested scratch baseline");
       for (const effect of plan.effects) {
         if (!same(before.resources[effect.id] ?? null, effect.before)) throw Error("501 baseline owned witness mismatch");
         const current = last.resources[effect.id] ?? null;
         if (!same(current, effect.before) && !same(current, effect.owned)) throw Error("501 unresolved owned effect");
       }
-      for (const id of new Set([...Object.keys(before.resources), ...Object.keys(last.resources)])) if (!same(before.resources[id], last.resources[id]) && !plan.effects.some(row => row.id === id)) throw Error("501 unresolved foreign effect");
+      for (const id of new Set([...Object.keys(before.resources), ...Object.keys(last.resources)])) if (!same(before.resources[id], last.resources[id]) && ![...plan.effects, ...created].some(row => row.id === id)) throw Error("501 unresolved foreign effect");
     };
     await observe("baseline");
     await admitAppStart(opts.happycamprStages, observe);
-    await observe("runtime-ready"); verifyHappycamprEffects(plan, before, last, expected); result.status = "PASS";
-  } catch (error) { primary = String(error); result.error = primary; }
+    await observe("runtime-ready"); verifyHappycamprEffects(plan, before, last, expected, lifecycle?.effects()); result.status = "PASS";
+  } catch (error) { primary = String(error); result.error = primary; lifecycle?.reject(error); }
   const finish = () => {
-    result.before = before; result.after = last; result.binding = expected; result.run = plan?.run;
+    result.before = before; result.after = last; result.binding = expected; result.run = plan?.run; result.stage_lifecycle = lifecycle?.receipt();
     result.cleanup = { status: "PENDING", actions: [], unobserved: (plan?.effects ?? []).map(row => row.id), executes: false };
-    if (fresh && before && last) try { result.cleanup = planHappycamprCleanup(plan, before, last, expected); } catch (error) { result.cleanup.error = String(error); }
+    if (fresh && before && last) try { result.cleanup = planHappycamprCleanup(plan, before, last, expected, lifecycle?.effects());
+      if (lifecycle?.pending()) result.cleanup = { status: "PENDING", actions: [], unobserved: lifecycle.paths.map(row => row.path), executes: false }; } catch (error) { result.cleanup.error = String(error); }
     if (primary) { result.status = "FAIL"; result.error = primary; }
     return result;
   };
   finish(); let closing;
   return { receipt: result, close: () => closing ??= (async () => {
-    try { if (observe) await observe("run-final"); } catch (error) { primary ??= String(error); }
-    return finish();
+    try { if (observe) await observe("run-final"); } catch (error) { primary ??= String(error); lifecycle?.reject(error); }
+    lifecycle?.close(); return finish();
   })() }; // Fresh proposals only; no host signals, unlink or restore.
 }

@@ -86,9 +86,9 @@ export function writeShellStartup(env, opts) {
 export function assertProcessIdentity(saved, observed) {
   if (!saved || !observed || saved !== observed) throw new Error("PID identity/start-time mismatch");
 }
-export function acquireNightlyLock(path, token) {
-  const fd = openSync(path, "wx", 0o600);
-  try { writeFileSync(fd, token); } finally { closeSync(fd); }
+export function acquireNightlyLock(path, token, io = { openSync, writeFileSync, closeSync }) {
+  const fd = io.openSync(path, "wx", 0o600);
+  try { io.writeFileSync(fd, token); } finally { io.closeSync(fd); }
 }
 export function releaseNightlyLock(path, token) {
   if (readFileSync(path, "utf8") !== token) throw new Error("NIGHTLY lock ownership changed");
