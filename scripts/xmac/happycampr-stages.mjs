@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
 import { admissionStages } from "./app-admission.mjs";
-import { validateHappycamprPlan } from "./happycampr-effects.mjs";
+import { validateHappycamprPlan, retainedDiagnostics } from "./happycampr-effects.mjs";
 import { isolatedEnvironment, shellStartup, PINNED_DMG_SHA256, rpc, acquireNightlyLock } from "../soak-runtime.mjs";
 import { verifyFixtureShell } from "./fixture-shell.mjs";
 import { verifyClosePreferences } from "./close-preferences.mjs";
@@ -15,11 +15,12 @@ const quote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, env }) {
   const plan = structuredClone(cfg.happycamprPlan), spec = plan.composition?.ownedStages, root = plan.scratch.path;
   validateHappycamprPlan(plan, cfg.expectedBinding);
+  const retained = retainedDiagnostics(plan);
   const native = executionPacket.mode === "host", fs = io.fs, providers = io.stageIO;
   if (["tests/fixtures/composer-overlays/codex-boot.txt", "tests/fixtures/codex-0.157/idle-empty.txt", "tests/fixtures/codex-0.157/idle-submitted-working.txt"].some(path => !/^[a-f0-9]{64}$/.test(plan.sourceManifest.files[path]))) throw Error("captured TUI source data binding required");
   const required = { lock: ["owned.lock"], config: ["home", "zdot", "state", "inbox", "fleet.json", "private-mcp.json"],
     fixture: ["bin", "bin/codex", "bin/claude", "fixture-launchers.zsh", "fixture-manifest.json"],
-    environment: ["zdot/.zshenv", "zdot/.zlogin"], launch: ["d.sock", "state/daemon.log", "ratchet-events.json"] };
+    environment: ["zdot/.zshenv", "zdot/.zlogin"], launch: retained ? ["d.sock", "ratchet-events.json"] : ["d.sock", "state/daemon.log", "ratchet-events.json"] };
   const paths = Object.entries(required).flatMap(([stage, paths]) => paths.map(path => ({ stage, path: root + "/" + path,
     kind: ["home", "zdot", "state", "inbox", "bin"].includes(path) ? "directory" : path === "d.sock" ? "socket" : "file" })));
   if (spec?.contract !== "owned-stage-acks-v1" || !same(spec.paths, paths) || !uuid(spec.window) ||
@@ -31,7 +32,7 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
       !fs || ["openSync", "closeSync", "fstatSync", "ftruncateSync"].some(name => typeof fs[name] !== "function") ||
       !native && (!providers || ["rpc", "exec", "inventory"].some(name => typeof providers[name] !== "function"))) throw Error("reviewed owned stage paths/providers required");
   // Default native writers provide no exclusive file-generation ACK: refuse before connection.
-  if (native && typeof providers?.armLaunchFiles !== "function") throw Error("native launch file creation bridge required");
+  if (native && typeof providers?.armLaunchFiles !== "function") throw Error(retained ? "native fixture event creation bridge required" : "native launch file creation bridge required");
   const endpoints = [plan.composition.topologyPeer.socket.path, plan.composition.topologyPeer.nativeSocket.path];
   if (paths.some(row => endpoints.includes(row.path)) || spec.paths.some(row => plan.effects.some(effect => effect.id === row.path))) throw Error("read-only observation endpoint/owned path overlap");
   const read = io.query, request = providers?.rpc ?? rpc;
@@ -146,6 +147,7 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
       Object.assign(ctx.env, isolatedEnvironment({}, root, plan.composition.fixture.app, endpoints[1]), { HOME: plan.identity.home });
       // Restore the actual sealed fixture routes after constructing the private environment.
       Object.assign(ctx.env, routes);
+      if (retained) ctx.env.CMUXLAYER_DAEMON_LOG_PATH = retained.paths[0];
       const startup = shellStartup(ctx.env, { fixtureMode: true, target: "m1-gate", launcherMode: true });
       for (const path of [".zshenv", ".zlogin"]) create(root + "/zdot/" + path, startup);
     },
@@ -195,7 +197,7 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
             membership.workspaces.filter(row => row.id === ack.workspace_id).length !== 1) throw Error("workspace ACK independent window membership unavailable/ambiguous");
         let event;
         while (!signal.aborted) {
-          if (fs.existsSync(root + "/d.sock") && fs.existsSync(root + "/ratchet-events.json") && fs.existsSync(root + "/state/daemon.log")) {
+          if (fs.existsSync(root + "/d.sock") && fs.existsSync(root + "/ratchet-events.json") && (retained || fs.existsSync(root + "/state/daemon.log"))) {
             const bytes = fs.readFileSync(root + "/ratchet-events.json"); if (bytes.length > 16384) throw Error("fixture event limit");
             try { event = JSON.parse(bytes); } catch { throw Error("fixture event JSON invalid"); }
             if (event.phase === "idle") break;
