@@ -37,7 +37,11 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
       if (hashFile) row.hash = hash(fs.readFileSync(path));
     }
     const after = fs.lstatSync(path);
-    if (["dev", "ino", "uid", "mode", "nlink", "size", "mtimeMs", "ctimeMs"].some(key => stat[key] !== after[key])) throw Error("scoped file changed during read");
+    // Only the two retained parents defer content stamps to bounded inventory reconciliation.
+    const retainedParent = actualKind === "directory" && retained?.directories.includes(path);
+    const fields = ["dev", "ino", "uid", "mode", "nlink", ...(retainedParent ? [] : ["size", "mtimeMs", "ctimeMs"])];
+    if (retainedParent && (!after.isDirectory() || after.isSymbolicLink())) throw Error("unsafe retained parent kind/link");
+    if (fields.some(key => stat[key] !== after[key])) throw Error("scoped file changed during read");
     return row;
   };
   const diagnosticMetadata = (path, stat) => {
@@ -84,19 +88,28 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
       if (effect.owned.argv) row.argv = args;
       resources[effect.id] = row; processes.set(row.pid, row);
     }
+    const children = path => {
+      const names = fs.readdirSync(path);
+      if (!Array.isArray(names) || names.length > 1024 || new Set(names).size !== names.length ||
+          names.some(name => typeof name !== "string" || name.includes("/") || name === "." || name === "..")) throw Error("scoped directory inventory invalid");
+      return names.filter(name => !retained?.paths.includes(path + "/" + name)).sort();
+    };
     let count = 0;
-    const walk = path => {
+    const walk = (path, rows, fences) => {
       if (++count > 1024) throw Error("scoped scratch inventory limit");
       if (retained?.paths.includes(path)) return;
       const declared = [...effects, ...(io.lifecycle?.paths ?? []).map(row => ({ id: row.path, kind: row.kind }))].find(row => row.id === path), row = readPath(path, declared?.kind, !!declared);
-      if (!row) return; resources[path] = row;
-      if (row.kind === "directory") for (const name of fs.readdirSync(path)) {
-        if (name.includes("/") || name === "." || name === "..") throw Error("scoped directory entry invalid"); walk(path + "/" + name);
+      if (!row) return; rows[path] = row;
+      if (row.kind === "directory") {
+        const names = children(path); fences.set(path, names);
+        for (const name of names) walk(path + "/" + name, rows, fences);
       }
     };
-    walk(plan.scratch.path);
+    const initial = {}, initialChildren = new Map();
+    walk(plan.scratch.path, initial, initialChildren);
     // Scratch root is an admission witness, not an implicit cleanup effect.
-    const scratch = resources[plan.scratch.path]; delete resources[plan.scratch.path];
+    const scratch = initial[plan.scratch.path]; delete initial[plan.scratch.path];
+    Object.assign(resources, initial);
     if (!scratch || !same({ ...plan.scratch, kind: "directory" }, { ...scratch, path: scratch.canonical })) throw Error("scratch identity changed");
     let diagnostics;
     if (retained) {
@@ -107,6 +120,18 @@ export function createHappycamprSnapshotAdapter(plan, expected, io = {}) {
       }
       diagnostics = { contract: retained.contract, directories, observations: retained.paths.map(sampleDiagnostic) };
       for (const row of directories) if (!same(row.identity, readPath(row.path, "directory"))) throw Error("retained parent identity changed during sampling");
+      // No retries/adoption: a second complete walk must agree on every non-diagnostic row.
+      // Each walk visits <=1024 paths; each final directory fence reads <=1024 names twice.
+      const reconciled = {}, finalChildren = new Map(); count = 0;
+      walk(plan.scratch.path, reconciled, finalChildren);
+      if (!same(reconciled[plan.scratch.path], scratch)) throw Error("scratch identity changed during reconciliation");
+      delete reconciled[plan.scratch.path];
+      if (!same(initial, reconciled)) throw Error("scratch inventory changed during diagnostic sampling");
+      for (const path of retained.paths) diagnosticPath(path); // Unsafe late links/kinds never become content instability.
+      for (const [path, names] of finalChildren) {
+        const parent = path === plan.scratch.path ? scratch : reconciled[path];
+        if (!same(names, children(path)) || !same(parent, readPath(path, "directory")) || !same(names, children(path))) throw Error("scratch child inventory changed during reconciliation");
+      }
     }
     for (const effect of effects) {
       if (effect.kind === "marker") { const row = readPath(effect.id, "marker"); if (row) resources[effect.id] = row; }
