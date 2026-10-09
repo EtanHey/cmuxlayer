@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterEach, afterAll } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { StateManager } from "../src/state-manager.js";
 import { dirname, join } from "node:path";
@@ -27,7 +27,7 @@ import { inboxPath, readInbox } from "../src/inbox.js";
 import { engineForTests } from "../src/server.js";
 
 // Reserve a short root for this run; another suite must never share its cleanup.
-const TEST_ROOT = mkdtempSync(join("/tmp", "cmuxd-"));
+let TEST_ROOT: string;
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
 
 function normalizeObservationTimes(value: unknown): unknown {
@@ -495,6 +495,10 @@ describe("CmuxLayerDaemon", () => {
     intervalDaemons.add(daemon);
     return daemon;
   };
+
+  beforeAll(() => {
+    TEST_ROOT = mkdtempSync(join("/tmp", "cmuxd-"));
+  });
 
   afterEach(async () => {
     await Promise.all(
