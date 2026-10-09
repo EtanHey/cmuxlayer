@@ -152,7 +152,7 @@ describe("tool-count drift guard", () => {
     expect(readme).toContain("there are no hidden internal tool definitions");
 
     // The README documents only the callable surface: one table row per
-    // public tool, and states that nothing else is registered.
+    // public tool, and states how the default palette restricts the initial surface.
     const toolsSection = readme.slice(
       readme.indexOf("## MCP tools"),
       readme.indexOf("## Supported agents"),
@@ -168,7 +168,7 @@ describe("tool-count drift guard", () => {
       expect(spawnRow).toContain(`\`${field}\``);
     }
     expect(toolsSection).toContain(
-      "setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered",
+      "These 10 are the whole surface by default: setting `CMUXLAYER_DEFAULT_PALETTE` restricts the initially registered tools to the ones it names and adds `expand_palette`, which registers the rest on demand.",
     );
     expect(readme).not.toContain("Deprecated one-release alias");
   });

@@ -140,7 +140,7 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 
 `control_health` reports `cmux_fds` for detected cmux.app processes and warns when open descriptors reach 4096; set `CMUXLAYER_CMUX_FD_WARN` to a positive integer to change that threshold.
 
-These 10 are the whole surface: setting `CMUXLAYER_DEFAULT_PALETTE` adds `expand_palette` and no other tool is registered.
+These 10 are the whole surface by default: setting `CMUXLAYER_DEFAULT_PALETTE` restricts the initially registered tools to the ones it names and adds `expand_palette`, which registers the rest on demand.
 
 ## Supported agents
 
