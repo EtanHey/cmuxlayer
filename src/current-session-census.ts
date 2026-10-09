@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
 /** Internal evidence, not the proposed shared envelope. Never authorizes GC. */
 export type DiagnosticMethod = "system.capabilities" | "system.tree" | "system.top" | "debug.terminals" | "window.list" | "workspace.list" | "pane.list" | "surface.list";
 export interface KernelIdentity {
@@ -8,7 +9,8 @@ export interface KernelIdentity {
 }
 export interface KernelProcess extends KernelIdentity {
   identityAfter: KernelIdentity | null; sessionId: null; errors: string[];
-  failures: { operation: string; errno: number | null; identity: KernelIdentity | null }[];
+  failures: { operation: string; errno: number | null; identity: KernelIdentity | null;
+    reason?: ScalarEvidence; bytes?: ScalarEvidence; expectedBytes?: ScalarEvidence }[];
 }
 export interface KernelObservation {
   before: number[] | null; after: number[] | null;
@@ -84,11 +86,90 @@ const signature = (objects: ObjectEvidence[]) => members(objects).map(o => JSON.
 
 // Evidence fields are projected independently of complete launch validation.
 // Rejected rows retain only known scalar fields; never copy arbitrary helper text.
-const scalar = (v: unknown) => v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v));
-const identityFields = ["pid", "ppid", "uid", "startSeconds", "startMicroseconds", "cwd"];
-const captured = (v: unknown, fields: string[]) => Object.fromEntries(fields.flatMap(k => {
-  const row = record(v); return row && scalar(row[k]) ? [[k, row[k]]] : [];
-}));
+type ScalarEvidence = string | number | boolean | null;
+const scalar = (v: unknown): v is ScalarEvidence => v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v));
+const identityFields = ["pid", "ppid", "uid", "startSeconds", "startMicroseconds", "cwd"] as const;
+const captured = <K extends string>(v: unknown, fields: readonly K[]): Partial<Record<K, ScalarEvidence>> => {
+  const result: Partial<Record<K, ScalarEvidence>> = {}, row = record(v);
+  for (const key of fields) {
+    const value = row?.[key];
+    if (scalar(value)) result[key] = value;
+  }
+  return result;
+};
+const failureFields = ["operation", "errno", "reason", "bytes", "expectedBytes"] as const;
+const readFields = ["operation", "queryBytes", "bytes", "capacityBytes", "errno", "reason"] as const;
+const integer = z.number().int().safe(), nullableInteger = integer.nullable();
+const evidenceScalar = z.union([z.string(), z.number().finite(), z.boolean(), z.null()]);
+const invalidEntry = z.object({ index: integer.nonnegative(), value: evidenceScalar, field: z.string().optional() });
+const failureExtras = z.object({ reason: z.string().nullable().optional(), bytes: nullableInteger.optional(), expectedBytes: integer.nonnegative().nullable().optional() });
+const membershipRead = z.object({ operation: z.string(), queryBytes: nullableInteger, bytes: nullableInteger,
+  capacityBytes: integer.positive().nullable(), errno: integer.nonnegative().nullable(), reason: z.string().nullable(),
+  observedPids: z.array(integer.positive()), membership: z.array(integer.positive()).nullable(), invalidEntries: z.array(invalidEntry).optional() });
+const identityWitness = z.record(evidenceScalar);
+const failureWitness = z.object({ operation: evidenceScalar.optional(), errno: evidenceScalar.optional(), reason: evidenceScalar.optional(),
+  bytes: evidenceScalar.optional(), expectedBytes: evidenceScalar.optional(), identity: identityWitness });
+const readWitness = z.object(Object.fromEntries(readFields.map(k => [k, evidenceScalar.optional()])))
+  .extend({ observedPids: z.array(integer.positive()).optional(), membership: z.array(integer.positive()).nullable().optional(),
+    invalidEntries: z.array(invalidEntry) });
+const diagnosticShape = z.object({
+  membershipReads: z.array(membershipRead).optional(),
+  rejectedRows: z.array(z.object({ index: integer.nonnegative(), pid: integer.positive().nullable(), digest: z.string().regex(/^[a-f0-9]{64}$/),
+    evidence: z.object({ before: identityWitness, after: identityWitness, failures: z.array(failureWitness) }) })).optional(),
+  rejectedMembershipReads: z.array(z.object({ index: integer.nonnegative(), evidence: readWitness })).optional(),
+  helperOutputDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(), helperExitCode: nullableInteger.optional(),
+  runnerProvenance: z.object({ deadlineMs: integer.positive(), cancellation: z.enum(["not-requested", "requested", "unavailable", "failed"]),
+    callbackSettled: z.boolean(), stderrDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+    errorCode: z.union([z.string(), integer, z.null()]), signal: z.string().nullable() }).optional(),
+});
+// Project nested witnesses before validation: unknown keys are never copied or
+// hashed here. Invalid known fields remain partial evidence and block qualification.
+function diagnosticEvidence(raw: Record<string, unknown> | null) {
+  let malformed = false;
+  const witness = <K extends string>(value: unknown, keys: readonly K[]) => {
+    const row = record(value);
+    if ((value != null && !row) || keys.some(k => row && k in row && !scalar(row[k]))) malformed = true;
+    return captured(value, keys);
+  };
+  const list = <T>(value: unknown, project: (row: unknown) => T): T[] | null => {
+    if (!Array.isArray(value)) { malformed = true; return null; }
+    return value.map(row => { if (!record(row)) malformed = true; return project(row); });
+  };
+  const entries = (value: unknown) => list(value, v => witness(v, ["index", "value", "field"]));
+  const failure = (v: unknown) => ({ ...witness(v, failureFields), identity: witness(record(v)?.identity, identityFields) });
+  const read = (v: unknown) => {
+    const row = record(v), fields = witness(v, readFields);
+    const refs = (value: unknown) => {
+      if (value === null) return null;
+      if (!Array.isArray(value)) { malformed = true; return null; }
+      if (!value.every(scalar)) malformed = true;
+      return value.filter(scalar);
+    };
+    return { ...fields,
+      ...(row && "observedPids" in row ? { observedPids: refs(row.observedPids) } : {}),
+      ...(row && "membership" in row ? { membership: refs(row.membership) } : {}),
+      ...(row && "invalidEntries" in row ? { invalidEntries: entries(row.invalidEntries) } : {}) };
+  };
+  const evidence = {
+    ...witness(raw, ["helperOutputDigest", "helperExitCode"]),
+    ...(raw && "membershipReads" in raw ? { membershipReads: list(raw.membershipReads, read) } : {}),
+    ...(raw && "rejectedRows" in raw ? { rejectedRows: list(raw.rejectedRows, v => {
+      const row = record(v), e = record(row?.evidence);
+      return { ...witness(v, ["index", "pid", "digest"]), evidence: {
+        ...(e && "before" in e ? { before: e.before === null ? null : witness(e.before, identityFields) } : {}),
+        ...(e && "after" in e ? { after: e.after === null ? null : witness(e.after, identityFields) } : {}),
+        failures: list(e?.failures, failure) } };
+    }) } : {}),
+    ...(raw && "rejectedMembershipReads" in raw ? { rejectedMembershipReads: list(raw.rejectedMembershipReads, v => {
+      const row = record(v); return { ...witness(v, ["index"]), evidence: read(row?.evidence) };
+    }) } : {}),
+    ...(raw && "runnerProvenance" in raw ? { runnerProvenance: witness(raw.runnerProvenance,
+      ["deadlineMs", "cancellation", "callbackSettled", "stderrDigest", "errorCode", "signal"]) } : {}),
+  };
+  malformed ||= !diagnosticShape.safeParse(evidence).success;
+  return { evidence, malformed };
+}
+export type KernelDiagnosticEvidence = ReturnType<typeof diagnosticEvidence>["evidence"];
 function identityEvidence(v: unknown): KernelIdentity | null {
   const row = record(v);
   if (!row || typeof row.pid !== "number" || !Number.isFinite(row.pid)) return null;
@@ -103,7 +184,8 @@ const identityShape = (v: unknown) => {
 };
 function kernelEvidence(value: unknown) {
   const raw = record(value), processes: KernelProcess[] = [], invalidRows: { index: number; evidence: Record<string, unknown> }[] = [];
-  let malformed = !raw || !Array.isArray(raw.processes) || !(raw.reason === null || typeof raw.reason === "string");
+  const diagnostics = diagnosticEvidence(raw);
+  let malformed = diagnostics.malformed || !raw || !Array.isArray(raw.processes) || !(raw.reason === null || typeof raw.reason === "string");
   const membership = (v: unknown) => v === null ? null : Array.isArray(v) && v.every(validPid) ? v : (malformed = true, null);
   const before = membership(raw?.before), after = membership(raw?.after);
   for (const [index, value] of (Array.isArray(raw?.processes) ? raw.processes : []).entries()) {
@@ -112,20 +194,21 @@ function kernelEvidence(value: unknown) {
     const valid = identityShape(value) && (row?.identityAfter === null || identityShape(row?.identityAfter)) && row?.sessionId === null &&
       Array.isArray(row?.errors) && row.errors.every(e => typeof e === "string") && Array.isArray(row?.failures) && rawFailures.every(v => {
         const f = record(v); return f && typeof f.operation === "string" && f.operation.length > 0 &&
-          (f.errno === null || (Number.isSafeInteger(f.errno) && Number(f.errno) >= 0)) && (f.identity === null || identityShape(f.identity));
+          (f.errno === null || (Number.isSafeInteger(f.errno) && Number(f.errno) >= 0)) && (f.identity === null || identityShape(f.identity)) && failureExtras.safeParse(f).success;
       });
     if (!valid) {
       malformed = true;
       invalidRows.push({ index, evidence: { identity: captured(value, identityFields), identityAfter: captured(row?.identityAfter, identityFields),
-        failures: rawFailures.map(f => ({ ...captured(f, ["operation", "errno"]), identity: captured(record(f)?.identity, identityFields) })) } });
+        failures: rawFailures.map(f => ({ ...captured(f, failureFields), identity: captured(record(f)?.identity, identityFields) })) } });
     }
     if (!identity) continue;
     processes.push({ ...identity, identityAfter: identityEvidence(row?.identityAfter), sessionId: null,
       errors: [...(Array.isArray(row?.errors) ? row.errors.filter((e): e is string => typeof e === "string") : []), ...(!valid ? ["INVALID_KERNEL_ROW"] : [])],
       failures: rawFailures.flatMap(v => { const f = record(v); return !f ? [] : [{ operation: typeof f.operation === "string" ? f.operation : "unavailable",
-        errno: Number.isSafeInteger(f.errno) && Number(f.errno) >= 0 ? Number(f.errno) : null, identity: identityEvidence(f.identity) }]; }) });
+        errno: Number.isSafeInteger(f.errno) && Number(f.errno) >= 0 ? Number(f.errno) : null, identity: identityEvidence(f.identity),
+        ...captured(f, ["reason", "bytes", "expectedBytes"]) }]; }) });
   }
-  return { before, after, processes, reason: malformed ? "kernel helper invalid output" : typeof raw?.reason === "string" ? raw.reason : null, invalidRows,
+  return { ...diagnostics.evidence, before, after, processes, reason: malformed ? "kernel helper invalid output" : typeof raw?.reason === "string" ? raw.reason : null, invalidRows,
     reportedReason: scalar(raw?.reason) ? raw?.reason : null,
     membershipEvidence: { before: Array.isArray(raw?.before) ? raw.before.filter(scalar) : null, after: Array.isArray(raw?.after) ? raw.after.filter(scalar) : null } };
 }
