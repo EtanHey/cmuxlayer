@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { RegistrationObservation } from "./registration-observation.js";
 /** Internal evidence, not the proposed shared envelope. Never authorizes GC. */
 export type DiagnosticMethod = "system.capabilities" | "system.tree" | "system.top" | "debug.terminals" | "window.list" | "workspace.list" | "pane.list" | "surface.list";
 export interface KernelIdentity {
@@ -23,6 +24,8 @@ export interface CensusReads {
   native(method: DiagnosticMethod, params?: Record<string, unknown>): Promise<{ value: unknown; generation: string }>;
   kernel(ownerUid: number): Promise<KernelObservation>;
   registrations?(): Promise<RegistrationEvidence[]>;
+  /** Explicit owned byte reader; no implicit registry discovery or I/O. */
+  registrationObservation?(): Promise<RegistrationObservation>;
 }
 type ObjectEvidence = Record<string, unknown> & { kind: string; id: string | null; parent: string | null };
 interface Diagnostic {
@@ -301,8 +304,11 @@ export async function collectCurrentSessionCensus(reads: CensusReads, ownerUid: 
   if (observations.some(p => p.errors.some(e => e !== "ESRCH") || p.failures.some(f => f.errno !== 3) || (!good(p, ownerUid) && !p.failures.some(f => f.errno === 3))) || resolutions.some(r => r.disposition === "unresolved")) blockers.add("kernel evidence unresolved");
   let registrations: { reference: string | null; digest: string | null; disposition: string; sessionId: string | null }[] | null = null;
   const invalidRegistrations: { index: number; evidence: Record<string, unknown> }[] = [];
+  let registrationObservation: RegistrationObservation | null = null;
   try {
-    const rows = await reads.registrations?.();
+    registrationObservation = await reads.registrationObservation?.() ?? null;
+    const rows = registrationObservation === null ? await reads.registrations?.()
+      : registrationObservation.content === "observed" ? registrationObservation.rows : undefined;
     if (Array.isArray(rows)) registrations = rows.map((raw, index) => {
       const row = record(raw), string = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
       const valid = row && string(row.reference) && string(row.disposition) && (row.digest === null || string(row.digest)) && (row.sessionId === null || string(row.sessionId));
@@ -312,7 +318,10 @@ export async function collectCurrentSessionCensus(reads: CensusReads, ownerUid: 
     });
   } catch { /* never substitute an empty membership */ }
   if (registrations === null) blockers.add("registration coverage unavailable");
+  blockers.add("registration final coverage unknown");
   return { status: "INCOMPLETE" as const, ownerUid, startedAt, completedAt: new Date().toISOString(), attempts, observations, finalMembership,
     finalMembershipReason: finalMembership === null ? "no stable fully accounted kernel/native bracket" : null,
-    resolutions, registrations, invalidRegistrations, blockers: [...blockers], witness: "scoped interval only; residual ABA/TOCTOU; no removal authority" };
+    resolutions, registrations, invalidRegistrations, registrationObservation, finalRegistrationMembership: null,
+    finalRegistrationMembershipReason: registrationObservation?.coverageReason ?? "no authoritative registration coverage witness",
+    blockers: [...blockers], witness: "scoped interval only; residual ABA/TOCTOU; no removal authority" };
 }
