@@ -149,18 +149,37 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
       finalProcess.cli !== agent.cli || finalProcess.cwd !== agent.launch_cwd ||
       JSON.stringify(registration({ ...agent, surface_uuid: request.surface }, last.uuids)) !== JSON.stringify(proof) ||
       stateMgr.readState(agent.agent_id)?.version !== agent.version || registry.getObserverEpoch() !== epoch) throw new Error("Adoption proof changed before persistence");
-  const receipt = { request_sha256: requestHash, evidence_sha256: request.binding_evidence_sha256, status: "pending_verify" as const };
+  if (repeat && (agent.surface_id !== last.binding.surfaceRef || key(agent.surface_uuid) !== key(request.surface) ||
+      agent.workspace_id !== last.binding.workspaceId || agent.surface_observer_id !== owner ||
+      agent.pid !== proof.pid || agent.pid_registered_at !== new Date(proof.ts).toISOString() ||
+      agent.session_adoption?.observer_epoch !== epoch)) throw new Error("Prior adoption binding invalidated; use a fresh explicitly versioned request");
+  const receipt = { request_sha256: requestHash, evidence_sha256: request.binding_evidence_sha256, observer_epoch: epoch, status: "pending_verify" as const };
   let result = agent;
   try {
     if (!repeat) result = stateMgr.updateRecord(agent.agent_id, { surface_id: last.binding.surfaceRef,
       surface_uuid: request.surface, workspace_id: last.binding.workspaceId, surface_observer_id: owner,
       pid: proof.pid, pid_registered_at: new Date(proof.ts).toISOString(), cli_session_path: proof.session_path ?? agent.cli_session_path,
       session_continuity_aliases: [...new Set([...(agent.session_continuity_aliases ?? []), ...(auto ? [auto.agent_id] : [])])], session_adoption: receipt });
+    // state.json may survive a later index failure, even with an adopted marker.
+    const index = stateMgr.getSurfaceSessionIndex();
+    const routingMatches = () => {
+      const entry = index.lookup({ workspace_id: result.workspace_id, surface_id: result.surface_id });
+      return entry?.agent_id === result.agent_id && entry.cli_session_id === result.cli_session_id;
+    };
+    if (!routingMatches()) index.persistRecord(result);
+    if (!routingMatches()) throw new Error("Adoption routing persistence is incomplete");
     for (const alias of result.session_continuity_aliases ?? []) stateMgr.retireDiscoveryState(alias, agent.agent_id);
     if (result.session_adoption?.status !== "adopted") result = stateMgr.updateRecord(agent.agent_id, { session_adoption: { ...receipt, status: "adopted" } });
+    if (!routingMatches()) throw new Error("Adoption routing persistence is incomplete");
   } catch (error) {
-    const persisted = stateMgr.readState(agent.agent_id);
+    let persisted = stateMgr.readState(agent.agent_id);
     if (persisted?.session_adoption?.request_sha256 !== requestHash) throw error;
+    // Completion's state write can precede its failed index write. Retain the
+    // primary failure and pending status even if this cleanup also fails.
+    if (persisted.session_adoption.status === "adopted") {
+      try { persisted = stateMgr.updateRecord(agent.agent_id, { session_adoption: receipt }); }
+      catch { persisted = stateMgr.readState(agent.agent_id) ?? persisted; }
+    }
     result = persisted; registry.set(result.agent_id, result);
     for (const alias of result.session_continuity_aliases ?? []) registry.rename(alias, result.agent_id, result);
     return { status: "pending_verify" as const, agent_id: result.agent_id, error: String(error), evidence_sha256: receipt.evidence_sha256 };

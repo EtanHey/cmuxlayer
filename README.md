@@ -146,7 +146,9 @@ binding and explicit authority. Fresh complete topology, exact hook registration
 and direct process cwd must agree; ambiguous or competing known claimants refuse adoption.
 Authority and coordination fields remain those of the original managed record. Adoption sends no
 input and moves no panes; normal layout reconciliation follows separately. An interrupted write
-returns `pending_verify`; repeating the exact request safely completes persistence. A public
+returns `pending_verify`; an unchanged exact repeat revalidates binding, process, observer and routing
+before completing persistence. A lifecycle-invalidated binding requires a fresh explicitly versioned
+request. A public
 `action: "move"` alone does not write a placement override or recover managed session identity.
 
 `control_health` reports `cmux_fds` for detected cmux.app processes and warns when open descriptors reach 4096; set `CMUXLAYER_CMUX_FD_WARN` to a positive integer to change that threshold.
