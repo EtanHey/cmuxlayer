@@ -1214,9 +1214,11 @@ export function registerListAgentsTool(
         const live = await engine.runLifecycleMutation(
           async (withUnlocked) => {
             let discovered: DiscoveredAgent[] | null = null;
+            let discoveryEpoch = registry.getObserverEpoch();
             for (let attempt = 0; attempt < 2; attempt += 1) {
               discovery.invalidate();
               const revision = engine.lifecycleLockRevision();
+              discoveryEpoch = registry.getObserverEpoch();
               let observed: DiscoveredAgent[];
               try {
                 observed = await withUnlocked(() => discovery.scan(true));
@@ -1240,7 +1242,16 @@ export function registerListAgentsTool(
               // status request into an error. One final scan under the lock
               // guarantees progress after the bounded unlocked attempts.
               discovery.invalidate();
+              discoveryEpoch = registry.getObserverEpoch();
               discovered = await discovery.scan(true);
+            }
+            // Optional continuity needs a pinned epoch. Stable CLI fallback
+            // still supports ordinary status reads without promoting identity.
+            if (registry.isObserverOwnershipEnforced() &&
+                (registry.getObserverEpoch() !== discoveryEpoch ||
+                 (discoveryEpoch !== null &&
+                  !await registry.recoverSessionContinuityFromDiscovery(discovered, discoveryEpoch)))) {
+              throw new SurfaceBindingChangedDuringDiscoveryError("Observer changed before session continuity ingestion");
             }
             const observedAtMs = Date.now();
             registry.repairFromDiscovery(discovered, {

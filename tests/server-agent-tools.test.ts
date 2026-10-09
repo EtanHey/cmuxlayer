@@ -10792,6 +10792,43 @@ codex>
     expect(parsed.resume_command).toBeUndefined();
   });
 
+  it.each(["missing", "lost", "switched", "stable"])(
+    "list_agents optional continuity handles observer evidence (%s)", async mode => {
+      let epoch: string | null = mode === "missing" ? null : "synthetic-owner@one";
+      const context = createServerContext({ exec: mockExec, stateDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        surfaceObserverOwnerIdProvider: () => epoch ? "synthetic-owner" : null,
+        surfaceObserverEpochProvider: () => epoch });
+      serverContexts.push(context);
+      context.stateMgr.ensureAutoRecord("auto-codex-surface-new", {
+        surface_id: "surface:new", surface_title: "cmuxlayerCodex", workspace_id: "workspace:1",
+        cli: "codex", parsed_status: "idle", model: null, token_count: null, context_pct: null,
+        has_agent: true, read_error: false });
+      const server = createServer({ context }); await context.lifecycleStartPromise;
+      const registry = testLifecycleEngine(server).getRegistry();
+      const retained = makeServerAgentRecord({ agent_id: "synthetic-retained-lead", state: "idle",
+        surface_id: "surface:unbound", surface_uuid: null, workspace_id: null,
+        surface_observer_id: "synthetic-historical", surface_provenance: "cmuxlayer_spawn",
+        role: "orchestrator", authority: "lead", placement: "left", launch_cwd: "/synthetic/repo" });
+      context.stateMgr.writeState(retained); registry.set(retained.agent_id, retained);
+      const recover = registry.recoverSessionContinuityFromDiscovery.bind(registry);
+      const recovery = vi.spyOn(registry, "recoverSessionContinuityFromDiscovery").mockImplementation((rows, expected) => {
+        if (mode === "lost") epoch = null;
+        if (mode === "switched") epoch = "synthetic-owner@two";
+        return recover(rows, expected);
+      });
+      const result = await agentStateTool(server).handler({ agent_id: "auto-codex-surface-new" }, {});
+      if (mode === "lost" || mode === "switched") {
+        expect(result.structuredContent).toMatchObject({ ok: false, error: "Observer changed before session continuity ingestion" });
+      } else {
+        expect(result.structuredContent).toMatchObject({ ok: true, cli_session_id: null, resumable: false });
+        if (mode === "missing") expect(recovery).not.toHaveBeenCalled();
+        else expect(recovery).toHaveBeenCalledTimes(1);
+      }
+      expect(context.stateMgr.readState(retained.agent_id)).toEqual(retained);
+      expect(registry.get(retained.agent_id)?.surface_uuid).toBeNull();
+    });
+
   it("get_agent_state includes resume_command when a session id is captured", async () => {
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
