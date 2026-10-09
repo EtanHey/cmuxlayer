@@ -1245,8 +1245,12 @@ export function registerListAgentsTool(
               discoveryEpoch = registry.getObserverEpoch();
               discovered = await discovery.scan(true);
             }
+            // Optional continuity needs a pinned epoch. Stable CLI fallback
+            // still supports ordinary status reads without promoting identity.
             if (registry.isObserverOwnershipEnforced() &&
-                !await registry.recoverSessionContinuityFromDiscovery(discovered, discoveryEpoch)) {
+                (registry.getObserverEpoch() !== discoveryEpoch ||
+                 (discoveryEpoch !== null &&
+                  !await registry.recoverSessionContinuityFromDiscovery(discovered, discoveryEpoch)))) {
               throw new SurfaceBindingChangedDuringDiscoveryError("Observer changed before session continuity ingestion");
             }
             const observedAtMs = Date.now();
