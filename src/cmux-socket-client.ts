@@ -36,7 +36,7 @@ import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 import { appendDaemonLog, focusRpcLogFields } from "./daemon-log.js";
-type DiagnosticMethod = "system.capabilities" | "system.tree" | "system.top" | "debug.terminals" | "window.list" | "workspace.list" | "pane.list" | "surface.list";
+import type { DiagnosticMethod } from "./current-session-census.js";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
