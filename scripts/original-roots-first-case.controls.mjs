@@ -10,7 +10,7 @@ const test = (name, run) => { run(); count++; console.log('PASS ' + name); };
 const id = '11111111-1111-4111-8111-111111111111';
 const now = Date.now(), stamp = delta => new Date(now + delta).toISOString();
 const root = '/Users/happycampr/Library/Caches/cmuxlayer-firstcase-' + id;
-const cfg = { executionApproved: true, coordinationReceipt: { status: 'ACCEPTED', dispatchId: 'synthetic-not-host-authority', threadId: 'mcp:7bea335d-d936-4f31-a1b3-22e958f09f18' }, productHead: HEAD, productTree: TREE,
+const cfg = { executionApproved: true, coordinationReceipt: { status: 'ACCEPTED', dispatchId: 'synthetic-not-host-authority', threadId: 'mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d' }, productHead: HEAD, productTree: TREE,
   runId: id, workspaceId: id, anchorSurfaceId: id, anchorPaneRef: 'pane:1', marker: 'FIRSTCASE_' + id,
   root, candidate: '/Users/happycampr/Library/Caches/staged-candidate', manifestPath: '/Users/happycampr/Library/Caches/dist-manifest.json',
   node: '/opt/homebrew/bin/node', cmux: '/Applications/cmux.app/Contents/Resources/bin/cmux', socket: '/tmp/observed.sock',

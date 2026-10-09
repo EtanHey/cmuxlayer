@@ -45,7 +45,7 @@ export function verifyCandidate(candidate, manifestPath) {
 }
 
 export function validateConfig(c, now = Date.now()) {
-  check(c.executionApproved === true && c.coordinationReceipt?.status === 'ACCEPTED' && c.coordinationReceipt.dispatchId && c.coordinationReceipt.threadId === 'mcp:7bea335d-d936-4f31-a1b3-22e958f09f18' && c.host && c.productHead === HEAD && c.productTree === TREE, 'parent execution/window/product approval required');
+  check(c.executionApproved === true && c.coordinationReceipt?.status === 'ACCEPTED' && c.coordinationReceipt.dispatchId && c.coordinationReceipt.threadId === 'mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d' && c.host && c.productHead === HEAD && c.productTree === TREE, 'parent execution/window/product approval required');
   check(uuid(c.runId) && uuid(c.workspaceId) && uuid(c.anchorSurfaceId) && c.anchorPaneRef?.startsWith('pane:'), 'exact run/workspace/surface/pane identities required');
   for (const key of ['root', 'candidate', 'manifestPath', 'node', 'cmux', 'socket']) check(safePath(c[key]), 'unsafe path: ' + key);
   check(c.root === '/Users/happycampr/Library/Caches/cmuxlayer-firstcase-' + c.runId, 'owned501 run root required');
