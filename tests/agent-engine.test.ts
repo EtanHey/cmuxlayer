@@ -7678,7 +7678,7 @@ Session ID: ${sessionId}`,
       expect(registry.get(child.agent_id)).toMatchObject({ parent_agent_id: lead.agent_id, role: "worker", workspace_id: "ws:placement" });
     });
 
-    it.each(["legacy", "repeat", "interrupted", "marker-interrupted", "old-live", "unknown", "cwd", "cli", "reused-pid",
+    it.each(["legacy", "retained-observer", "repeat", "interrupted", "marker-interrupted", "old-live", "unknown", "cwd", "cli", "reused-pid",
       "observer", "old-seat", "digest", "version", "authority", "pending", "claimant", "hook-race", "row-race", "ref-recycle"])(
       "adopts the supplied legacy case safely (%s)", async mode => {
       const lead = makeRecord({ agent_id: "brainlayerCodex-834383b9", state: "idle", surface_id: "surface:unbound",
@@ -7687,6 +7687,7 @@ Session ID: ${sessionId}`,
         launch_cwd: "/synthetic/brainlayer", role: "orchestrator", authority: "lead", placement: "left",
         surface_provenance: "cmuxlayer_spawn", parent_agent_id: "orcClaude", collab_path: "/synthetic/collab",
         boot_prompt_pending: true, prompt_delivered: false });
+      if (mode === "retained-observer") lead.surface_observer_id = "observer-last-unbound";
       const target = { ...lead, surface_id: "surface:506", surface_uuid: "046E9CEC-E253-4870-9BB8-942DCE7CC0EC" };
       const workspaceUuid = "19F83CA8-2598-4BB3-AC57-2D6C4460A22E";
       installTwoColumnTopology(target);
@@ -7751,7 +7752,7 @@ Session ID: ${sessionId}`,
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver({ readFile: () => JSON.stringify(hook) }),
         inboxOpts: { baseDir: TEST_DIR } });
       const discovery = { scan: async () => [discoveryRow] } as any;
-      const accepted = ["legacy", "repeat", "interrupted", "marker-interrupted"].includes(mode);
+      const accepted = ["legacy", "retained-observer", "repeat", "interrupted", "marker-interrupted"].includes(mode);
       if (!accepted) {
         await expect(engine.adoptResumedSession(request)).rejects.toThrow();
         expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBeNull();

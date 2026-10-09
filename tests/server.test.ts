@@ -9377,6 +9377,39 @@ describe("tool handler integration", () => {
     );
   });
 
+  it("update_surface advertises and routes adopt_session without pane actions", async () => {
+    const context = createServerContext({ exec: mockExec, skipAgentLifecycle: true, controlHealthIntervalMs: 0 });
+    const adopt = vi.fn().mockResolvedValue({ status: "adopted", agent_id: "retained-lead", placement: "not_attempted" });
+    const server = createServer({ context, skipAgentLifecycle: true });
+    context.lifecycleSweepEngine = { adoptResumedSession: adopt, dispose() {} } as any;
+    const client = new Client({ name: "adoption-contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const tool = (await client.listTools()).tools.find(row => row.name === "update_surface")!;
+      expect((tool.inputSchema.properties!.action as any).enum).toContain("adopt_session");
+      const request = { action: "adopt_session", surface: "046E9CEC-E253-4870-9BB8-942DCE7CC0EC",
+        workspace: "19F83CA8-2598-4BB3-AC57-2D6C4460A22E", managed_agent_id: "retained-lead",
+        session_id: "retained-session", expected_agent_version: 0,
+        observer_transition: { historical_owner_id: "historical", current_owner_id: "current" },
+        binding_evidence_path: "/synthetic/history.json", binding_evidence_sha256: "a".repeat(64) };
+      const result = await client.callTool({ name: "update_surface", arguments: request });
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ action: "adopt_session", status: "adopted", placement: "not_attempted" });
+      const { action, ...input } = request;
+      expect(adopt).toHaveBeenCalledExactlyOnceWith(input);
+      for (const extra of [{ role: "worker" }, { authority: "lead" }, { model: "other" },
+        { parent_agent_id: "other" }, { collab_path: "/other" }, { focus: false }, { title: "other" }, { pane: "pane:2" }]) {
+        expect((await client.callTool({ name: "update_surface", arguments: { ...request, ...extra } })).isError).toBe(true);
+      }
+      expect((await client.callTool({ name: "update_surface", arguments: { ...request, workspace: "workspace:1" } })).isError).toBe(true);
+      context.lifecycleSweepEngine = null;
+      expect((await client.callTool({ name: "update_surface", arguments: request })).isError).toBe(true);
+      expect(adopt).toHaveBeenCalledTimes(1);
+      expect(mockExec).not.toHaveBeenCalled();
+    } finally { await client.close(); await server.close(); context.dispose(); }
+  });
+
   it("update_surface is a superset adapter for both move_surface and rename_tab", async () => {
     mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => ({
       stdout: args.includes("move-surface")

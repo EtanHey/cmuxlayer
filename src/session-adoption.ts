@@ -78,8 +78,9 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
   const repeat = agent.session_adoption?.request_sha256 === requestHash;
   if (!repeat && agent.version !== request.expected_agent_version) throw new Error("Original record version changed");
   const owner = registry.getObserverId(), epoch = registry.getObserverEpoch();
+  const unbound = agent.surface_id === "surface:unbound" && !agent.surface_uuid && !agent.workspace_id;
   if (!owner || !epoch || owner !== request.observer_transition.current_owner_id ||
-      ![owner, request.observer_transition.historical_owner_id].includes(agent.surface_observer_id ?? "")) throw new Error("Observer selection disagrees");
+      (!unbound && ![owner, request.observer_transition.historical_owner_id].includes(agent.surface_observer_id ?? ""))) throw new Error("Observer selection disagrees");
   const witness = readPinnedWitness(request), historical = witness.historical[0];
   if (!historical || witness.historical.some(row => row.surface_uuid !== historical.surface_uuid ||
       row.workspace_id !== historical.workspace_id || row.surface_observer_id !== request.observer_transition.historical_owner_id ||
