@@ -40,7 +40,8 @@ import { validateSurfaceIdentityBijection } from "./surface-topology.js";
 import { deriveCmuxObserverOwnerId } from "./cmux-observer-identity.js";
 import { inferRepoFromDirectory } from "./repo-workspace.js";
 import { resumeArtifactStatus } from "./resume-verification.js";
-import { agentProcessMayBeAlive } from "./util/pid-alive.js";
+import { makeSelfRegistrationContinuityResolver } from "./self-registration.js";
+import { agentProcessLiveness, agentProcessMayBeAlive } from "./util/pid-alive.js";
 
 export type SurfaceProvider = () => Promise<CmuxSurface[]>;
 
@@ -71,6 +72,7 @@ interface SurfacelessEvictionOptions extends SurfaceAbsenceOptions {
 }
 
 export interface AgentRegistryOptions {
+  sessionContinuityResolver?: ReturnType<typeof makeSelfRegistrationContinuityResolver>;
   /** Static identity for a client that never changes cmux socket topology. */
   observerId?: string | null;
   /**
@@ -535,6 +537,7 @@ class AgentNotFoundError extends Error {
 }
 
 export class AgentRegistry {
+  private sessionContinuityResolver: ReturnType<typeof makeSelfRegistrationContinuityResolver>;
   private agents = new Map<string, AgentRecord>();
   private aliases = new Map<string, string>();
   private surfacelessObservations = new Map<
@@ -566,6 +569,7 @@ export class AgentRegistry {
     surfaceProvider: SurfaceProvider,
     opts?: AgentRegistryOptions,
   ) {
+    this.sessionContinuityResolver = opts?.sessionContinuityResolver ?? makeSelfRegistrationContinuityResolver();
     this.stateMgr = stateMgr;
     this.surfaceProvider = surfaceProvider;
     this.observerId = opts?.observerId?.trim() || null;
@@ -715,6 +719,7 @@ export class AgentRegistry {
     const stateFiles = this.stateMgr.listStates();
     for (const record of stateFiles) {
       this.agents.set(record.agent_id, record);
+      for (const alias of record.session_continuity_aliases ?? []) this.aliases.set(alias, record.agent_id);
     }
     this.pruneResumableTombstones();
 
@@ -730,6 +735,10 @@ export class AgentRegistry {
     const onDisk = this.stateMgr.listStates();
     for (const record of onDisk) {
       const existing = this.agents.get(record.agent_id);
+      for (const alias of record.session_continuity_aliases ?? []) {
+        this.aliases.set(alias, record.agent_id);
+        this.agents.delete(alias);
+      }
       if (!existing || existing.version < record.version) {
         this.agents.set(record.agent_id, record);
       }
@@ -1135,6 +1144,13 @@ export class AgentRegistry {
       }
     }
 
+    if (!discoveryHasMixedIdentity) {
+      await this.recoverSessionContinuity(discovered, discoveryObserverSnapshot);
+      if (!this.isObserverSnapshotCurrent(discoveryObserverSnapshot)) return this.list().map(record => ({
+        ...record, discovered: isAutoAgentId(record.agent_id), parsed_cli_mismatch: false,
+      }));
+    }
+
     const bySurface = new Map(discovered.map((entry) => [entry.surface_id, entry]));
     const bySurfaceUuid = new Map(
       discovered.flatMap((entry) => {
@@ -1315,6 +1331,78 @@ export class AgentRegistry {
       : merged;
 
     return filtered;
+  }
+
+  /** MCP ingestion calls this before launcher/title orphan repair can claim the seat. */
+  async recoverSessionContinuityFromDiscovery(
+    discovered: readonly DiscoveredAgent[], expectedEpoch: string | null,
+  ): Promise<boolean> {
+    const snapshot = this.captureObserverSnapshot();
+    if (!expectedEpoch || snapshot.epoch !== expectedEpoch) return false;
+    await this.recoverSessionContinuity(discovered, snapshot);
+    return this.isObserverSnapshotCurrent(snapshot);
+  }
+
+  private async recoverSessionContinuity(
+    discovered: readonly DiscoveredAgent[], snapshot: RegistryObserverSnapshot,
+  ): Promise<void> {
+    // Full topology, not a screen scan's omission, proves the old seat absent.
+    if (!snapshot.ownerId || !snapshot.epoch || !this.list().some(record =>
+      record.surface_provenance === "cmuxlayer_spawn" && record.cli_session_id)) return;
+    let surfaces: readonly CmuxSurface[];
+    try { surfaces = await this.surfaceProvider(); } catch { return; }
+    if (!this.isObserverSnapshotCurrent(snapshot) || surfaces.length === 0 ||
+        !hasCoherentSurfaceIdentity(surfaces) || surfaces.some(surface => !surface.id)) return;
+    const liveUuids = surfaces.map(surface => surface.id!);
+    for (const entry of discovered) {
+      if (!entry.has_agent || entry.read_error || !entry.surface_uuid || !entry.workspace_id ||
+          (entry.working_directory_source !== "terminal_metadata" && entry.working_directory_source !== "surface")) continue;
+      const surface = surfaces.find(surface => surfaceUuidKey(surface.id) === surfaceUuidKey(entry.surface_uuid));
+      if (!surface || surface.ref !== entry.surface_id || surface.workspace_ref !== entry.workspace_id) continue;
+      const occupants = this.list().filter(record => surfaceUuidKey(record.surface_uuid) === surfaceUuidKey(entry.surface_uuid));
+      const auto = occupants[0];
+      if (occupants.length > 1 || (auto && (!isAutoAgentId(auto.agent_id) ||
+          auto.surface_observer_id !== snapshot.ownerId || auto.workspace_id !== entry.workspace_id ||
+          auto.cli !== entry.cli || auto.boot_prompt_pending || auto.blocked_on_prompt))) continue;
+      const matches = this.list().filter(record => !isAutoAgentId(record.agent_id) &&
+        record.surface_provenance === "cmuxlayer_spawn" && record.cli_session_id && record.role &&
+        record.surface_observer_id === snapshot.ownerId &&
+        (record.workspace_id ?? record.previous_surface_binding?.workspace_id) === entry.workspace_id &&
+        (!record.previous_surface_binding || record.previous_surface_binding.observer_id === snapshot.ownerId) &&
+        record.cli === entry.cli && record.launch_cwd === entry.current_directory &&
+        record.user_killed !== true && record.deletion_intent !== true &&
+        !this.matchingLiveSurface(record, surfaces) &&
+        Boolean(record.surface_uuid || record.previous_surface_binding?.surface_uuid) &&
+        !surfaces.some(surface => surfaceUuidKey(surface.id) === surfaceUuidKey(record.previous_surface_binding?.surface_uuid)));
+      const proven = matches.flatMap(record => {
+        const proof = this.sessionContinuityResolver({ ...record, surface_uuid: entry.surface_uuid }, liveUuids);
+        return proof && agentProcessLiveness({ ...record, pid: proof.pid,
+          pid_registered_at: new Date(proof.ts!).toISOString() }, { ignoreCreationLowerBound: true }) === "alive"
+          ? [{ record, proof }] : [];
+      });
+      if (proven.length !== 1 || !this.isObserverSnapshotCurrent(snapshot)) continue;
+      const { record, proof } = proven[0]!;
+      if (auto && ((auto.cli_session_id && auto.cli_session_id !== proof.session_id) ||
+          (auto.parent_agent_id && auto.parent_agent_id !== record.parent_agent_id))) continue;
+      // Any second managed row claiming this session makes authority ambiguous.
+      if (this.list().some(other => other.agent_id !== record.agent_id && other.agent_id !== auto?.agent_id && other.cli_session_id === proof.session_id)) continue;
+      const latestProof = this.sessionContinuityResolver({ ...record, surface_uuid: entry.surface_uuid }, liveUuids);
+      if (JSON.stringify(latestProof) !== JSON.stringify(proof) ||
+          this.stateMgr.readState(record.agent_id)?.version !== record.version ||
+          !this.isObserverSnapshotCurrent(snapshot)) continue;
+      const updated = this.stateMgr.resetState(record.agent_id, discoveredStatusToAgentState(entry.parsed_status), {
+        surface_id: entry.surface_id, surface_uuid: entry.surface_uuid, workspace_id: entry.workspace_id,
+        pid: proof.pid, pid_registered_at: new Date(proof.ts!).toISOString(),
+        cli_session_path: proof.session_path ?? record.cli_session_path, error: null,
+        session_continuity_aliases: [...new Set([...(record.session_continuity_aliases ?? []), ...(auto ? [auto.agent_id] : [])])],
+      }, "sessionContinuityRecovery");
+      this.agents.set(record.agent_id, updated);
+      if (auto) {
+        this.aliases.set(auto.agent_id, record.agent_id);
+        this.agents.delete(auto.agent_id);
+        this.stateMgr.retireDiscoveryState(auto.agent_id, record.agent_id);
+      }
+    }
   }
 
   async refreshManagedSurfaceMetadata(
@@ -1657,7 +1745,7 @@ export class AgentRegistry {
     ) {
       patch.surface_uuid = discoveredEntry.surface_uuid;
     }
-    if (explicitRole && record.role !== explicitRole) {
+    if (record.surface_provenance !== "cmuxlayer_spawn" && explicitRole && record.role !== explicitRole) {
       patch.role = explicitRole;
     }
     const observerId = this.getObserverId();
