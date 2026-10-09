@@ -25,13 +25,32 @@ export function validatePlan(p,now=Date.now()) {
  check(/^[a-f0-9]{64}$/.test(focus.sha256 ?? ''),'native focus artifact hash required');
  check(Date.parse(focus.observedUTC)>=Date.parse(c.notBeforeUTC) && Date.parse(focus.observedUTC)<=Date.parse(p.bootstrap.createdUTC) && Date.parse(p.bootstrap.createdUTC)<=now,'fresh ordered native focus/creation observations required');
  check(typeof p.bootstrap.marker==='string' && p.bootstrap.marker.startsWith('INSIDE_BBE_') && p.bootstrap.marker!==c.marker,'distinct bootstrap marker required');
- check(p.retainedBaseline.path==='/Users/happycampr/Library/Caches/cmuxlayer-firstcase-upload-840580af-20261009T0238Z-9a0e71ac-5f78-4ac0-a497-0697c6c96cfd/live-baseline-private.json' && /^[a-f0-9]{64}$/.test(p.retainedBaseline.sha256),'retained private socket provenance required');
+ check(p.retainedBaseline.path===socketWitnessPath(c) && /^[a-f0-9]{64}$/.test(p.retainedBaseline.sha256),'fresh named private socket witness in owned stage required');
  check(/^[a-f0-9]{64}$/.test(p.bootstrapSha256 ?? ''),'bootstrap hash required');
  check(Date.parse(c.mutationEndUTC)-now>=120000,'bootstrap needs120seconds mutation plus retained restoration reserve');
  return c;
 }
 export async function admitted(p,operation) {validatePlan(p);return operation(p);}
-function contains(value,text) {return value===text || (value && typeof value==='object' && Object.values(value).some(v=>contains(v,text)));}
+export const socketWitnessPath=c=>join(stage,'socket-witness-'+c.runId+'.private.json');
+export function validateSocketWitness(p,c,w,now=Date.now()) {
+ check(p.retainedBaseline.path===socketWitnessPath(c),'socket witness must be named in owned stage');
+ check(Date.parse(w.observedUTC)>=Date.parse(c.notBeforeUTC) && Date.parse(w.observedUTC)<=now,'fresh socket observation required');
+ check(w.dispatchId===c.coordinationReceipt.dispatchId && w.threadId===c.coordinationReceipt.threadId,'socket witness coordination mismatch');
+ check(sameProcess(w.appProcess,c.appProcess) && w.appProcess.executable==='/Applications/cmux.app/Contents/MacOS/cmux','socket witness GUI identity mismatch');
+ check(w.socket?.path===c.socket && w.socket.type==='socket' && w.socket.symlink===false && ['uid','dev','ino'].every(k=>w.socket[k]===c.socketIdentity[k]),'socket witness endpoint identity mismatch');
+ const l=w.listener;
+ check(l?.method==='LSOF_GUI_PID_UNIX' && l.role==='LISTENING_OWNER' && sameProcess(l.appProcess,c.appProcess) && l.socketPath===c.socket,'positive same-GUI listener witness required');
+ check(l.evidencePath===join(stage,'gui-listener-'+c.runId+'.private.txt') && /^[a-f0-9]{64}$/.test(l.sha256 ?? ''),'named private listener evidence required');
+ return l;
+}
+export function guiSocketListed(text,pid,path,canonical=value=>value) {
+ const records=text.trim().split(/(?=^p[0-9]+$)/m).filter(Boolean);
+ return records.length===1 && records[0].split('\n')[0]==='p'+pid && records[0].split(/(?=^f[^\n]+$)/m).slice(1).some(fd=>{
+  const names=fd.split('\n').filter(line=>line.startsWith('n/'));
+  if(!/^tunix$/im.test(fd) || names.length!==1 || names[0].includes('->'))return false;
+  try{return canonical(names[0].slice(1))===path;}catch{return false;}
+ });
+}
 async function execute(p) {
  const admission=validatePlan(p), c={...admission};
  check(process.platform==='darwin' && process.arch==='arm64' && process.getuid()===501 && fs.lstatSync('/dev/console').uid===501 && hostname()===c.host && userInfo().homedir==='/Users/happycampr' && fs.realpathSync(process.execPath)===c.node,'normal501 M1/pinned Node context required');
@@ -40,8 +59,11 @@ async function execute(p) {
  for(const [file,pin] of [[self,p.bootstrapSha256],[join(stage,'original-roots-first-case.mjs'),PINS.runner],[join(stage,'original-roots-first-case.proxy.mjs'),PINS.proxy],[c.node,PINS.node],[c.cmux,PINS.cmux]])check(hash(file)===pin,'staged executable hash mismatch');
  verifyCandidate(c.candidate,c.manifestPath);
  const provenance=fs.lstatSync(p.retainedBaseline.path);
- check(provenance.isFile() && !provenance.isSymbolicLink() && provenance.uid===501 && (provenance.mode&0o777)===0o600 && hash(p.retainedBaseline.path)===p.retainedBaseline.sha256,'private provenance identity changed');
- check(contains(JSON.parse(fs.readFileSync(p.retainedBaseline.path,'utf8')),c.socket),'socket path must come from retained private receipt');
+ check(provenance.isFile() && !provenance.isSymbolicLink() && fs.realpathSync(p.retainedBaseline.path)===p.retainedBaseline.path && provenance.uid===501 && (provenance.mode&0o777)===0o600 && hash(p.retainedBaseline.path)===p.retainedBaseline.sha256,'private provenance identity changed');
+ const listener=validateSocketWitness(p,c,JSON.parse(fs.readFileSync(p.retainedBaseline.path,'utf8')));
+ const listenerStat=fs.lstatSync(listener.evidencePath);
+ check(listenerStat.isFile() && !listenerStat.isSymbolicLink() && fs.realpathSync(listener.evidencePath)===listener.evidencePath && listenerStat.uid===501 && (listenerStat.mode&0o777)===0o600 && hash(listener.evidencePath)===listener.sha256,'private listener evidence identity changed');
+ check(fs.realpathSync(c.socket)===c.socket && guiSocketListed(fs.readFileSync(listener.evidencePath,'utf8'),c.appProcess.pid,c.socket,path=>fs.realpathSync(path)),'canonical GUI socket is not attributed by private listener evidence');
  const focusStat=fs.lstatSync(p.beforeBootstrapFocus.artifactPath);
  check(focusStat.isFile() && !focusStat.isSymbolicLink() && focusStat.uid===501 && (focusStat.mode&0o777)===0o600 && hash(p.beforeBootstrapFocus.artifactPath)===p.beforeBootstrapFocus.sha256,'native focus artifact identity changed');
  const focusWitness=JSON.parse(fs.readFileSync(p.beforeBootstrapFocus.artifactPath,'utf8'));
