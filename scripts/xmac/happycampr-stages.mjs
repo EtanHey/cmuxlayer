@@ -30,6 +30,8 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
       plan.effects.some(effect => paths.some(path => path.path === effect.id) || ["process", "workspace", "surface"].includes(effect.kind)) ||
       !fs || ["openSync", "closeSync", "fstatSync", "ftruncateSync"].some(name => typeof fs[name] !== "function") ||
       !native && (!providers || ["rpc", "exec", "inventory"].some(name => typeof providers[name] !== "function"))) throw Error("reviewed owned stage paths/providers required");
+  // Default native writers provide no exclusive file-generation ACK: refuse before connection.
+  if (native && typeof providers?.armLaunchFiles !== "function") throw Error("native launch file creation bridge required");
   const endpoints = [plan.composition.topologyPeer.socket.path, plan.composition.topologyPeer.nativeSocket.path];
   if (paths.some(row => endpoints.includes(row.path)) || spec.paths.some(row => plan.effects.some(effect => effect.id === row.path))) throw Error("read-only observation endpoint/owned path overlap");
   const read = io.query, request = providers?.rpc ?? rpc;
@@ -95,7 +97,7 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
     const effects = paths.filter(row => row.stage === name).map(row => ({ id: row.path, kind: row.kind, before: null, owned: snapshot.resources[row.path] }));
     for (const effect of effects) {
       const row = effect.owned;
-      if (name !== "launch" && !same(row, filesystemAcks.get(effect.id))) throw Error("filesystem creation ACK identity/bytes mismatch");
+      if (effect.kind !== "socket" && !same(row, filesystemAcks.get(effect.id))) throw Error("filesystem creation ACK identity/bytes mismatch");
       if (!row || row.kind !== effect.kind || row.uid !== 501 || row.canonical !== effect.id || row.mode & 0o077 || !Number.isSafeInteger(row.dev) || !Number.isSafeInteger(row.ino) || row.ino <= 0 ||
           effect.kind === "file" && (row.nlink !== 1 || !/^[a-f0-9]{64}$/.test(row.hash))) throw Error("created path independent readback unavailable");
     }
@@ -164,38 +166,52 @@ export function createOwnedStageAdapters({ cfg, executionPacket, io, fixtureIO, 
     },
     refreshAndQuit: async ctx => { await ctx.captureOwned(); }, // Observation endpoints are inputs: never quit/relaunch their app.
     launch: async (ctx, signal) => {
-      const entry = root + "/candidate/dist/daemon.js", child = fixtureIO.spawnProcess(plan.runtime.node, [entry], { cwd: plan.sourceManifest.root, env: { ...ctx.env, HOME: root + "/home" }, stdio: ["ignore", "ignore", "ignore"] });
-      ledger.push({ stage: "launch", status: "DISPATCHED", kind: "process", pid: Number.isSafeInteger(child.pid) ? child.pid : null, trusted: false });
-      await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); signal.addEventListener("abort", () => reject(Error("spawn ACK lost")), { once: true }); });
-      ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "process", pid: Number.isSafeInteger(child.pid) ? child.pid : null, trusted: false });
-      if (!Number.isSafeInteger(child.pid) || child.pid <= 1) throw Error("creation spawn ACK invalid");
-      const daemon = { pid: child.pid, entry, argv: plan.runtime.node + " " + entry };
-      pending = [{ id: "pid:" + child.pid, kind: "process", owned: daemon }, { id: root + "/d.sock", kind: "socket", owned: { pid: child.pid } }];
-      const ack = await ctx.launchFixture((command, args, options) => request(endpoints[1], "workspace.create", { window_id: spec.window, cwd: options.cwd,
-        initial_command: [command, ...args].map(quote).join(" "), initial_env: options.env }, { signal, timeoutMs: 3000, maxBytes: 1024 * 1024 }));
-      if (failed || closed || signal.aborted) { ledger.push({ stage: "launch", status: "LATE_ACK_REJECTED", workspace: uuid(ack?.workspace_id) ? ack.workspace_id : null, trusted: false }); throw Error("late workspace ACK rejected"); }
-      ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "workspace", workspace: uuid(ack?.workspace_id) ? ack.workspace_id : null, window: uuid(ack?.window_id) ? ack.window_id : null, trusted: false });
-      if (!uuid(ack?.workspace_id) || ack.window_id !== spec.window) throw Error("fixture workspace ACK unavailable");
-      const membership = await request(endpoints[1], "workspace.list", { window_id: spec.window }, { signal, timeoutMs: 3000, maxBytes: 1024 * 1024 });
-      if (membership?.window_id !== spec.window || !Array.isArray(membership.workspaces) || membership.workspaces.length > 1024 ||
-          membership.workspaces.filter(row => row.id === ack.workspace_id).length !== 1) throw Error("workspace ACK independent window membership unavailable/ambiguous");
-      let event;
-      while (!signal.aborted) {
-        if (fs.existsSync(root + "/d.sock") && fs.existsSync(root + "/ratchet-events.json") && fs.existsSync(root + "/state/daemon.log")) {
-          const bytes = fs.readFileSync(root + "/ratchet-events.json"); if (bytes.length > 16384) throw Error("fixture event limit");
-          try { event = JSON.parse(bytes); } catch { throw Error("fixture event JSON invalid"); }
-          if (event.phase === "idle") break;
+      // Only the armed producer can request an exclusive, descriptor-witnessed file creation.
+      // A path read, process/native ACK or postcreation snapshot cannot manufacture this ACK.
+      const disarm = providers?.armLaunchFiles?.((path, bytes) => {
+        if (failed || closed || signal.aborted || !paths.some(row => row.stage === "launch" && row.kind === "file" && row.path === path) ||
+            !(typeof bytes === "string" || Buffer.isBuffer(bytes)) || Buffer.byteLength(bytes) > 16 * 1024 * 1024 || filesystemAcks.has(path)) throw Error("launch file creation capability rejected");
+        create(path, bytes);
+        ledger.push({ stage: "launch", status: "FILE_CREATED", identity: structuredClone(filesystemAcks.get(path)) });
+      });
+      if (providers?.armLaunchFiles && typeof disarm !== "function") throw Error("launch file creation disarm required");
+      let launchError;
+      try {
+        const entry = root + "/candidate/dist/daemon.js", child = fixtureIO.spawnProcess(plan.runtime.node, [entry], { cwd: plan.sourceManifest.root, env: { ...ctx.env, HOME: root + "/home" }, stdio: ["ignore", "ignore", "ignore"] });
+        ledger.push({ stage: "launch", status: "DISPATCHED", kind: "process", pid: Number.isSafeInteger(child.pid) ? child.pid : null, trusted: false });
+        await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); signal.addEventListener("abort", () => reject(Error("spawn ACK lost")), { once: true }); });
+        ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "process", pid: Number.isSafeInteger(child.pid) ? child.pid : null, trusted: false });
+        if (!Number.isSafeInteger(child.pid) || child.pid <= 1) throw Error("creation spawn ACK invalid");
+        if (signal.aborted || failed || closed) throw Error("launch file generation aborted before fixture dispatch");
+        const daemon = { pid: child.pid, entry, argv: plan.runtime.node + " " + entry };
+        pending = [{ id: "pid:" + child.pid, kind: "process", owned: daemon }, { id: root + "/d.sock", kind: "socket", owned: { pid: child.pid } }];
+        const ack = await ctx.launchFixture((command, args, options) => request(endpoints[1], "workspace.create", { window_id: spec.window, cwd: options.cwd,
+          initial_command: [command, ...args].map(quote).join(" "), initial_env: options.env }, { signal, timeoutMs: 3000, maxBytes: 1024 * 1024 }));
+        if (failed || closed || signal.aborted) { ledger.push({ stage: "launch", status: "LATE_ACK_REJECTED", workspace: uuid(ack?.workspace_id) ? ack.workspace_id : null, trusted: false }); throw Error("late workspace ACK rejected"); }
+        ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "workspace", workspace: uuid(ack?.workspace_id) ? ack.workspace_id : null, window: uuid(ack?.window_id) ? ack.window_id : null, trusted: false });
+        if (!uuid(ack?.workspace_id) || ack.window_id !== spec.window) throw Error("fixture workspace ACK unavailable");
+        const membership = await request(endpoints[1], "workspace.list", { window_id: spec.window }, { signal, timeoutMs: 3000, maxBytes: 1024 * 1024 });
+        if (membership?.window_id !== spec.window || !Array.isArray(membership.workspaces) || membership.workspaces.length > 1024 ||
+            membership.workspaces.filter(row => row.id === ack.workspace_id).length !== 1) throw Error("workspace ACK independent window membership unavailable/ambiguous");
+        let event;
+        while (!signal.aborted) {
+          if (fs.existsSync(root + "/d.sock") && fs.existsSync(root + "/ratchet-events.json") && fs.existsSync(root + "/state/daemon.log")) {
+            const bytes = fs.readFileSync(root + "/ratchet-events.json"); if (bytes.length > 16384) throw Error("fixture event limit");
+            try { event = JSON.parse(bytes); } catch { throw Error("fixture event JSON invalid"); }
+            if (event.phase === "idle") break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
         }
-        await new Promise(resolve => setTimeout(resolve, 50));
-      }
-      if (signal.aborted || !event || event.draft !== "" || event.submitted !== "" || event.keys?.length !== 0 || event.submissions?.length !== 0) throw Error("fixture initial ACK unavailable/dirty");
-      if (event.row !== plan.composition.fixture.row || event.workspace !== ack.workspace_id || !uuid(event.surface) ||
-          !same(event.argv, [plan.runtime.node, fixtureIO.tui, event.row, root + "/ratchet-events.json"])) throw Error("fixture event/creation ACK mismatch");
-      ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "fixture", pid: Number.isSafeInteger(event.pid) ? event.pid : null, workspace: event.workspace, surface: event.surface, trusted: false });
-      const fixture = { pid: event.pid, entry: fixtureIO.tui, argv: event.argv.join(" ") };
-      pending.push({ id: "pid:" + fixture.pid, kind: "process", owned: fixture });
-      await bind(ctx, "launch", [daemon, fixture], ack);
-      const surface = owned.find(effect => effect.kind === "surface"); if (surface?.owned.uuid !== event.surface) throw Error("fixture surface independently unbound");
+        if (signal.aborted || !event || event.draft !== "" || event.submitted !== "" || event.keys?.length !== 0 || event.submissions?.length !== 0) throw Error("fixture initial ACK unavailable/dirty");
+        if (event.row !== plan.composition.fixture.row || event.workspace !== ack.workspace_id || !uuid(event.surface) ||
+            !same(event.argv, [plan.runtime.node, fixtureIO.tui, event.row, root + "/ratchet-events.json"])) throw Error("fixture event/creation ACK mismatch");
+        ledger.push({ stage: "launch", status: "ACK_RECEIVED", kind: "fixture", pid: Number.isSafeInteger(event.pid) ? event.pid : null, workspace: event.workspace, surface: event.surface, trusted: false });
+        const fixture = { pid: event.pid, entry: fixtureIO.tui, argv: event.argv.join(" ") };
+        pending.push({ id: "pid:" + fixture.pid, kind: "process", owned: fixture });
+        await bind(ctx, "launch", [daemon, fixture], ack);
+        const surface = owned.find(effect => effect.kind === "surface"); if (surface?.owned.uuid !== event.surface) throw Error("fixture surface independently unbound");
+      } catch (error) { launchError = error; throw error; }
+      finally { try { disarm?.(); } catch (error) { if (!launchError) throw error; ledger.push({ stage: "launch", status: "DISARM_FAILED" }); } }
     },
   };
   return { lifecycle, ...Object.fromEntries(stages.map(name => [name, async ctx => {
