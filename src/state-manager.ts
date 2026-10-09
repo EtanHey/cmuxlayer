@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  renameSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -270,7 +271,7 @@ export class StateManager {
       if (!entry.isDirectory()) continue;
       if (entry.name === agentId) continue;
       const record = this.readStateFromDir(entry.name);
-      if (record?.agent_id === agentId) {
+      if (record?.agent_id === agentId || record?.session_continuity_aliases?.includes(agentId)) {
         return entry.name;
       }
     }
@@ -577,6 +578,9 @@ export class StateManager {
     // resume must not aim at the old one: it falls back to placement rules.
     const updated: AgentRecord = {
       ...current,
+      previous_surface_binding: current.surface_uuid && current.workspace_id && current.surface_observer_id
+        ? { surface_uuid: current.surface_uuid, workspace_id: current.workspace_id, observer_id: current.surface_observer_id }
+        : current.previous_surface_binding,
       surface_id: UNBOUND_SURFACE_REF,
       surface_uuid: null,
       workspace_id: null,
@@ -707,7 +711,21 @@ export class StateManager {
       const record = this.readStateFromDir(entry.name);
       if (record) records.push(record);
     }
-    return records;
+    const retiredIds = new Set(records.flatMap(record => record.session_continuity_aliases ?? []));
+    return records.filter(record => !retiredIds.has(record.agent_id));
+  }
+
+  /** Retire only the discovery state file; inbox, receipts and failed evidence remain. */
+  retireDiscoveryState(agentId: string, managedId: string): void {
+    const managed = this.readState(managedId);
+    if (!agentId.startsWith("auto-") || !managed?.session_continuity_aliases?.includes(agentId)) {
+      throw new Error("Discovery retirement requires a durable managed alias");
+    }
+    const stateFile = this.stateFilePath(agentId);
+    const archive = join(this.baseDir, agentId, "state.continuity-retired.json");
+    if (existsSync(archive)) throw new Error("Discovery retirement evidence already exists");
+    if (existsSync(stateFile)) renameSync(stateFile, archive);
+    this.surfaceSessionIndex.removeAgent(agentId);
   }
 
   removeState(agentId: string): void {

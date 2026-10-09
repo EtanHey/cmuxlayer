@@ -48,6 +48,11 @@ export interface AgentRecord {
   surface_uuid?: string | null;
   /** cmux app/socket instance that is authoritative for surface absence. */
   surface_observer_id?: string | null;
+  /** Scope evidence retained on unbind; never used as a resume destination. */
+  previous_surface_binding?: { surface_uuid: string; workspace_id: string; observer_id: string } | null;
+  /** Retired discovery IDs still route receipts to this managed identity. */
+  session_continuity_aliases?: string[];
+
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;
   /** One automatic move is allowed for this stable surface and registration. */
