@@ -73,10 +73,16 @@ async function execute(p) {
   check(bootstrapPanes.panes.length===1 && bootstrapPanes.panes[0].ref===p.bootstrap.anchorPaneRef && bootstrapSurfaces.surfaces.length===1 && bootstrapSurfaces.surfaces[0].id===p.bootstrap.anchorSurfaceId,'bootstrap anchor changed');
   check(!workspaces.workspaces.some(w=>w.title===c.marker),'case marker already exists; no replay');
   record('pre-case-baseline',{identify,workspaces,current,windows,bootstrapPanes,bootstrapSurfaces,beforeBootstrapFocus:p.beforeBootstrapFocus});
-  windowBudget(c,60000);const created=await rpc('create-case',()=>backend.createWorkspace(c.marker));record('case-creation-ack',created);
+  windowBudget(c,60000);const created=await rpc('create-case',()=>backend.createWorkspace(c.marker));outcome.status='PENDING_UNKNOWN_CASE_IDENTITY';record('case-creation-ack',created);
   const after=await rpc('resolve-case',()=>backend.listWorkspaces());
+  record('case-creation-observation',after);
+  const ack=created?.workspace;
+  check(typeof ack==='string' && ack.trim().length>0,'creation ACK identity missing; retained UNKNOWN, no replay/ownership');
   const matches=after.workspaces.filter(w=>w.title===c.marker && !workspaces.workspaces.some(old=>old.id===w.id));check(matches.length===1,'created case identity ambiguous; retained');
+  const identifies=w=>[w.id,w.ref].filter(Boolean).includes(ack);
+  check(identifies(matches[0]) && after.workspaces.filter(identifies).length===1 && !workspaces.workspaces.some(identifies),'creation ACK does not identify exactly one new case; retained UNKNOWN, no replay/ownership');
   outcome.case={workspaceId:matches[0].id,marker:c.marker};
+  outcome.status='FAIL';
   const panes=await rpc('case-panes',()=>backend.listPanes({workspace:outcome.case.workspaceId}));check(panes.panes.length===1,'one new case anchor required');
   const surfaces=await rpc('case-anchor',()=>backend.listPaneSurfaces({workspace:outcome.case.workspaceId,pane:panes.panes[0].ref}));check(surfaces.surfaces.length===1,'one new case surface required');
   Object.assign(c,{workspaceId:outcome.case.workspaceId,anchorPaneRef:panes.panes[0].ref,anchorSurfaceId:surfaces.surfaces[0].id});validateConfig(c);fresh();windowBudget(c,60000);
@@ -94,7 +100,7 @@ async function execute(p) {
  }catch(error){outcome.error=String(error);}
  finally {
   backend?.disconnect();
-  outcome.restoreProposal={caseWorkspace:outcome.case,bootstrapWorkspace:p.bootstrap,beforeBootstrapFocus:p.beforeBootstrapFocus,runnerResources:'Use independent runner result identities/absence readback; never unknown PID cleanup',sequence:['Verify runner-owned children absent or mark uncertainty','Revalidate/close only created case workspace','Restore current validated pre-bootstrap focus via native executor','Close only bootstrap workspace LAST after foreground jobs confirmed absent'],artifactDeletion:'NOT_AUTHORIZED_Q2_UNANSWERED',overallAcceptance:'REQUIRES_PARENT_READBACK'};
+  outcome.restoreProposal={caseWorkspace:outcome.case,bootstrapWorkspace:p.bootstrap,beforeBootstrapFocus:p.beforeBootstrapFocus,runnerResources:'Use independent runner result identities/absence readback; never unknown PID cleanup',sequence:['Verify runner-owned children absent or mark uncertainty',outcome.case?'Revalidate/close only ACK-bound created case workspace':'Case ownership UNKNOWN; no case closure or creation replay','Restore current validated pre-bootstrap focus via native executor','Close only bootstrap workspace LAST after foreground jobs confirmed absent'],artifactDeletion:'NOT_AUTHORIZED_Q2_UNANSWERED',overallAcceptance:'REQUIRES_PARENT_READBACK'};
   record('result',outcome);console.log(JSON.stringify({status:outcome.status,receipt:join(receipts,'result.json'),overallAcceptance:'UNPROVED'}));
  }
  if(outcome.status==='FAIL' || outcome.runnerExit?.code!==0 || outcome.deadlineExpired)process.exitCode=1;
