@@ -52,6 +52,8 @@ export interface AgentRecord {
   previous_surface_binding?: { surface_uuid: string; workspace_id: string; observer_id: string } | null;
   /** Retired discovery IDs still route receipts to this managed identity. */
   session_continuity_aliases?: string[];
+  /** Durable receipt for explicit, evidence-pinned existing-session adoption. */
+  session_adoption?: { request_sha256: string; evidence_sha256: string; observer_epoch?: string; status: "pending_verify" | "adopted" };
 
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;

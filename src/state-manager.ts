@@ -723,7 +723,7 @@ export class StateManager {
     }
     const stateFile = this.stateFilePath(agentId);
     const archive = join(this.baseDir, agentId, "state.continuity-retired.json");
-    if (existsSync(archive)) throw new Error("Discovery retirement evidence already exists");
+    if (existsSync(stateFile) && existsSync(archive)) throw new Error("Discovery retirement evidence already exists");
     if (existsSync(stateFile)) renameSync(stateFile, archive);
     this.surfaceSessionIndex.removeAgent(agentId);
   }

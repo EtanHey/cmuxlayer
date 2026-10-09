@@ -568,26 +568,21 @@ export function makeSelfRegistrationContinuityResolver(
 export function makeSelfRegistrationSessionLookup(
   options: SelfRegistrationResolverOptions = {},
 ): (sessionId: string) => SelfRegistrationEntry | null {
+  const history = makeSelfRegistrationSessionHistoryLookup(options);
+  return sessionId => history(sessionId)?.at(-1) ?? null;
+}
+
+/** All known exact-session rows, including older process claimants. */
+export function makeSelfRegistrationSessionHistoryLookup(
+  options: SelfRegistrationResolverOptions = {},
+): (sessionId: string) => SelfRegistrationEntry[] | null {
   const registryPath = options.registryPath ?? resolveSessionRegistryPath();
-  const readText = (): string | null => {
+  return sessionId => {
     try {
-      return options.readFile
-        ? options.readFile(registryPath)
-        : readFileSync(registryPath, "utf8");
-    } catch {
-      return null;
-    }
-  };
-  return (sessionId: string): SelfRegistrationEntry | null => {
-    const requested = sessionId.trim().toLowerCase();
-    if (!requested) return null;
-    const text = readText();
-    if (!text) return null;
-    const matches = parseSelfRegistrationLines(text).filter(
-      (entry) => entry.session_id.trim().toLowerCase() === requested,
-    );
-    if (matches.length === 0) return null;
-    return matches.at(-1)!;
+      const text = options.readFile ? options.readFile(registryPath) : readFileSync(registryPath, "utf8");
+      if (text === null) return null;
+      return parseSelfRegistrationLines(text).filter(row => row.session_id.trim().toLowerCase() === sessionId.trim().toLowerCase());
+    } catch { return null; }
   };
 }
 

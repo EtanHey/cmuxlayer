@@ -1,3 +1,4 @@
+import { adoptManagedSession, type AdoptSessionRequest, type AdoptionOptions } from "./session-adoption.js";
 /**
  * AgentEngine — composable internals for agent lifecycle management.
  * These 7 functions are the engine that MCP tools (and later the 2-tool facade) drive.
@@ -370,6 +371,7 @@ export class AgentEngine {
     | ((sessionId: string) => SelfRegistrationSessionEntry | null)
     | null;
   private sessionProcessScanner: SessionProcessScanner;
+  private adoptionOptions?: AdoptionOptions;
   /** The server's discovery, once initialized; resume attributes panes with it. */
   private resumeDiscovery: AgentDiscovery | null = null;
   private resumeInProgress = new Set<string>();
@@ -548,6 +550,7 @@ export class AgentEngine {
       opts?.selfRegistrationSessionResolver ?? null;
     this.selfRegistrationSessionLookup =
       opts?.selfRegistrationSessionLookup ?? null;
+    this.adoptionOptions = opts?.adoptionOptions;
     this.sessionProcessScanner =
       opts?.sessionProcessScanner ?? scanSessionProcesses;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
@@ -3472,6 +3475,15 @@ export class AgentEngine {
       this.surfaceObserverIdProvider(),
       onRpc,
     );
+  }
+
+  async adoptResumedSession(request: AdoptSessionRequest) {
+    return this.runLifecycleMutation(() => adoptManagedSession({
+      registry: this.registry, stateMgr: this.stateMgr, options: this.adoptionOptions,
+      sessionProcessScanner: this.sessionProcessScanner,
+      observe: async () => ({ topology: await this.collectFreshObservedSurfaceTopology(),
+        workspaces: (await this.listAllWorkspaces()).workspaces }),
+    }, request), { label: "adopt-session" });
   }
 
   private collectFreshObservedSurfaceTopology(): Promise<SurfaceTopologySnapshot | null> {
