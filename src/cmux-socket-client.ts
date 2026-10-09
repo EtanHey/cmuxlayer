@@ -36,6 +36,7 @@ import { recordCliFallback } from "./transport-retry-context.js";
 import { listAllWindowWorkspaces } from "./surface-topology.js";
 import { assertCanonicalSurfaceRef } from "./surface-ref.js";
 import { appendDaemonLog, focusRpcLogFields } from "./daemon-log.js";
+type DiagnosticMethod = "system.capabilities" | "system.tree" | "system.top" | "debug.terminals" | "window.list" | "workspace.list" | "pane.list" | "surface.list";
 export { CmuxSocketError } from "./cmux-socket-error.js";
 
 // ── Configuration ──────────────────────────────────────────────────────
@@ -434,12 +435,32 @@ export class CmuxSocketClient {
 
   declare listSurfaceRuntimeMetadata?: () => Promise<{ terminals: CmuxTerminalMetadata[] }>;
 
+  /** Opt-in raw read diagnostics. No CLI fallback/reconnect replay; generation changes invalidate the bracket. */
+  async readCensusDiagnostic(method: DiagnosticMethod, params: Record<string, unknown> = {}): Promise<{ value: unknown; generation: string }> {
+    if (!["system.capabilities", "system.tree", "system.top", "debug.terminals", "window.list", "workspace.list", "pane.list", "surface.list"].includes(method)) {
+      throw new CmuxSocketError("Unsupported census diagnostic", "unsupported_diagnostic");
+    }
+    const transport = this.transport, serial = this.transportSerial;
+    const owned = () => transport === this.transport && serial === this.transportSerial;
+    const changed = () => new CmuxSocketError("Census transport ownership changed", "census_transport_changed");
+    await this.ensureAuthenticated();
+    if (!owned()) throw changed();
+    const generation = transport.currentConnectionGeneration();
+    const value = await transport.call(method, params, { polling: CMUX_POLLING_METHODS.has(method) });
+    // Even an already-settled response is unqualified if ownership changed
+    // before this continuation. Never relabel it with the new connection.
+    const respondingGeneration = transport.currentConnectionGeneration();
+    // A brand-new transport may establish its first connection inside call.
+    // Any later generation advance means the responding epoch is uncertain.
+    if (!owned() || (generation !== respondingGeneration && !(generation === 0 && respondingGeneration === 1))) throw changed();
+    return { value, generation: `${serial}:${respondingGeneration}` };
+  }
+
   async listTerminalMetadata(): Promise<{
     terminals: CmuxTerminalMetadata[];
   }> {
-    // The V2 socket has no debug-terminals RPC. Surface/workspace payloads
-    // already carry the directory fallback used by callers, so do not hide a
-    // CLI subprocess inside an otherwise socket-only observation.
+    // Ordinary callers retain their existing fallback behavior. Census callers
+    // explicitly opt into debug.terminals through readCensusDiagnostic.
     return { terminals: [] };
   }
 
