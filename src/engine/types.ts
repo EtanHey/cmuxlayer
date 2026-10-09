@@ -408,6 +408,7 @@ export interface AgentEngineOptions {
   ) => SelfRegistrationSessionEntry | null;
   /** #926: resume's process-table proof; defaults to a `ps` argv scan. */
   sessionProcessScanner?: SessionProcessScanner;
+  adoptionOptions?: import("../session-adoption.js").AdoptionOptions;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
