@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { userInfo, hostname } from 'node:os';
 
@@ -51,7 +51,7 @@ export function validateConfig(c, now = Date.now()) {
   check(c.root === '/Users/happycampr/Library/Caches/cmuxlayer-firstcase-' + c.runId, 'owned501 run root required');
   check(c.candidate.startsWith('/Users/happycampr/Library/Caches/') && !c.candidate.startsWith(c.root + '/'), 'separate staged candidate required');
   check(c.marker === 'FIRSTCASE_' + c.runId && c.uid === 501 && c.socketIdentity?.uid === 501 && c.appProcess?.uid === 501 && c.appProcess.start && c.appProcess.argv, 'account/run/socket/app binding required');
-  for (const key of ['nodeSha256', 'cmuxSha256', 'runnerSha256']) check(/^[a-f0-9]{64}$/.test(c[key] ?? ''), 'pinned executable hash required: ' + key);
+  for (const key of ['nodeSha256', 'cmuxSha256', 'runnerSha256', 'proxyRunnerSha256']) check(/^[a-f0-9]{64}$/.test(c[key] ?? ''), 'pinned executable hash required: ' + key);
   const begin = Date.parse(c.notBeforeUTC), end = Date.parse(c.mutationEndUTC), deadline = Date.parse(c.deadlineUTC);
   check(Number.isFinite(begin) && now >= begin && now < end && deadline - end >= 60000, 'current mutation window with cleanup reserve required');
   return c;
@@ -166,6 +166,8 @@ async function native(c) {
   windowBudget(c, 60000);
   check(process.platform === 'darwin' && process.arch === 'arm64' && hostname() === c.host && process.getuid() === 501 && fs.lstatSync('/dev/console').uid === 501 && userInfo().homedir === '/Users/happycampr', 'M1 normal account identity mismatch');
   check(hash(self) === c.runnerSha256 && hash(c.node) === c.nodeSha256 && hash(c.cmux) === c.cmuxSha256, 'runner/node/cmux bytes changed');
+  const strictProxy = join(dirname(self), 'original-roots-first-case.proxy.mjs');
+  check(hash(strictProxy) === c.proxyRunnerSha256, 'strict private proxy bytes changed');
   const identity = verifyCandidate(c.candidate, c.manifestPath);
   const socketCheck = () => {
     const s = fs.lstatSync(c.socket);
@@ -197,7 +199,7 @@ async function native(c) {
     const repo = join(c.root, 'firstcase');
     const env = { HOME: join(c.root, 'home'), PATH: join(c.root, 'bin') + ':/usr/bin:/bin',
       CMUX_SOCKET_PATH: c.socket, CMUX_ALLOW_SOCKET_OVERRIDE: '1', CMUX_BUNDLED_CLI_PATH: c.cmux,
-      CMUXLAYER_DAEMON_SOCKET: join(c.root, 'd.sock'), CMUXLAYER_STATE_DIR: join(c.root, 'state'),
+      CMUXLAYER_DAEMON_SOCKET: join(c.root, 'd.sock'), CMUXLAYER_STATE_DIR: join(c.root, 'state'), CMUXLAYER_FIRSTCASE_ROOT: c.root,
       CMUXLAYER_INBOX_BASE_DIR: join(c.root, 'inbox'), CMUXLAYER_HARNESS_HOME: join(c.root, 'home'),
       CODEX_HOME: join(c.root, 'home/.codex'), CLAUDE_CONFIG_DIR: join(c.root, 'home/.claude'),
       CMUXLAYER_CONFIG_FILE: join(c.root, 'no-config'), CMUXLAYER_FLEET_CONFIG: join(c.root, 'fleet.json'),
@@ -225,13 +227,15 @@ async function native(c) {
     const require = createRequire(join(c.candidate, 'package.json'));
     const { Client } = await import(pathToFileURL(require.resolve('@modelcontextprotocol/sdk/client/index.js')));
     const { StdioClientTransport } = await import(pathToFileURL(require.resolve('@modelcontextprotocol/sdk/client/stdio.js')));
+    check(daemonIdentity && daemon.exitCode === null && sameProcess(daemonIdentity, processIdentity(daemon.pid)), 'private daemon missing before proxy; no fallback');
+    check(fs.lstatSync(env.CMUXLAYER_DAEMON_SOCKET).isSocket(), 'private daemon endpoint missing before proxy');
     client = new Client({ name: 'original-roots-first-case', version: '1' });
-    transport = new StdioClientTransport({ command: c.node, args: [join(c.candidate, 'dist/index.js')], env });
+    transport = new StdioClientTransport({ command: c.node, args: [strictProxy], env });
     guard(); windowBudget(c, 5000);
     const connected = withinWindow(c, 'proxy-connect', options => client.connect(transport, options), retainUnknown, 5000).then(() => null, error => error);
     await until(() => transport.pid, Math.min(Date.now() + 5000, Date.parse(c.mutationEndUTC)));
-    receipt.proxy_creation_ack = { pid: transport.pid, argv: [c.node, join(c.candidate, 'dist/index.js')] };
-    proxyIdentity = identityFor(transport.pid, c.node + ' ' + join(c.candidate, 'dist/index.js')); record('proxy-identity', proxyIdentity);
+    receipt.proxy_creation_ack = { pid: transport.pid, argv: [c.node, strictProxy] };
+    proxyIdentity = identityFor(transport.pid, c.node + ' ' + strictProxy); record('proxy-identity', proxyIdentity);
     const connectFailure = await connected; if (connectFailure) throw connectFailure;
     const call = async (name, args) => {
       guard(); const raw = await withinWindow(c, 'request-' + (receipt.requests.length + 1) + '-' + name,

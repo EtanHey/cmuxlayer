@@ -16,7 +16,7 @@ const cfg = { executionApproved: true, coordinationReceipt: { status: 'ACCEPTED'
   node: '/opt/homebrew/bin/node', cmux: '/Applications/cmux.app/Contents/Resources/bin/cmux', socket: '/tmp/observed.sock',
   host: 'synthetic', uid: 501, socketIdentity: { uid: 501, dev: 1, ino: 2 },
   appProcess: { pid: 44, uid: 501, start: 'start-A', executable: '/Applications/cmux.app/Contents/MacOS/cmux', argv: 'observed-app' },
-  nodeSha256: 'a'.repeat(64), cmuxSha256: 'b'.repeat(64), runnerSha256: 'c'.repeat(64),
+  nodeSha256: 'a'.repeat(64), cmuxSha256: 'b'.repeat(64), runnerSha256: 'c'.repeat(64), proxyRunnerSha256: 'd'.repeat(64),
   notBeforeUTC: stamp(-1000), mutationEndUTC: stamp(10000), deadlineUTC: stamp(70000) };
 test('future execution requires approved current identity/window', () => assert.equal(validateConfig(cfg, now), cfg));
 for (const [name, patch] of Object.entries({ noApproval: { executionApproved: false }, expired: { mutationEndUTC: stamp(-1) },
