@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { validateConfig, parseLaunchArgs, assertCaseEvidence, sameProcess, verifyCandidate, HEAD, TREE } from './original-roots-first-case.mjs';
+import { validateConfig, parseLaunchArgs, assertCaseEvidence as caseEvidence, sameProcess, verifyCandidate, HEAD, TREE } from './original-roots-first-case.mjs';
 const [candidate, manifest] = process.argv.slice(2);
 assert(candidate && manifest, 'exact original candidate and manifest required');
 let count = 0;
@@ -31,6 +31,8 @@ for (const args of [['--resume', id], ['-w', '/Users/happycampr/Gits/user'], ['-
 }
 const boot = { ok: true, agent_id: 'firstcaseCodex-test', contract_path: root + '/inbox/test/contract.md', surface_id: 'surface:2', surface_uuid: id,
   coordination_footer_delivered: true, boot_prompt_receipt: { delivery_id: id, submit_verified: true }, worktree: { path: cwd } };
+const completion = { ok: true, delivery_id: id, terminal: true, submitted: true, submit_verified: true, delivery_state: 'submitted' };
+const assertCaseEvidence = (...args) => caseEvidence(...args, completion);
 const expected = cfg.marker + ' ; cmuxlayer contract for ' + boot.agent_id + ': Read and follow ' + boot.contract_path;
 const event = { submissions: [expected], draft: '', keys: ['Return'] };
 const panes = { panes: [{ ref: 'pane:1', index: 0, surface_refs: ['surface:1'] }, { ref: 'pane:2', index: 1, surface_refs: ['surface:2'] }] };
