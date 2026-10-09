@@ -390,13 +390,16 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
   }): AgentDeliveryReceipt | null {
+    // Resolve both sides; receipt IDs/ownership and uncertain delivery stay intact.
+    const identity = (id: string) => this.registry.get(id)?.agent_id ?? this.stateMgr.readState(id)?.agent_id ?? id;
+    const requestedIdentity = identity(input.agent_id);
     for (const receipt of this.deliveryReceipts.values()) {
       if (
         (receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued" ||
           receipt.delivery_state === "steer_pending" ||
           receipt.delivery_state === "queued_followup") &&
-        receipt.agent_id === input.agent_id &&
+        identity(receipt.agent_id) === requestedIdentity &&
         receipt.text === input.text &&
         receipt.press_enter === input.press_enter
       ) {
