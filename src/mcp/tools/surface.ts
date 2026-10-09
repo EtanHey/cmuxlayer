@@ -26,7 +26,8 @@ import type { CmuxLayerClient, CmuxServerContext } from "../context.js";
 import type { ToolHandlerRegistry } from "../registration.js";
 import type { StopAgentCallArgs } from "./stop.js";
 import { ANNOTATIONS } from "../schemas.js";
-import { type ToolReturn, err, okFormatted, readErrorText } from "../tool-result.js";
+import { AdoptSessionSchema } from "../../session-adoption.js";
+import { type ToolReturn, err, ok, okFormatted, readErrorText } from "../tool-result.js";
 
 // Only the internal scope=agent close delegate can request this teardown path.
 // A remote JSON tool caller cannot supply a symbol property.
@@ -785,9 +786,18 @@ export function registerUpdateSurfaceTool(
 ): void {
   server.tool(
     "update_surface",
-    "Move or rename one terminal surface.",
+    "Move or rename a surface, or adopt_session to rebind an existing managed Codex identity using pinned historical evidence and fresh process/topology proof. Adoption changes no pane or input; layout reconciliation follows separately.",
     {
-      action: z.enum(["move", "rename"]),
+      action: z.enum(["move", "rename", "adopt_session"]),
+      managed_agent_id: AdoptSessionSchema.shape.managed_agent_id.optional(),
+      session_id: AdoptSessionSchema.shape.session_id.optional(),
+      expected_agent_version: AdoptSessionSchema.shape.expected_agent_version.optional(),
+      observer_transition: AdoptSessionSchema.shape.observer_transition.optional(),
+      binding_evidence_path: AdoptSessionSchema.shape.binding_evidence_path.optional(),
+      binding_evidence_sha256: AdoptSessionSchema.shape.binding_evidence_sha256.optional(),
+      role: z.never().optional(), authority: z.never().optional(), placement: z.never().optional(),
+      model: z.never().optional(), parent_agent_id: z.never().optional(), collab_path: z.never().optional(),
+      cwd: z.never().optional(), launch_cwd: z.never().optional(),
       surface: z.string(),
       workspace: z.string().optional(),
       pane: z.string().optional(),
@@ -801,6 +811,23 @@ export function registerUpdateSurfaceTool(
     ANNOTATIONS.mutating,
     async (args) => {
       try {
+        if (args.action === "adopt_session") {
+          if ([args.pane, args.before, args.after, args.index, args.focus, args.title].some(value => value !== undefined) || args.preserve_prefix ||
+              [args.role, args.authority, args.placement, args.model, args.parent_agent_id, args.collab_path, args.cwd, args.launch_cwd].some(value => value !== undefined)) {
+            throw new Error("adopt_session does not accept pane actions or metadata overrides");
+          }
+          const request = AdoptSessionSchema.parse({ surface: args.surface, workspace: args.workspace,
+            managed_agent_id: args.managed_agent_id, session_id: args.session_id,
+            expected_agent_version: args.expected_agent_version, observer_transition: args.observer_transition,
+            binding_evidence_path: args.binding_evidence_path, binding_evidence_sha256: args.binding_evidence_sha256 });
+          const engine = deps.context.lifecycleSweepEngine;
+          if (!engine || deps.context.lifecycleStartError) throw new Error("Managed lifecycle is unavailable; adoption refused");
+          const result = await engine.adoptResumedSession(request);
+          if (result.status === "pending_verify") {
+            return err(result.error, { action: args.action, ...result });
+          }
+          return ok({ action: args.action, ...result });
+        }
         if (args.action === "rename" && !args.title) {
           throw new Error("update_surface action=rename requires title");
         }

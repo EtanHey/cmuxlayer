@@ -135,8 +135,21 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `wait_for` | Wait for one `agent_id` or several `ids` (defaults to `done`) |
 | `control_health` | Report socket, binary, process, and job-control diagnostics |
 | `close_surface` | Close one surface, managed agent, or workspace, with live-agent guards |
-| `update_surface` | Move or rename one terminal surface |
+| `update_surface` | Move or rename a surface; explicitly adopt an existing managed session with pinned evidence |
 | `list_surfaces` | List all surfaces across workspaces |
+
+`update_surface` with `action: "adopt_session"` requires the current stable surface and workspace UUIDs,
+`managed_agent_id`, the same recorded `session_id`, `expected_agent_version`, an `observer_transition`
+with explicit `historical_owner_id` and `current_owner_id`, and an absolute `binding_evidence_path`
+plus its `binding_evidence_sha256`. The selected historical witness must establish the original
+binding and explicit authority. Fresh complete topology, exact hook registration, qualified PID,
+and direct process cwd must agree; ambiguous or competing known claimants refuse adoption.
+Authority and coordination fields remain those of the original managed record. Adoption sends no
+input and moves no panes; normal layout reconciliation follows separately. An interrupted write
+returns `pending_verify`; an unchanged exact repeat revalidates binding, process, observer and routing
+before completing persistence. A lifecycle-invalidated binding requires a fresh explicitly versioned
+request. A public
+`action: "move"` alone does not write a placement override or recover managed session identity.
 
 `control_health` reports `cmux_fds` for detected cmux.app processes and warns when open descriptors reach 4096; set `CMUXLAYER_CMUX_FD_WARN` to a positive integer to change that threshold.
 
