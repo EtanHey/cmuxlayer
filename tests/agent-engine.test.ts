@@ -22,7 +22,6 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseScreen } from "../src/screen-parser.js";
-import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
   AgentEngine,
@@ -57,6 +56,7 @@ import { dispatch, readInbox, writeHeartbeat } from "../src/inbox.js";
 import { readWatchRegistry } from "../src/watch-spec.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
 import { persistProductionProcessRecord } from "./helpers/production-process-record.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import type { SurfaceTopologySnapshot } from "../src/surface-topology.js";
 
 const TEST_DIR = join(tmpdir(), "cmux-agents-test-engine");
@@ -310,8 +310,14 @@ describe("AgentEngine", () => {
       },
     );
     const surfaceProvider = async () => liveSurfaces;
+    Object.assign(mockClient, {
+      withSurfaceWrite: async <T>(surface: string, run: (sendKey: (key: string) => Promise<void>) => Promise<T>, opts: { workspace?: string }) =>
+        run(key => mockClient.sendKey(surface, key, { workspace: opts.workspace })),
+    });
     const registry = new AgentRegistry(stateMgr, surfaceProvider);
     engine = new AgentEngine(stateMgr, registry, mockClient, {
+      // #926: `node:child_process` is mocked here; no process carries a session.
+      sessionProcessScanner: async () => [],
       spawnPreflight: async () => {},
       sessionIdentityResolver: () => null,
       inboxOpts: { baseDir: TEST_DIR },
@@ -439,7 +445,7 @@ describe("AgentEngine", () => {
           await guardedEngine.spawnAgent({
             repo: "brainlayer",
             model: "codex",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             prompt: "Fix gap F",
             workspace: "workspace:brainlayer",
           });
@@ -471,17 +477,17 @@ describe("AgentEngine", () => {
       );
     });
 
-    it("raises the open-file soft limit in the managed seat shell before its launcher", async () => {
+    it("sends the launcher without a nofile or role prelude", async () => {
       await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Verify seat file-descriptor budget",
       });
       const command = (mockClient.send as ReturnType<typeof vi.fn>).mock.calls
         .map((call) => String(call[1] ?? ""))
         .find((text) => text.includes("brainlayerCodex"));
-      expect(command).toMatch(/ulimit -Sn/);
-      expect(command).toMatch(/brainlayerCodex -s/);
+      expect(command).toMatch(/brainlayerCodex -s --worker/);
+      expect(command).not.toMatch(/ulimit|GOLEM_ROLE/);
     });
 
     it("refuses created-surface focus when the observer changes before focus mutation", async () => {
@@ -514,7 +520,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not focus across an observer epoch",
           workspace: "ws:1",
         }),
@@ -552,6 +558,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "Verify authoritative role",
           ...(role ? { role } : {}),
         });
@@ -578,12 +585,12 @@ describe("AgentEngine", () => {
 
       const first = await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "First worker",
       });
       const second = await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Second worker",
       });
 
@@ -630,7 +637,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: parent.agent_id,
         }),
@@ -665,7 +672,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: parent.agent_id,
         }),
@@ -698,7 +705,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         }),
       ).rejects.toThrow(/waiting for agent launch readiness/);
@@ -718,7 +725,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -743,7 +750,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
 
@@ -782,7 +789,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
 
@@ -814,7 +821,7 @@ describe("AgentEngine", () => {
         const result = await engine.spawnAgent({
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
         });
         liveSurfaces = [
@@ -851,7 +858,7 @@ describe("AgentEngine", () => {
       ).mock.calls[0];
       expect(surface).toBe("surface:new");
       expect(opts).toEqual({ workspace: "ws:1" });
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("brainlayerClaude -s -S"));
+      expect(launchCmd).toBe("brainlayerClaude -s --worker -S");
     });
 
     it("launches with the launcher name resolved by preflight", async () => {
@@ -873,7 +880,7 @@ describe("AgentEngine", () => {
 
       const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(launchCmd).toBe(withRaisedNofileSoftLimit("GOLEM_ROLE=worker agenthtmlhostCursor -s"));
+      expect(launchCmd).toBe("agenthtmlhostCursor -s --worker");
       const state = resolvingEngine.getAgentState(result.agent_id);
       expect(state?.launcher_name).toBe("agenthtmlhostCursor");
       expect(state?.launch_cwd).toBe("/home/test-user/Gits/agent-html-host");
@@ -910,7 +917,7 @@ describe("AgentEngine", () => {
 
       const result = await engine.spawnAgent({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix seat identity",
       });
 
@@ -948,7 +955,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Must not occupy the wrong seat",
         }),
       ).rejects.toThrow(/Spawn blocked by seat identity mismatch.*cmuxlayer/i);
@@ -983,7 +990,7 @@ describe("AgentEngine", () => {
 
       const result = await engine.spawnAgent({
         repo: "orchestrator",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Coordinate fleet",
       });
 
@@ -1032,16 +1039,16 @@ describe("AgentEngine", () => {
       });
     });
 
-    it("persists the live launcher default effort for Codex", async () => {
+    it("persists the explicitly chosen effort for Codex", async () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
-        prompt: "Track the launcher default",
+        cli: "codex", effort: "medium",
+        prompt: "Track the chosen effort",
       });
 
       expect(stateMgr.readState(result.agent_id)).toMatchObject({
-        effort: "high",
+        effort: "medium",
       });
     });
 
@@ -1054,7 +1061,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail before durable binding",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1092,7 +1099,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail after surface renumbering",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1138,7 +1145,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail before mutable close",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1184,7 +1191,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail after the close gate",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1229,7 +1236,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fail with unprovable surface binding",
         }),
       ).rejects.toThrow("state disk unavailable");
@@ -1252,7 +1259,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Retain durable binding",
         }),
       ).rejects.toThrow("post-commit telemetry failed");
@@ -1354,7 +1361,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -1392,7 +1399,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "workspace:red-team",
       });
@@ -1446,7 +1453,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix placement",
           workspace: "workspace:intended",
         }),
@@ -1462,7 +1469,7 @@ describe("AgentEngine", () => {
       expect(mockClient.renameTab).not.toHaveBeenCalled();
       expect(mockClient.send).not.toHaveBeenCalled();
       await expect(engine.spawnAgent({
-        repo: "brainlayer", model: "gpt-5.4", cli: "codex",
+        repo: "brainlayer", model: "gpt-5.4", cli: "codex", effort: "medium",
         prompt: "Retry placement", workspace: "workspace:intended",
         boot_prompt_timeout_ms: 100,
       })).rejects.toThrow("Spawn placement blocked");
@@ -1516,7 +1523,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "voicelayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix prompt delivery",
       });
 
@@ -1586,7 +1593,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
         cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
@@ -1734,7 +1741,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Implement delegated task",
         parent_agent_id: parent.agent_id,
       });
@@ -1811,7 +1818,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "voicelayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the voice worker",
         parent_agent_id: parent.agent_id,
       });
@@ -1882,7 +1889,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Implement delegated task",
           parent_agent_id: parent.agent_id,
         }),
@@ -1943,7 +1950,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix the watcher",
         parent_agent_id: "parent-claude",
         cwd: "/home/test-user/Gits/brainlayer.wt/watcher-fix",
@@ -2063,7 +2070,7 @@ describe("AgentEngine", () => {
       await Promise.all([
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           model: "gpt-5.4",
           prompt: "First worker",
           role: "worker",
@@ -2073,7 +2080,7 @@ describe("AgentEngine", () => {
         }),
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           model: "gpt-5.4",
           prompt: "Second worker",
           role: "worker",
@@ -2119,7 +2126,7 @@ describe("AgentEngine", () => {
         type: "terminal",
       });
       await expect(engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: 100,
       })).rejects.toThrow(/timed out.*split|split.*timed out/i);
@@ -2153,7 +2160,7 @@ describe("AgentEngine", () => {
 
       await expect(engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Second worker",
         role: "worker",
@@ -2199,7 +2206,7 @@ describe("AgentEngine", () => {
 
       await engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Replacement worker",
         role: "worker",
@@ -2245,7 +2252,7 @@ describe("AgentEngine", () => {
       });
       const spawn = () => engine.spawnAgent({
         repo: "brainlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         model: "gpt-5.4",
         prompt: "Worker",
         role: "worker",
@@ -2300,7 +2307,7 @@ describe("AgentEngine", () => {
         }),
       );
       const spawn = () => engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: 100,
       });
@@ -2383,7 +2390,7 @@ describe("AgentEngine", () => {
           title: "", type: "terminal" };
       });
       const spawn = (timeout = 100) => engine.spawnAgent({
-        repo: "brainlayer", cli: "codex", model: "gpt-5.4",
+        repo: "brainlayer", cli: "codex", effort: "medium", model: "gpt-5.4",
         prompt: "Worker", role: "worker", placement: "right",
         workspace, boot_prompt_timeout_ms: timeout,
       });
@@ -2448,7 +2455,7 @@ describe("AgentEngine", () => {
           surfaces: pane === "pane:lead" ? [makeSurface("surface:lead")] : [] }),
       );
       exposeWorkerColumnAfterSplit(mockClient);
-      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 500 });
 
@@ -2534,7 +2541,7 @@ describe("AgentEngine", () => {
         title: "", type: "terminal",
       }));
       const spawn = (timeout: number) => engine.spawnAgent({ repo: "brainlayer",
-        cli: "codex", model: "gpt-5.4", prompt: "Worker", role: "worker",
+        cli: "codex", effort: "medium", model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: timeout });
 
       const first = spawn(100);
@@ -2613,7 +2620,7 @@ describe("AgentEngine", () => {
             workspace, surface: "surface:adopted", pane: "pane:worker",
             title: "", type: "terminal",
           });
-          const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+          const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
             model: "gpt-5.4", prompt: "Worker", role: "worker",
             placement: "right", workspace, boot_prompt_timeout_ms: timeoutMs });
 
@@ -2668,7 +2675,7 @@ describe("AgentEngine", () => {
           return { workspace, surface: "surface:worker", pane: "pane:worker",
             title: "", type: "terminal" };
         });
-      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = () => engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 100 });
       await expect(spawn()).rejects.toThrow("pane not found");
@@ -2710,7 +2717,7 @@ describe("AgentEngine", () => {
       (mockClient.newSurface as ReturnType<typeof vi.fn>).mockImplementation(
         () => new Promise<CmuxNewSplitResult>((resolve) => { release = resolve; started(); }),
       );
-      const spawn = engine.spawnAgent({ repo: "brainlayer", cli: "codex",
+      const spawn = engine.spawnAgent({ repo: "brainlayer", cli: "codex", effort: "medium",
         model: "gpt-5.4", prompt: "Worker", role: "worker",
         placement: "right", workspace, boot_prompt_timeout_ms: 100 });
       await called;
@@ -2759,7 +2766,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -2816,7 +2823,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -2844,7 +2851,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2868,7 +2875,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2877,7 +2884,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           workspace: "ws:1",
         }),
@@ -2945,7 +2952,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3163,7 +3170,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not place against a subset",
           workspace: "ws:1",
         }),
@@ -3218,7 +3225,7 @@ describe("AgentEngine", () => {
         await expect(
           engine.spawnAgent({
             repo: "brainlayer",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             prompt: "Do not place against ambiguous identity",
             workspace: "ws:1",
           }),
@@ -3270,7 +3277,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix observer-safe placement",
           workspace: "ws:1",
         }),
@@ -3325,7 +3332,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not cross a reconnect generation",
           workspace: "ws:1",
         }),
@@ -3395,7 +3402,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not launch across an observer epoch",
           workspace: "ws:1",
         }),
@@ -3512,7 +3519,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Clean a tab created across reconnect",
           workspace: "ws:1",
         }),
@@ -3567,7 +3574,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Refuse a blind fallback split",
           workspace: "ws:1",
         }),
@@ -3631,7 +3638,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Refuse placement into a third-column workspace",
           workspace: "ws:1",
         }),
@@ -3666,7 +3673,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Do not launch after observer replacement",
           workspace: "ws:1",
         }),
@@ -3728,7 +3735,7 @@ describe("AgentEngine", () => {
       await expect(
         engine.spawnAgent({
           repo: "brainlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Guard launch readiness",
           workspace: "ws:1",
         }),
@@ -3786,7 +3793,7 @@ describe("AgentEngine", () => {
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -3840,7 +3847,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3889,7 +3896,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -3969,7 +3976,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
         workspace: "ws:1",
       });
@@ -4009,7 +4016,7 @@ describe("AgentEngine", () => {
         engine.spawnAgent({
           repo: "brainlayer",
           model: "gpt-5.4",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Fix gap F",
           parent_agent_id: "parent-unknown",
         }),
@@ -4071,7 +4078,7 @@ describe("AgentEngine", () => {
       await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Implement delegated task",
         workspace: "ws:1",
         parent_agent_id: "ic-1",
@@ -4814,6 +4821,7 @@ describe("AgentEngine", () => {
         makeRecord({
           agent_id: "agent-stable-resume",
           state: "done",
+          pid: DEAD_PID,
           surface_id: "surface:old",
           workspace_id: "ws:1",
           repo: "brainlayer",
@@ -4825,18 +4833,59 @@ describe("AgentEngine", () => {
       harnessHome.give("codex", "019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
       await engine.getRegistry().reconstitute();
 
+      // #926: a conclusive topology (the old pane is gone) is part of the proof.
+      liveSurfaces = [makeSurface("surface:witness")];
       const resumed = await engine.resumeAgent("agent-stable-resume");
 
       expect(resumed.agent_id).toBe("agent-stable-resume");
       expect(resumed.surface_id).toBe("surface:new");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        withRaisedNofileSoftLimit("brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e"),
+        "brainlayerCodex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
       expect(engine.getAgentState("agent-stable-resume")?.state).toBe(
         "booting",
       );
+    });
+
+    it.each([
+      { metadata: true, focus: undefined, expected: false },
+      { metadata: true, focus: false, expected: false },
+      { metadata: true, focus: true, expected: true },
+      { metadata: false, focus: undefined, expected: true },
+      { metadata: false, focus: false, expected: false },
+      { metadata: false, focus: true, expected: true },
+    ])("resume focus policy metadata=$metadata focus=$focus", async ({ metadata, focus, expected }) => {
+      Object.assign(mockClient, { supportsSurfaceRuntimeMetadata: metadata });
+      const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-focus-resume",
+        state: "done",
+        pid: DEAD_PID,
+        surface_id: "surface:old",
+        workspace_id: "ws:1",
+        repo: "brainlayer",
+        cli: "codex",
+        cli_session_id: sessionId,
+        launcher_name: "brainlayerCodex",
+      }));
+      harnessHome.give("codex", sessionId);
+      await engine.getRegistry().reconstitute();
+      liveSurfaces = [makeSurface("surface:witness")];
+
+      const result = await engine.resumeAgent("agent-focus-resume", { focus });
+
+      expect(result.surface_id).toBe("surface:new");
+      expect(engine.getAgentState(result.agent_id)?.state).toBe("booting");
+      expect(mockClient.focusSurface).toHaveBeenCalledTimes(expected ? 1 : 0);
+      expect(mockClient.selectWorkspace).toHaveBeenCalledTimes(expected ? 1 : 0);
+      const creationOptions = [
+        ...(mockClient.newSurface as ReturnType<typeof vi.fn>).mock.calls.map(([opts]) => opts),
+        ...(mockClient.newSplit as ReturnType<typeof vi.fn>).mock.calls.map(([, opts]) => opts),
+      ];
+      expect(creationOptions).toEqual([expect.objectContaining({ focus: expected })]);
+      expect(mockClient.send).toHaveBeenCalledWith("surface:new", expect.stringContaining(`resume ${sessionId}`), { workspace: "ws:1" });
     });
 
     it("P0 D2 refuses explicit resume when the recorded pid is still alive", async () => {
@@ -4967,6 +5016,7 @@ describe("AgentEngine", () => {
         makeRecord({
           agent_id: "agent-stable-resume-raw",
           state: "done",
+          pid: DEAD_PID,
           surface_id: "surface:old-raw",
           workspace_id: "ws:1",
           repo: "brainlayer",
@@ -4979,12 +5029,14 @@ describe("AgentEngine", () => {
       harnessHome.give("claude", "019d9aa5-93c0-7a52-9c47-9be1f7625f3e");
       await engine.getRegistry().reconstitute();
 
+      // #926: a conclusive topology (the old pane is gone) is part of the proof.
+      liveSurfaces = [makeSurface("surface:witness")];
       const resumed = await engine.resumeAgent("agent-stable-resume-raw");
 
       expect(resumed.agent_id).toBe("agent-stable-resume-raw");
       expect(mockClient.send).toHaveBeenCalledWith(
         "surface:new",
-        withRaisedNofileSoftLimit("cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e"),
+        "cd '/srv/repos/brainlayer' && MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions --resume 019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
         { workspace: "ws:1" },
       );
     });
@@ -5222,7 +5274,7 @@ describe("AgentEngine", () => {
 
     it("guard for #629: the switched-model pane parses to terra and mismatches the spark pin", () => {
       const parsed = parseScreen(TERRA_CODEX_SCREEN).model;
-      expect(parsed).toBe("gpt-5.6-terra medium");
+      expect(parsed).toBe("gpt-5.6-terra");
       expect(computeModelMismatch("gpt-5.3-codex-spark", parsed)).toBe(true);
     });
 
@@ -5763,7 +5815,7 @@ Session ID: ${sessionId}`,
       const pending = engine.spawnAgent({
         repo: "cmuxlayer",
         model: "gpt-5.6-sol",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Capture Codex registration",
       });
       await vi.advanceTimersByTimeAsync(60);
@@ -5791,7 +5843,7 @@ Session ID: ${sessionId}`,
       const pending = engine.spawnAgent({
         repo: "cmuxlayer",
         model: "gpt-5.6-sol",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Return after the bounded registration window",
       });
       await vi.advanceTimersByTimeAsync(100);
@@ -5821,7 +5873,7 @@ Session ID: ${sessionId}`,
         .spawnAgent({
           repo: "cmuxlayer",
           model: "gpt-5.6-sol",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "Use the product timeout",
         })
         .then((result) => {
@@ -6197,7 +6249,7 @@ Session ID: ${sessionId}`,
       const result = await engine.spawnAgent({
         repo: "brainlayer",
         model: "gpt-5.4",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "Fix gap F",
       });
 
@@ -7059,7 +7111,7 @@ Session ID: ${sessionId}`,
       const spawned = await engine.spawnAgent({
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
         cwd: process.cwd(),
       });
@@ -7469,6 +7521,48 @@ Session ID: ${sessionId}`,
       }));
     }
 
+    function registerSelfRegistered(overrides: Partial<AgentRecord>): AgentRecord {
+      const record = makeRecord({
+        agent_id: "self-registered",
+        surface_id: "surface:self-registered",
+        surface_uuid: "11111111-2222-4333-8444-555555555555",
+        workspace_id: "ws:placement",
+        state: "working", role: "worker", cli_session_id: "session-self",
+        surface_provenance: "unknown",
+        ...overrides,
+      });
+      stateMgr.writeState(record);
+      engine.getRegistry().set(record.agent_id, record);
+      (engine as any).selfRegistrationSessionResolver = () => ({
+        session_id: record.cli_session_id, path: null,
+      });
+      return record;
+    }
+
+    it("does not repeat a move when final marker persistence fails", async () => {
+      const record = registerSelfRegistered({
+        agent_id: "registration-marker-failure",
+        surface_id: "surface:registration-marker-failure",
+        cli_session_id: "session-marker-failure",
+      });
+      installTwoColumnTopology(record);
+      const updateRecord = stateMgr.updateRecord.bind(stateMgr);
+      const updateSpy = vi.spyOn(stateMgr, "updateRecord").mockImplementation((id, patch) => {
+        if ("placement_reconciled_registration" in patch) throw new Error("disk write failed");
+        return updateRecord(id, patch);
+      });
+      try {
+        await engine.reconcileRolePlacements("idle");
+      } finally {
+        updateSpy.mockRestore();
+      }
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+      expect(stateMgr.readState(record.agent_id)?.placement_move_attempted_registration)
+        .toContain("session-marker-failure");
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+    });
+
     it("never moves an unknown-provenance operator pane", async () => {
       const record = makeRecord({
         agent_id: "operator-worker",
@@ -7485,6 +7579,137 @@ Session ID: ${sessionId}`,
 
       await engine.runSweep();
 
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+    });
+
+    it.each(["unknown", undefined] as const)(
+      "moves a self-registered worker right only once per registration (%s)",
+      async (surfaceProvenance) => {
+        const record = registerSelfRegistered({
+          agent_id: "registered-worker",
+          surface_id: "surface:registered-worker",
+          cli_session_id: "session-worker",
+          surface_provenance: surfaceProvenance,
+        });
+        installTwoColumnTopology(record);
+        await engine.reconcileRolePlacements("idle");
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+        expect(mockClient.moveSurface).toHaveBeenCalledWith(
+          expect.objectContaining({
+            surface: record.surface_id,
+            pane: "pane:right",
+            workspace: record.workspace_id,
+            stableSurfaceIdentity: record.surface_uuid,
+          }),
+        );
+        await engine.reconcileRolePlacements("idle");
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(1);
+        expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
+      },
+    );
+
+    it("leaves a self-registered lead in a single-pane workspace", async () => {
+      const record = registerSelfRegistered({
+        agent_id: "registered-lead",
+        surface_id: "surface:registered-lead",
+        role: "orchestrator",
+        cli_session_id: "session-lead",
+      });
+      liveSurfaces = [{
+        ...makeSurface(record.surface_id),
+        id: record.surface_uuid ?? undefined,
+        workspace_ref: record.workspace_id ?? undefined,
+      }];
+
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(stateMgr.readState(record.agent_id)?.placement_reconciled_registration)
+        .toContain("session-lead");
+      const other = { ...makeSurface("surface:other-lead"),
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        workspace_ref: "ws:placement" };
+      liveSurfaces.push(other);
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement", window_ref: "window:placement",
+        panes: [
+          { ref: "pane:left", index: 0, focused: false, surface_count: 1,
+            surface_refs: [other.ref], surface_ids: [other.id], pixel_frame: leftFrame },
+          { ref: "pane:right", index: 1, focused: true, surface_count: 1,
+            surface_refs: [record.surface_id], surface_ids: [record.surface_uuid], pixel_frame: rightFrame },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>)
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", window_ref: "window:placement",
+          pane_ref: pane, surfaces: pane === "pane:left" ? [other] : [liveSurfaces[0]],
+        }));
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(stateMgr.readState(record.agent_id)?.placement_override).toBe(true);
+    });
+
+    it("appends a self-registered lead after existing lead surfaces", async () => {
+      const record = registerSelfRegistered({
+        agent_id: "registered-lead-right",
+        surface_id: "surface:registered-lead-right",
+        role: "orchestrator",
+        cli_session_id: "session-lead-right",
+      });
+      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const lead = { ...makeSurface("surface:existing-lead"), id: leadUuid,
+        workspace_ref: "ws:placement" };
+      const source = { ...makeSurface(record.surface_id),
+        id: record.surface_uuid ?? undefined, workspace_ref: "ws:placement" };
+      liveSurfaces = [lead, source];
+      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+        workspace_ref: "ws:placement", window_ref: "window:placement",
+        panes: [
+          { ref: "pane:left", index: 0, focused: false, surface_count: 1,
+            surface_refs: [lead.ref], surface_ids: [leadUuid], pixel_frame: leftFrame },
+          { ref: "pane:right", index: 1, focused: true, surface_count: 1,
+            surface_refs: [source.ref], surface_ids: [record.surface_uuid], pixel_frame: rightFrame },
+        ],
+      });
+      (mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>)
+        .mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", window_ref: "window:placement",
+          pane_ref: pane, surfaces: pane === "pane:left" ? [lead] : [source],
+        }));
+
+      const summary = await engine.reconcileRolePlacements("idle");
+      expect(summary.moved).toHaveLength(1);
+      expect(mockClient.moveSurface).toHaveBeenCalledWith(
+        expect.objectContaining({
+          surface: source.ref, pane: "pane:left", index: 1,
+          workspace: "ws:placement", stableSurfaceIdentity: record.surface_uuid,
+        }),
+      );
+    });
+
+    it("does not move a self-registered surface across workspaces or when disabled", async () => {
+      const record = registerSelfRegistered({
+        agent_id: "registered-cross-workspace-worker",
+        surface_id: "surface:registered-cross-workspace-worker",
+        workspace_id: "ws:other",
+        cli_session_id: "session-cross",
+      });
+      installTwoColumnTopology(record);
+      await engine.reconcileRolePlacements("idle");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+
+      const sameWorkspace = stateMgr.updateRecord(record.agent_id, {
+        workspace_id: "ws:placement",
+      });
+      engine.getRegistry().set(record.agent_id, sameWorkspace);
+      const previous = process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT;
+      process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT = "0";
+      try {
+        await engine.reconcileRolePlacements("idle");
+      } finally {
+        if (previous === undefined) delete process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT;
+        else process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT = previous;
+      }
       expect(mockClient.moveSurface).not.toHaveBeenCalled();
     });
 
@@ -7718,7 +7943,7 @@ Session ID: ${sessionId}`,
       ]);
     });
 
-    it("does not count a successful move as skipped when seed cleanup lacks a stable UUID", async () => {
+    it("does not create or close a pane to reconcile a worker in a single column", async () => {
       const record = makeRecord({
         agent_id: "missing-seed-uuid-worker",
         surface_id: "surface:missing-seed-uuid-worker",
@@ -7767,218 +7992,18 @@ Session ID: ${sessionId}`,
         pane_ref: "pane:left",
         surfaces: liveSurfaces,
       });
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (_direction, opts) => {
-          await opts.beforeMutation?.();
-          return {
-            workspace: "ws:placement",
-            surface: "surface:worker-column-seed",
-            pane: "pane:right",
-            title: "",
-            type: "terminal",
-          };
-        },
-      );
-      (
-        mockClient.moveSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (opts) => {
-        await opts.beforeMutation?.();
-        return {
-          ok: true,
-          workspace: "ws:placement",
-          surface: opts.surface,
-          pane: "pane:right",
-        };
-      });
-
       const summary = await engine.reconcileRolePlacements("idle");
 
-      expect(summary.moved).toHaveLength(1);
-      expect(summary.skipped).toEqual([]);
-      expect(mockClient.closeSurface).not.toHaveBeenCalled();
-    });
-
-    it("serializes worker-column seed cleanup by the seed's stable UUID", async () => {
-      const record = makeRecord({
-        agent_id: "single-column-worker",
-        surface_id: "surface:single-column-worker",
-        surface_uuid: "11111111-2222-4333-8444-555555555555",
-        workspace_id: "ws:placement",
-        state: "idle",
-        role: "worker",
-        surface_provenance: "cmuxlayer_spawn",
-      });
-      const leadRef = "surface:lead";
-      const leadUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-      const seedRef = "surface:worker-column-seed";
-      const seedUuid = "33333333-4444-4555-8666-777777777777";
-      let workerPane: "pane:left" | "pane:right" = "pane:left";
-      let seedOpen = false;
-      const refreshLiveSurfaces = () => {
-        liveSurfaces = [
-          {
-            ...makeSurface(leadRef),
-            id: leadUuid,
-            workspace_ref: "ws:placement",
-          },
-          {
-            ...makeSurface(record.surface_id),
-            id: record.surface_uuid ?? undefined,
-            workspace_ref: "ws:placement",
-          },
-          ...(seedOpen
-            ? [
-                {
-                  ...makeSurface(seedRef),
-                  id: seedUuid,
-                  workspace_ref: "ws:placement",
-                },
-              ]
-            : []),
-        ];
-      };
-      refreshLiveSurfaces();
-      stateMgr.writeState(record);
-      engine.getRegistry().set(record.agent_id, record);
-      (mockClient.listPanes as ReturnType<typeof vi.fn>).mockImplementation(
-        async () => {
-          const leftRefs = [
-            leadRef,
-            ...(workerPane === "pane:left" ? [record.surface_id] : []),
-          ];
-          const leftIds = [
-            leadUuid,
-            ...(workerPane === "pane:left" ? [record.surface_uuid] : []),
-          ];
-          const rightRefs = [
-            ...(seedOpen ? [seedRef] : []),
-            ...(workerPane === "pane:right" ? [record.surface_id] : []),
-          ];
-          const rightIds = [
-            ...(seedOpen ? [seedUuid] : []),
-            ...(workerPane === "pane:right" ? [record.surface_uuid] : []),
-          ];
-          return {
-            workspace_ref: "ws:placement",
-            window_ref: "window:placement",
-            panes: [
-              {
-                ref: "pane:left",
-                index: 0,
-                focused: true,
-                surface_count: leftRefs.length,
-                surface_refs: leftRefs,
-                surface_ids: leftIds,
-                pixel_frame: leftFrame,
-              },
-              ...(rightRefs.length > 0
-                ? [
-                    {
-                      ref: "pane:right",
-                      index: 1,
-                      focused: false,
-                      surface_count: rightRefs.length,
-                      surface_refs: rightRefs,
-                      surface_ids: rightIds,
-                      pixel_frame: rightFrame,
-                    },
-                  ]
-                : []),
-            ],
-          };
-        },
-      );
-      (
-        mockClient.listPaneSurfaces as ReturnType<typeof vi.fn>
-      ).mockImplementation(async ({ pane }: { pane?: string }) => ({
-        workspace_ref: "ws:placement",
-        window_ref: "window:placement",
-        pane_ref: pane,
-        surfaces:
-          pane === "pane:right"
-            ? [
-                ...(seedOpen
-                  ? [
-                      {
-                        ...makeSurface(seedRef),
-                        id: seedUuid,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-                ...(workerPane === "pane:right"
-                  ? [
-                      {
-                        ...makeSurface(record.surface_id),
-                        id: record.surface_uuid ?? undefined,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-              ]
-            : [
-                {
-                  ...makeSurface(leadRef),
-                  id: leadUuid,
-                  workspace_ref: "ws:placement",
-                },
-                ...(workerPane === "pane:left"
-                  ? [
-                      {
-                        ...makeSurface(record.surface_id),
-                        id: record.surface_uuid ?? undefined,
-                        workspace_ref: "ws:placement",
-                      },
-                    ]
-                  : []),
-              ],
-      }));
-      (mockClient.newSplit as ReturnType<typeof vi.fn>).mockImplementationOnce(
-        async (_direction, opts) => {
-          await opts.beforeMutation?.();
-          seedOpen = true;
-          refreshLiveSurfaces();
-          return {
-            workspace: "ws:placement",
-            surface: seedRef,
-            surface_id: seedUuid,
-            pane: "pane:right",
-            title: "",
-            type: "terminal",
-          };
-        },
-      );
-      (
-        mockClient.moveSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (opts) => {
-        await opts.beforeMutation?.();
-        workerPane = "pane:right";
-        return {
-          ok: true,
-          workspace: "ws:placement",
-          surface: opts.surface,
-          pane: "pane:right",
-        };
-      });
-      (
-        mockClient.closeSurface as ReturnType<typeof vi.fn>
-      ).mockImplementationOnce(async (_surface, opts) => {
-        await opts.beforeMutation?.();
-        seedOpen = false;
-        refreshLiveSurfaces();
-      });
-
-      const summary = await engine.reconcileRolePlacements("idle");
-
-      expect(summary.moved).toHaveLength(1);
-      expect(mockClient.closeSurface).toHaveBeenCalledWith(
-        seedRef,
+      expect(summary.moved).toEqual([]);
+      expect(summary.skipped).toEqual([
         expect.objectContaining({
-          workspace: "ws:placement",
-          stableSurfaceIdentity: seedUuid,
-          beforeMutation: expect.any(Function),
+          agent_id: record.agent_id,
+          reason: expect.stringContaining("column 1 is unavailable"),
         }),
-      );
+      ]);
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.closeSurface).not.toHaveBeenCalled();
     });
 
     it("orders boot ingestion before provable-leftover sweep and first reconcile", async () => {
@@ -8041,7 +8066,7 @@ Session ID: ${sessionId}`,
       await engine.initialize(discovery as any);
       await engine.spawnAgent({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "spawn immediately after boot",
         workspace: "ws:placement",
         role: "worker",
@@ -10107,6 +10132,47 @@ Session ID: ${sessionId}`,
       }
     });
 
+    it.each(["spawn", "resume"].flatMap(origin => ["boot", "daybreak-synthetic", "hooks-review"].map(variant => [origin, variant])))("%s boot skips only Hooks review, leaving %s security chrome alone", async (origin, variant) => {
+      const id = `security-${origin}`;
+      stateMgr.writeState(makeRecord({ agent_id: id, state: "booting", surface_id: "surface:42", cli: "codex",
+        ...(origin === "resume" ? { boot_resumed_at: new Date().toISOString() } : {}) }));
+      liveSurfaces = [makeSurface("surface:42")];
+      let banner = true;
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(async () => ({
+        surface: "surface:42", text: readFileSync(new URL(`./fixtures/composer-overlays/codex-${banner ? variant : "dismissed"}.txt`, import.meta.url), "utf8") + (banner && variant === "daybreak-synthetic" ? "\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch" : ""), lines: 35, scrollback_used: false,
+      }));
+      (mockClient.sendKey as ReturnType<typeof vi.fn>).mockImplementation(async (_surface, key) => { if (key === "escape") banner = false; });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep(); await engine.runSweep();
+      expect(mockClient.sendKey).toHaveBeenCalledTimes(variant === "hooks-review" ? 1 : 0);
+      if (variant === "hooks-review") expect(mockClient.sendKey.mock.calls[0][1]).toBe("escape");
+      expect(engine.getAgentState(id)?.state).toBe("ready");
+      if (variant === "hooks-review") expect(stateMgr.getEventLog().readEntries()).toContainEqual(expect.objectContaining({ event_type: "account_security_banner", agent_id: id, surface: "surface:42", outcome: "dismissed" }));
+    });
+
+    it("#999(e) a persistent security notice permits boot readiness without Esc", async () => {
+      stateMgr.writeState(makeRecord({ agent_id: "security-wedged", state: "booting", surface_id: "surface:42", cli: "codex" }));
+      liveSurfaces = [makeSurface("surface:42")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: "surface:42",
+        text: readFileSync(new URL("./fixtures/composer-overlays/codex-boot.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep(); await engine.runSweep();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(engine.getAgentState("security-wedged")).toMatchObject({ state: "ready" });
+    });
+
+    it("#1007 never sends Esc from an old banner after the agent rebinds", async () => {
+      const agent = makeRecord({ agent_id: "security-rebound", state: "booting", surface_id: "surface:43", cli: "codex" });
+      stateMgr.writeState(agent); engine.getRegistry().set(agent.agent_id, agent);
+      liveSurfaces = [makeSurface("surface:43")];
+      const closed = { surface: "surface:43", text: readFileSync(new URL("./fixtures/composer-overlays/codex-dismissed.txt", import.meta.url), "utf8"), lines: 35, scrollback_used: false };
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue(closed);
+      const old = { ...closed, surface: "surface:42", text: readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8") };
+      expect(await engine["dismissBootSecurityBanner"](agent, old)).toEqual(closed);
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.readScreen).toHaveBeenCalledWith("surface:43", expect.anything());
+    });
+
     it("promotes booting agents to ready when their CLI prompt appears", async () => {
       stateMgr.writeState(
         makeRecord({
@@ -10215,6 +10281,28 @@ Session ID: ${sessionId}`,
         model: "claude-opus-5-5[1m]",
         parsed_model: banner,
         model_mismatch: mismatch,
+      });
+    });
+
+    it.each([
+      { header: "Model: gpt-6.1-sol", footer: "GPT-6.1-Sol high", requested: "gpt-6.1-sol", parsed: "gpt-6.1-sol", mismatch: false, effort: "high" },
+      { header: "", footer: "Daybreak Blue medium", requested: "gpt-daybreak-blue-latest", parsed: "Daybreak Blue", mismatch: null, effort: "medium" },
+    ])("settles Codex model and effort independently: $footer", async ({ header, footer, requested, parsed, mismatch, effort }) => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "agent-codex-display", state: "booting", surface_id: "surface:codex-display",
+        cli: "codex", model: requested, effort,
+      }));
+      liveSurfaces = [makeSurface("surface:codex-display")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:codex-display",
+        text: `OpenAI Codex\n${header}\n›\n  ${footer} · ~/Gits/cmuxlayer`,
+        lines: 80, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+      await engine.runSweep();
+      expect(engine.getAgentState("agent-codex-display")).toMatchObject({
+        state: "ready", parsed_model: parsed, model_mismatch: mismatch,
+        parsed_effort: effort, effort_mismatch: false,
       });
     });
 
@@ -10383,6 +10471,141 @@ Session ID: ${sessionId}`,
       expect(engine.getAgentState("agent-boot-read-race")?.state).toBe(
         "booting",
       );
+    });
+
+    it("#950 resolves a pending spawn from a new Codex boot user row", async () => {
+      const prompt = "Read and follow docs.local/phase-3.md";
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-spawn-echo", state: "booting",
+        surface_id: "surface:pending-spawn-echo", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: prompt,
+        boot_pre_type_screen: "OpenAI Codex\nModel: gpt-5.5\n› ",
+        boot_delivery_text: prompt,
+        boot_submit_dispatched: true,
+        boot_verify_started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-spawn-echo")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-spawn-echo",
+        text: ["OpenAI Codex", "Model: gpt-5.5", `› ${prompt}`, "• Done", "› "].join("\n"),
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-spawn-echo")).toMatchObject({
+        state: "ready", boot_prompt_pending: false,
+        prompt_delivered: true, submit_verified: true,
+        boot_verify_started_at: null,
+      });
+    });
+
+    it("#950 resolves a pending resume when the restored Codex turn is working", async () => {
+      const prompt = "Read and follow docs.local/phase-3.md";
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-resume-working", state: "error",
+        surface_id: "surface:pending-resume-working", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: prompt,
+      }));
+      stateMgr.reopenForResume("pending-resume-working");
+      stateMgr.transition("pending-resume-working", "booting");
+      liveSurfaces = [makeSurface("surface:pending-resume-working")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-resume-working",
+        text: ["OpenAI Codex", "Model: gpt-5.5", `› ${prompt}`,
+          "• Working (12s • esc to interrupt)", "› "].join("\n"),
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-resume-working")).toMatchObject({
+        state: "working", boot_prompt_pending: false,
+        prompt_delivered: true, submit_verified: true,
+        boot_verify_started_at: null,
+        boot_resumed_at: null, boot_submit_dispatched: false,
+      });
+    });
+
+    it("#950 fails pending boot at its fixed verification deadline despite later registry updates", async () => {
+      const old = new Date(Date.now() - 6 * 60_000).toISOString();
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-spawn-deadline", state: "booting",
+        surface_id: "surface:pending-spawn-deadline", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, task_summary: "Read and follow docs.local/phase-3.md",
+        boot_verify_started_at: old,
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-spawn-deadline")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-spawn-deadline",
+        text: "OpenAI Codex\nModel: gpt-5.5\n› Read and follow docs.local/phase-3.md",
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-spawn-deadline")).toMatchObject({
+        state: "error", boot_prompt_pending: false,
+        prompt_delivered: false, submit_verified: false,
+        boot_verify_started_at: old,
+        error: expect.stringMatching(/boot prompt.*deadline|boot prompt.*timeout/i),
+      });
+    });
+
+    it("#950 fails a pending boot at the deadline when its screen cannot be read", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-unreadable-deadline", state: "booting",
+        surface_id: "surface:pending-unreadable-deadline", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null,
+        boot_verify_started_at: new Date(Date.now() - 6 * 60_000).toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-unreadable-deadline")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("screen unavailable"),
+      );
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-unreadable-deadline")).toMatchObject({
+        state: "error", boot_prompt_pending: false,
+        prompt_delivered: false, submit_verified: false,
+        error: expect.stringMatching(/boot prompt.*deadline/i),
+      });
+    });
+
+    it("#950 leaves a queued boot pending when unrelated Codex work is visible", async () => {
+      stateMgr.writeState(makeRecord({
+        agent_id: "pending-queued-working", state: "booting",
+        surface_id: "surface:pending-queued-working", cli: "codex",
+        boot_prompt_pending: true, prompt_delivered: false,
+        submit_verified: null, boot_submit_dispatched: false,
+        boot_verify_started_at: new Date().toISOString(),
+      } as Partial<AgentRecord>));
+      liveSurfaces = [makeSurface("surface:pending-queued-working")];
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({
+        surface: "surface:pending-queued-working",
+        text: "OpenAI Codex\nModel: gpt-5.5\n• Working (12s • esc to interrupt)\n› ",
+        lines: 20, scrollback_used: false,
+      });
+      await engine.getRegistry().reconstitute();
+
+      await engine.runSweep();
+
+      expect(engine.getAgentState("pending-queued-working")).toMatchObject({
+        state: "booting", boot_prompt_pending: true,
+        prompt_delivered: false, submit_verified: false,
+      });
     });
 
     it("does not promote booting agents while boot prompt delivery is pending", async () => {
@@ -11407,6 +11630,40 @@ Session ID: ${sessionId}`,
   });
 
   describe("halt escalation", () => {
+    it.each(["queued", "steer_pending", "queued_followup"] as const)("P0 STEER stale %s alerts the parent once without replay or interrupt", async delivery_state => {
+      engine.dispose();
+      const nowMs = Date.now() + 2000;
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient,
+        { spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+          deliveryAttentionMs: 1000, deliveryVerifyDeadlineMs: 1000, haltNow: () => nowMs });
+      const parent = makeRecord({ agent_id: "stale-parent", surface_id: "surface:stale-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stale-child", surface_id: "surface:stale-child", state: "working", cli: delivery_state === "queued_followup" ? "cursor" : "codex", parent_agent_id: parent.agent_id, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      (mockClient.readScreen as ReturnType<typeof vi.fn>).mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      const receipt = engine.acceptComposerQueue({ delivery_id: "stale-receipt", agent_id: child.agent_id,
+        text: "synthetic urgent lead correction", press_enter: true, source_event: delivery_state === "queued_followup" ? "report_to_parent" : "send_to", retry_count: 0, delivery_state });
+      const verify = vi.fn().mockResolvedValue({ outcome: "pending" }); engine.setDeliveryVerifier(verify);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(nowMs);
+      try {
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state, terminal: false, needs_attention: true });
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)?.attention_reason).toContain("1000ms");
+        const screen = delivery_state === "queued_followup" ? "Cursor Agent\nThinking (2s)\n> " : "OpenAI Codex\nWorking (2s • esc to interrupt)\n› Ask Codex to do anything\n GPT-6-Luna low · ~/scratch";
+        await (engine as any).maybeEscalateLiveHalt(child, screen);
+        await (engine as any).maybeEscalateLiveHalt(engine.getAgentState(child.agent_id), screen);
+        const alerts = readInbox(parent.agent_id, { baseDir: TEST_DIR }).filter(row => row.tag === "agent_halt_delivery_stalled");
+        expect(alerts).toHaveLength(1); expect(alerts[0]?.task).toContain(receipt.delivery_id);
+        expect(alerts[0]?.task).not.toContain("text: \"escape\"");
+        expect(mockClient.sendKey).not.toHaveBeenCalled();
+        verify.mockResolvedValue({ outcome: "delivered", submit_verified: true });
+        clock.mockReturnValue(nowMs + 60_000);
+        await engine.verifyPendingDeliveries();
+        expect(engine.getDeliveryReceipt(receipt.delivery_id)).toMatchObject({ delivery_state: "submitted", needs_attention: false, attention_reason: null });
+      } finally { clock.mockRestore(); }
+    });
+
     it("wakes the parent immediately when a harness API error freezes a child", async () => {
       const nowMs = Date.parse("2026-08-27T07:00:00.000Z");
       engine.dispose();
@@ -11465,6 +11722,40 @@ Session ID: ${sessionId}`,
       expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain(
         "Reading stale-work.ts",
       );
+    });
+
+    it.each([
+      ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
+      ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
+    ])("silent-stall %s escalates only blockers despite prior done evidence", async (kind, screen, tag) => {
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient, {
+        spawnPreflight: async () => {}, sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+        haltNow: () => Date.parse("2026-10-05T08:00:00Z"), haltAwaitingInputDwellMs: 0,
+      });
+      const parent = makeRecord({ agent_id: "stall-parent", surface_id: "surface:stall-parent", state: "working", role: "orchestrator" });
+      const child = makeRecord({ agent_id: "stall-child", surface_id: "surface:stall-child", state: "working", cli: "codex", role: "worker", parent_agent_id: parent.agent_id, spawn_depth: 1, halt_escalation: true });
+      stateMgr.writeState(parent); stateMgr.writeState(child);
+      liveSurfaces = [parent, child].map(record => makeSurface(record.surface_id));
+      await engine.getRegistry().reconstitute();
+      mockClient.readScreen.mockResolvedValue({ surface: parent.surface_id, text: "Claude Code\nWorking (2s • esc to interrupt)", lines: 80, scrollback_used: false });
+      vi.spyOn(engine, "hasCurrentRecordedOutputDoneEvidence").mockReturnValue(true);
+      await engine["maybeEscalateLiveHalt"](child, screen);
+      await engine["maybeEscalateLiveHalt"](engine.getAgentState(child.agent_id) ?? child, screen);
+      if (kind === "security") {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([]);
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).not.toBe(true);
+        expect(engine.getAgentState(child.agent_id)?.state).toBe("working");
+      } else {
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })).toEqual([expect.objectContaining({ tag, task: expect.stringContaining(child.agent_id) })]);
+      }
+      if (kind === "hooks") {
+        expect(engine.getAgentState(child.agent_id)?.blocked_on_prompt).toBe(true);
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
+        expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
+      } else if (kind === "capacity") expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 
     it("wakes the parent immediately when a child transitions into a harness API error", async () => {
@@ -12280,6 +12571,7 @@ Session ID: ${sessionId}`,
       const parent = makeRecord({
         agent_id: "cmuxlayerClaude-parent",
         surface_id: "surface:halt-parent",
+        surface_uuid: "a1a1a1a1-1111-4222-8333-444444444444",
         state: "working",
         role: "orchestrator",
         parent_agent_id: null,
@@ -12288,6 +12580,8 @@ Session ID: ${sessionId}`,
       const child = makeRecord({
         agent_id: "cmuxlayerCodex-awaiting",
         surface_id: "surface:halt-awaiting",
+        // #926: a done row with a session keeps a binding only by UUID.
+        surface_uuid: "b2b2b2b2-1111-4222-8333-444444444444",
         // #408 regression: persisted done must not override a live blocked screen.
         state: "done",
         parent_agent_id: parent.agent_id,
@@ -12298,8 +12592,8 @@ Session ID: ${sessionId}`,
       stateMgr.writeState(parent);
       stateMgr.writeState(child);
       liveSurfaces = [
-        makeSurface(parent.surface_id),
-        makeSurface(child.surface_id),
+        { ...makeSurface(parent.surface_id), id: parent.surface_uuid },
+        { ...makeSurface(child.surface_id), id: child.surface_uuid },
       ];
       (mockClient.readScreen as ReturnType<typeof vi.fn>).mockImplementation(
         async (surface: string) => ({
@@ -13775,6 +14069,7 @@ Session ID: ${sessionId}`,
             defaultEngine.spawnAgent({
               repo: `missinglauncher${suffix}`,
               cli,
+              ...(cli === "codex" ? { effort: "medium" } : {}),
               prompt: "",
             }),
           ).rejects.toThrow(
@@ -13815,10 +14110,10 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe(withRaisedNofileSoftLimit(
+        expect(launchCmd).toBe(
           `cd '${join(repoHome, "freshrepo")}' && ` +
             "MCP_CONNECTION_NONBLOCKING=1 CLAUDE_CODE_NO_FLICKER=1 claude --dangerously-skip-permissions",
-        ));
+        );
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBeNull();
         expect(state?.launch_cwd).toBe(join(repoHome, "freshrepo"));
@@ -13880,7 +14175,7 @@ Session ID: ${sessionId}`,
 
         const [, launchCmd] = (mockClient.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(launchCmd).toBe(withRaisedNofileSoftLimit("mmClaude -s"));
+        expect(launchCmd).toBe("mmClaude -s --worker");
         const state = defaultEngine.getAgentState(result.agent_id);
         expect(state?.launcher_name).toBe("mmClaude");
         expect(state?.launch_cwd).toBe(registeredRoot);
@@ -15540,6 +15835,71 @@ Session ID: ${sessionId}`,
         expect(stateMgr.readState(agentId)).toMatchObject({
           state: "done",
           user_killed: true,
+          // #926: the pid the stop post-condition proved gone stays on the
+          // tombstone; it is the proof a later resume needs.
+          pid,
+        });
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("does not keep a tombstone pid whose death was never proven with identity (#926)", async () => {
+      const agentId = "terminal-unknown-liveness";
+      const pid = 54322;
+      const signals: Array<NodeJS.Signals | 0 | undefined> = [];
+      let killed = false;
+      // Identity-alive before the kill; afterwards the probe is only
+      // inconclusive (EPERM), never proof the process is gone.
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        targetPid: number,
+        signal?: NodeJS.Signals | 0,
+      ) => {
+        expect(targetPid).toBe(pid);
+        signals.push(signal);
+        if (signal && signal !== 0) {
+          killed = true;
+          return true;
+        }
+        if (killed) {
+          throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+        }
+        return true;
+      }) as typeof process.kill);
+      stateMgr.writeState(
+        makeRecord({
+          agent_id: agentId,
+          state: "done",
+          surface_id: "surface:terminal-unknown",
+          surface_uuid: null,
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3f",
+          pid,
+          created_at: "2026-08-23T11:00:00.000Z",
+          pid_registered_at: "2026-08-23T11:00:05.000Z",
+        }),
+      );
+      liveSurfaces = [makeSurface("surface:terminal-unknown")];
+      (mockClient.closeSurface as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => {
+          liveSurfaces = [makeSurface("surface:witness")];
+          (mockClient.listPanes as ReturnType<typeof vi.fn>).mockResolvedValue({
+            workspace_ref: "",
+            window_ref: "window:1",
+            panes: [],
+          });
+        },
+      );
+      await engine.getRegistry().reconstitute();
+      // Started inside the launch-to-registration window: the original process.
+      execFileSyncMock.mockReturnValue("2026-08-23T11:00:02.000Z\n");
+
+      try {
+        await engine.stopAgent(agentId, true);
+        // The force stop signalled and counted "unknown" as gone to finish,
+        expect(signals.some((signal) => signal && signal !== 0)).toBe(true);
+        // but that is not proof, so the tombstone must not carry the pid.
+        expect(stateMgr.readState(agentId)).toMatchObject({
+          user_killed: true,
           pid: null,
         });
       } finally {
@@ -16574,7 +16934,7 @@ describe("buildLaunchCommand", () => {
       buildLaunchCommand("codex", "brainlayer", undefined, undefined, {
         authority: "worker",
       }),
-    ).toBe("GOLEM_ROLE=worker brainlayerCodex -s --worker");
+    ).toBe("brainlayerCodex -s --worker");
   });
 
   it("leaves lead-authority Codex launches out of launcher worker mode", () => {

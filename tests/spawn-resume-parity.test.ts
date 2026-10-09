@@ -23,10 +23,10 @@ import {
   resolveRepoRootFromLauncherRegistry,
 } from "../src/launcher-registry.js";
 import { StateManager } from "../src/state-manager.js";
-import { RAISE_NOFILE_SOFT_LIMIT } from "../src/nofile-limit.js";
 import { AgentRegistry } from "../src/agent-registry.js";
 import type { CmuxClient, CmuxNewSplitResult } from "../src/cmux-client.js";
 import type { CliType } from "../src/agent-types.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import type { CmuxSurface } from "../src/types.js";
 import { useHarnessHome } from "./helpers/harness-home.js";
 
@@ -34,12 +34,6 @@ const TEST_DIR = join(tmpdir(), "cmux-parity-registry-optional");
 const REPO = "parityrepo";
 const SESSION = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
 const SPAWN_SURFACE_UUID = "11111111-2222-4333-8444-555555555555";
-
-function withoutNofilePrelude(command: string): string {
-  const prelude = `${RAISE_NOFILE_SOFT_LIMIT}; `;
-  expect(command.startsWith(prelude)).toBe(true);
-  return command.slice(prelude.length);
-}
 
 type LauncherPath = "registry" | "raw";
 
@@ -146,16 +140,15 @@ const RESUMABLE_CLIS = CLIS.filter(
 );
 
 function expectedLaunch(cli: CliType, path: LauncherPath, root: string): string {
-  const workerEnv = cli === "claude" ? "" : "GOLEM_ROLE=worker ";
   if (path === "registry") {
-    return `${workerEnv}${EXPECTED_LAUNCHER_NAME[cli]} -s${cli === "codex" ? " --worker" : ""}`;
+    return `${EXPECTED_LAUNCHER_NAME[cli]} -s --worker${cli === "codex" ? " -E medium" : ""}`;
   }
-  const cd = `cd '${root}' && ${workerEnv}`;
+  const cd = `cd '${root}' && `;
   switch (cli) {
     case "claude":
       return `${cd}${AGENT_ENV} claude --dangerously-skip-permissions`;
     case "codex":
-      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`;
+      return `${cd}codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c model_reasoning_effort=medium`;
     case "cursor":
       return `${cd}cursor agent --force`;
     case "gemini":
@@ -183,6 +176,19 @@ function expectedResume(cli: CliType, path: LauncherPath, root: string): string 
       throw new Error(`no raw resume form for ${cli}`);
   }
 }
+
+/**
+ * #926: resume must prove the session is not running elsewhere, so the
+ * topology shows a live pane that is not the spawned one (its pane closed).
+ */
+const PANE_CLOSED_WITNESS: CmuxSurface = {
+  ref: "surface:witness",
+  id: "eeeeeeee-1111-4222-8333-444444444444",
+  title: "",
+  type: "terminal",
+  index: 0,
+  selected: false,
+};
 
 describe.each<LauncherPath>(["registry", "raw"])(
   "spawn/resume contract parity — %s launcher path",
@@ -256,6 +262,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       const result = await engine.spawnAgent({
         repo: REPO,
         cli,
+        ...(cli === "codex" ? { effort: "medium" } : {}),
         prompt: "parity probe",
       });
 
@@ -297,7 +304,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
       // --- Launch command: launcher form vs raw form. ---
       const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
         .calls[0];
-      expect(withoutNofilePrelude(launchCmd)).toBe(expectedLaunch(cli, path, repoRoot));
+      expect(launchCmd).toBe(expectedLaunch(cli, path, repoRoot));
 
       // The tab title names the AGENT (#492), and must not vary by lane.
       expect(client.renameTab).toHaveBeenCalledWith(
@@ -313,15 +320,18 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         const resumed = await engine.resumeAgent(spawned.agent_id);
 
         // Public identity survives a resume on BOTH lanes (U5 spawn-resume law).
@@ -330,7 +340,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
 
         const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
-        expect(withoutNofilePrelude(resumeCmd)).toBe(expectedResume(cli, path, repoRoot));
+        expect(resumeCmd).toBe(expectedResume(cli, path, repoRoot));
         // Whatever the lane, the resumed command names the captured session.
         expect(resumeCmd).toContain(SESSION);
       },
@@ -343,7 +353,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
     it.each(CLIS)(
       "launches %s with an approval bypass on either lane",
       async (cli) => {
-        await engine.spawnAgent({ repo: REPO, cli, prompt: "parity probe" });
+        await engine.spawnAgent({ repo: REPO, cli, ...(cli === "codex" ? { effort: "medium" } : {}), prompt: "parity probe" });
 
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
@@ -357,6 +367,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
@@ -364,10 +375,12 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         await engine.resumeAgent(spawned.agent_id);
         const [, resumeCmd] = (client.send as ReturnType<typeof vi.fn>).mock
           .calls[0];
@@ -385,17 +398,20 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {
           state: "done",
           cli_session_id: SESSION,
+          pid: DEAD_PID,
         });
         engine.getRegistry().set(spawned.agent_id, updated);
         (client.send as ReturnType<typeof vi.fn>).mockClear();
 
         if (path === "raw") {
           // `gemini --resume` takes "latest" or an index, never a UUID.
+          liveSurfaces = [PANE_CLOSED_WITNESS];
           await expect(engine.resumeAgent(spawned.agent_id)).rejects.toThrow(
             /no runnable resume command/i,
           );
@@ -409,6 +425,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         // The registered launcher has a UUID resume form. Main's #486 policy
         // refuses only on proof of absence; an unreadable Gemini store leaves
         // the registry claim standing instead of fabricating a disk verdict.
+        liveSurfaces = [PANE_CLOSED_WITNESS];
         await engine.resumeAgent(spawned.agent_id);
         expect(client.send).toHaveBeenCalled();
         expect(engine.resolveAgentRoute(spawned.agent_id).resumable).toBe(true);
@@ -421,6 +438,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const result = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const [, launchCmd] = (client.send as ReturnType<typeof vi.fn>).mock
@@ -475,6 +493,7 @@ describe.each<LauncherPath>(["registry", "raw"])(
         const spawned = await engine.spawnAgent({
           repo: REPO,
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           prompt: "parity probe",
         });
         const updated = stateMgr.updateRecord(spawned.agent_id, {

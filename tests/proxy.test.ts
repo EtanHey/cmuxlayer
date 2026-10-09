@@ -1,7 +1,7 @@
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -434,12 +434,61 @@ describe("CmuxLayerProxy", () => {
     return { input, output, collector, proxy };
   }
 
-  it("forwards initialize and tools/list over the daemon socket", async () => {
+  it.each(["foreign-owner", "non-socket", "unsafe-parent", "missing-unsafe-parent",
+    "world-writable-socket", "group-writable-socket", "other-writable-socket"])(
+    "refuses %s before connecting or autostarting", async (kind) => {
+      mkdirSync(TEST_ROOT, { recursive: true, mode: 0o700 });
+      const path = socketPath("unsafe");
+      if (kind === "non-socket") writeFileSync(path, "fixture");
+      if (kind === "unsafe-parent" || kind.endsWith("writable-socket")) {
+        const daemon = new FakeDaemon(path);
+        daemons.push(daemon);
+        await daemon.start();
+      }
+      if (kind.includes("unsafe-parent")) chmodSync(TEST_ROOT, 0o777);
+      if (kind.endsWith("writable-socket")) {
+        chmodSync(path, kind === "world-writable-socket" ? 0o666 : kind === "group-writable-socket" ? 0o620 : 0o602);
+      }
+      const currentUid = process.getuid?.();
+      if (currentUid === undefined) throw new Error("UID unavailable for socket ownership test");
+      const socketLstat = kind === "foreign-owner"
+        ? (candidate: string) => candidate === path
+          ? { uid: currentUid + 1, mode: 0o600, isSocket: () => true, isDirectory: () => false }
+          : lstatSync(candidate, { throwIfNoEntry: false })
+        : undefined;
+      const connect = vi.fn(() => {
+        const socket = new net.Socket();
+        queueMicrotask(() => socket.emit("error", new Error("ECONNREFUSED")));
+        return socket;
+      });
+      const spawnDaemonForVersionBump = vi.fn();
+      let logged!: () => void;
+      const log = new Promise<void>((resolve) => { logged = resolve; });
+      const logger = { error: vi.fn(() => logged()) };
+      const { proxy } = createProxy(path, {
+        socketLstat, connect, logger, spawnDaemonForVersionBump,
+        detectStaleBuild: () => ({ stale: true, running: "0.3.33", installed: "0.3.34" }),
+        installedEntryScriptPath: () => null,
+        installedDaemonScriptPath: () => "/fixture/daemon.js",
+      });
+      await log;
+      await (proxy as unknown as { spawnInstalledDaemonAfterReconnectFailure(attempt: number): Promise<void> })
+        .spawnInstalledDaemonAfterReconnectFailure(1);
+      expect(connect).not.toHaveBeenCalled();
+      await (proxy as unknown as { checkVersionBumpReconnect(): Promise<void> })
+        .checkVersionBumpReconnect();
+      expect(spawnDaemonForVersionBump).not.toHaveBeenCalled();
+      expect(logger.error.mock.calls.flat().map(String).join(" ")).toMatch(/daemon socket not owned by this user|unsafe parent|group\/other-writable daemon socket/);
+    },
+  );
+
+  it.each([0o755, 0o600])("forwards initialize and tools/list with socket mode %s", async (mode) => {
     mkdirSync(TEST_ROOT, { recursive: true });
     const path = socketPath("happy");
     const daemon = new FakeDaemon(path);
     daemons.push(daemon);
     await daemon.start();
+    chmodSync(path, mode);
     const { input, collector } = createProxy(path);
 
     writeFrame(input, request(1, "initialize", { capabilities: {} }));

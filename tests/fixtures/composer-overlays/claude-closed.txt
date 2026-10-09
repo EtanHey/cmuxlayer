@@ -1,0 +1,14 @@
+Last login: Mon Oct  5 06:18:33 on ttys038
+cd -- '/srv/scratch'
+fixture-user ~  $ cd /srv/scratch && claude --model haiku
+ ▐▛███▛█   Claude Code v2.1.289
+▝▜██████▀  Haiku 4.5 · Claude Max
+ ▝▝   ▝▝   ~/scratch
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /
+───────────────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ fix/999e-composer-picker-matrix | 🔧 9                                               0 tokens
+  🤖 Haiku 4.5 | 💰 $0.00 | ⏱️  0m | 🧠 0.0%
+  ⏸ manual mode on

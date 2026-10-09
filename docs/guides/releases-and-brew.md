@@ -82,6 +82,10 @@ The current tagged release is `0.4.65`. One command cuts the next version:
 ~/Gits/cmuxlayer/scripts/release.sh X.Y.Z --require-contract  # a skipped real-cmux gate aborts
 ```
 
+The pre-push and release suites queue through golems’ heavy-suite lock when
+`~/Gits/golems/scripts/hooks/heavy-suite.py` and Python 3 are present. Otherwise,
+they print a notice and run unqueued.
+
 It will: verify a clean tree + green typecheck/tests, run the real-cmux
 contract gate, bump `package.json` on `wt/release-<version>`, open a PR, wait
 for the required `perf-budget` and `test` contexts, re-check the exact PR head,

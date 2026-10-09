@@ -18,10 +18,8 @@ import {
 import { assertMutationAllowed } from "./mode-policy.js";
 import { extractPrefix } from "./naming.js";
 import { createStaleBuildWarner, RUNNING_VERSION } from "./version.js";
-import {
-} from "./model-policy.js";
+import { resolveSpawnEffort } from "./model-policy.js";
 import { shellQuote } from "./agent-command.js";
-import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import { agentProcessLiveness } from "./util/pid-alive.js";
 import {
   withTransportRetryTracking,
@@ -151,12 +149,14 @@ import {
   type ControlHealth,
   type LifecycleStartHealth,
 } from "./control-health.js";
+import { snapshotProcessRows, sweepInboxTailers } from "./inbox-tail-reaper.js";
 import {
   collectSurfaceTopology as collectCmuxSurfaceTopology,
   enumerateAllWindowWorkspacesWithRetry,
   invalidateSurfaceTopologyCallScope,
   enrichSurfaceIdsFromPanes,
   healthTopologyOverrides,
+  placementMismatchForAgent,
   resolveAgentSurfaceBinding,
   withSurfaceTopologyMutationInvalidation,
   type SurfaceObserverIdProvider,
@@ -183,11 +183,14 @@ import {
   extractComposerInputRegion,
   screenShowsPendingInput,
   screenShowsCompletePendingInput,
+  screenTranscriptContainsText,
   composerHoldsForeignDraft,
   screenShowsQueuedAgentInput,
+  codexPendingDeliveryKind,
   screenShowsQueuedCursorFollowup,
   screenShowsPendingShellInput,
   classifyPendingLauncherLine,
+  codexScreenShowsSubmit,
   composeBootDeliveryText,
 } from "./delivery/composer-screen.js";
 import {
@@ -230,6 +233,9 @@ import {
   DEFAULT_REPORT_WATCH_DEADLINE_MS,
   resolveLifecycleStartTimeoutMs,
   awaitBoundedLifecycleStart,
+  assertLifecycleReadyForTool,
+  lifecycleInitState,
+  startLifecycleInitialization,
   registerAutoVitestTempDir,
   createServerContext,
   resolveServerInboxBaseDir,
@@ -937,6 +943,15 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         opts?.defaultPalette ?? process.env[CMUXLAYER_DEFAULT_PALETTE_ENV],
       ),
       resolveCallerAgentId: () => resolveCurrentCallerAgent()?.agent_id ?? null,
+      ...(opts?.gateLifecycleTools
+        ? {
+            lifecycleGate: () =>
+              assertLifecycleReadyForTool(
+                context,
+                resolveLifecycleStartTimeoutMs(),
+              ),
+          }
+        : {}),
     });
   // AIDEV-NOTE: handlers leaving this closure take their dependencies from
   // here (CX-3 S6+); the lifecycle block below fills engine and registry.
@@ -965,6 +980,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
     callerOwnsTypedDraft,
+    retryPendingClaudeDraft,
+    settleVerifiedDeliveryDraft,
     getSurfaceDelivery,
     withSurfaceWrite,
     observedSurfaceUuid,
@@ -1128,6 +1145,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           : Date.now() - context.lifecycleStartStartedAtMs,
       timeout_ms: resolveLifecycleStartTimeoutMs(),
       error: context.lifecycleStartError?.message ?? null,
+      state: lifecycleInitState(context),
+      attempt: context.lifecycleStartAttempts,
+      last_error: context.lifecycleStartError?.message ?? null,
       timeouts: context.lifecycleStartTimeouts,
       last_timeout_at: context.lifecycleStartLastTimeoutAt,
     };
@@ -1140,6 +1160,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           client,
           lifecycleLock: context.lifecycleLockStateProvider?.() ?? null,
           lifecycleStart: describeLifecycleStart(),
+          inboxTailers: async () => {
+            const engine = context.lifecycleSweepEngine;
+            if (!engine) return null;
+            const rows = await snapshotProcessRows();
+            const processes = new Map(rows.map((row) => [row.pid, row]));
+            const result = await sweepInboxTailers({
+              rows,
+              inboxOpts,
+              ownerState: (agentId) => engine.inboxTailOwnerState(agentId, processes),
+            });
+            return { live: result.live.length, orphaned: result.orphaned.length };
+          },
         });
     const knownSurfaceIds = [
       ...stateMgr.listStates().map((record) => record.surface_id),
@@ -1163,6 +1195,22 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         panePtyDeadSince: surfacePtyDeadSince,
       }),
     };
+    const placementAgents = stateMgr.listStates().filter((agent) =>
+      agent.state !== "done" && agent.state !== "error" &&
+      agent.surface_uuid && agent.workspace_id && inferRecordRoleOrNull(agent),
+    );
+    const placementTopology = placementAgents.length > 0
+      ? await collectSurfaceTopology().catch(() => null)
+      : null;
+    const placementMismatch = placementTopology?.complete
+      ? placementAgents.flatMap((agent) => {
+          if (!placementMismatchForAgent(agent, placementTopology)) return [];
+          const binding = resolveAgentSurfaceBinding(agent, placementTopology);
+          return binding
+            ? [{ agent_id: agent.agent_id, surface_id: binding.surfaceRef }]
+            : [];
+        })
+      : [];
     const health =
       controlHealthWarnings.length > 0
         ? {
@@ -1173,6 +1221,13 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             ],
           }
         : healthWithSelfHeal;
+    health.placement_mismatch = placementMismatch;
+    if (placementMismatch.length > 0) {
+      health.warnings = [
+        ...health.warnings,
+        `placement_mismatch: ${placementMismatch.length} agent(s)`,
+      ];
+    }
     eventLog.appendControlHealth({
       ts: health.generated_at,
       event_type: "control_health",
@@ -2235,6 +2290,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     currentSafetyCallerWorkspace,
     findSurfaceByRef,
     findSurfaceRefByUuid,
+    inboxOpts,
     lifecycleScheduleChildReportWatchPrune: () =>
       lifecycleScheduleChildReportWatchPrune?.(),
     lifecycleSeatManifestPublisher: (input) =>
@@ -2547,6 +2603,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           throw error;
         }
       }
+      // #938: while lifecycle retries this is the last attempt's error, not
+      // a latch; it clears when a retry succeeds.
       if (context.lifecycleStartError) {
         throw context.lifecycleStartError;
       }
@@ -2734,6 +2792,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           {
             cwd: launchCwd,
             envPrefix: opts.mcpEnv,
+            authority: record.authority,
+            effort: resolveSpawnEffort(record.cli, record.effort ?? undefined) ?? undefined,
+            launchMode: record.launch_mode === "raw" ? "raw" : "launcher",
             allowModelOverride:
               record.cli === "codex"
                 ? Boolean(
@@ -2759,7 +2820,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       await sendLauncherCommandToSurface({
         surface: route.surface,
         workspace: route.workspace,
-        command: withRaisedNofileSoftLimit(command),
+        command,
         timeout_ms: opts.timeout_ms,
         relaunch: true,
         assertSurfaceBindingCurrent,
@@ -2837,6 +2898,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       text: string;
       press_enter: boolean;
       allow_busy?: boolean;
+      codex_busy_mode?: "steer" | "queue";
+      retry_owned_draft?: boolean;
       source_event: DeliveryEventType;
       delivery_id?: string;
       timings?: DeliveryPhaseTimings;
@@ -3023,7 +3086,9 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       const queuedBehindTurn =
         args.source_event === "send_to" && liveRouteState.state === "working";
       const bypassLifecycleGate =
-        args.allow_busy === true || args.source_event === "send_to";
+        args.allow_busy === true || args.source_event === "send_to" ||
+        (expectedCli === "codex" && liveRouteState.state === "working" &&
+          (args.source_event === "report_to_parent" || args.source_event === "dispatch_nudge"));
       if (
         !bypassLifecycleGate &&
         !isLiveDeliverable(liveRouteState) &&
@@ -3070,6 +3135,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (args.timings) {
         args.timings.route += Math.max(0, routeElapsed - enumerateElapsed);
       }
+      const retrySettled = new Error("Owned retry already verified");
+      let settledRetry: AgentDeliveryReceipt | null = null;
       const assertDeliveryRouteCurrent = async (): Promise<void> => {
         let current: typeof deliveryRoute;
         try {
@@ -3095,11 +3162,17 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               `delivery; refusing to continue on another surface.`,
           );
         }
+        const receipt = args.retry_owned_draft && args.delivery_id ? engine.getDeliveryReceipt(args.delivery_id) : null;
+        if (receipt?.terminal && receipt.submit_verified === true && receipt.delivery_state === "submitted" && receipt.agent_id === args.agent_id && receipt.text === args.text) {
+          settledRetry = receipt;
+          throw retrySettled;
+        }
       };
 
       return withSurfaceWrite(
         deliveryRoute.surface_id,
         async () => {
+          try {
           await assertDeliveryRouteCurrent();
           const delivery = await executeDeliveryEngine({
             surface: deliveryRoute.surface_id,
@@ -3108,6 +3181,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             chunk_size: SEND_INPUT_CHUNK_THRESHOLD,
             chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
             press_enter: args.press_enter,
+            codex_busy_mode: args.codex_busy_mode,
+            retry_owned_draft: args.retry_owned_draft,
             stableSurfaceIdentity: deliveryRoute.surface_uuid,
             source_event: args.source_event,
             source_agent: resolveCurrentCallerAgent()?.agent_id ?? null,
@@ -3151,7 +3226,14 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               verifiedDelivery: args.source_event === "send_to",
             });
           }
-          return { ...delivery, queued_behind_turn: queuedBehindTurn };
+          return { ...delivery, queued_behind_turn: expectedCli === "codex"
+            ? delivery.delivery === "queued" && delivery.queued_behind_turn === true
+            : queuedBehindTurn || delivery.queue_verified === true };
+          } catch (error) {
+            if (error !== retrySettled || !settledRetry) throw error;
+            return { ...buildPublicDeliveryReceipt({ ...settledRetry, typed: settledRetry.typed === true, submit_attempted: settledRetry.press_enter }),
+              bytes: Buffer.byteLength(settledRetry.text), queued_behind_turn: false, retry_settled: true };
+          }
         },
         {
           toolName: args.source_event,
@@ -3173,6 +3255,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             agent_id: receipt.agent_id,
             text: receipt.text,
             press_enter: receipt.press_enter,
+            codex_busy_mode: receipt.codex_busy_mode,
             allow_busy: false,
             source_event: receipt.source_event,
             delivery_id: receipt.delivery_id,
@@ -3196,6 +3279,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           submit_dispatched: delivery.submit_dispatched,
           ...(delivery.delivery === "submitted" ||
           delivery.delivery === "queued" ||
+          delivery.delivery === "steer_pending" ||
           delivery.delivery === "queued_followup" ||
           delivery.delivery === "rescued" ||
           delivery.delivery === "pending_verify"
@@ -3212,6 +3296,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       delivery:
         | "submitted"
         | "queued"
+        | "steer_pending"
         | "queued_followup"
         | "rescued"
         | "pending_verify";
@@ -3221,7 +3306,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         message,
         inboxPath(recipient.agent_id, inboxOpts),
       );
-      if (recipient.state === "working") {
+      if (recipient.state === "working" && recipient.cli !== "codex") {
         const queued = engine.queueDelivery({
           agent_id: recipient.agent_id,
           text: pointer,
@@ -3262,6 +3347,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       if (
         delivered.delivery !== "submitted" &&
         delivered.delivery !== "queued" &&
+        delivered.delivery !== "steer_pending" &&
         delivered.delivery !== "queued_followup" &&
         delivered.delivery !== "rescued" &&
         delivered.delivery !== "pending_verify"
@@ -3272,6 +3358,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       }
       if (
         delivered.delivery === "queued" ||
+        delivered.delivery === "steer_pending" ||
         delivered.delivery === "queued_followup"
       ) {
         engine.acceptComposerQueue({
@@ -3539,6 +3626,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           resolvedSnapshot.text,
           resolvedSnapshot.parsed as Parameters<typeof inferComposerCli>[1],
         );
+        if (cli === "claude" && receipt.delivery_state === "pending_verify" && receipt.press_enter && !receipt.boot_recovery && pending && receipt.retry_count < 1) {
+          const route = await engine.resolveAgentIoRoute(receipt.agent_id);
+          const beforeMutation = async () => {
+            await assertSurfaceMutationAllowed("send_to", route.surface_id, route.workspace_id ?? undefined);
+            const current = await engine.resolveAgentIoRoute(receipt.agent_id);
+            if (current.surface_id !== route.surface_id || current.surface_uuid !== route.surface_uuid || current.workspace_id !== route.workspace_id ||
+                receipt.terminal || receipt.delivery_state !== "pending_verify") throw new Error("Pending delivery route or receipt changed");
+          };
+          const verified = await withSurfaceWrite(route.surface_id, () => retryPendingClaudeDraft({
+            surface: route.surface_id, workspace: route.workspace_id ?? undefined,
+            stableSurfaceIdentity: route.surface_uuid, receipt, beforeMutation,
+          }), { toolName: "send_to", workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
+          if (verified) {
+            settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+            return { outcome: "delivered" as const, submit_verified: true };
+          }
+          return { outcome: "pending" as const };
+        }
+        const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
+        // An older identical Tab queue is not this delivery. Its continued
+        // presence must not hide a fresh committed steer at the tool boundary.
+        if ((cli === "codex" || agent.cli === "codex") && !pending && !pendingKind &&
+          codexScreenShowsSubmit(baseline, resolvedSnapshot.text, receipt.text)) {
+          settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return { outcome: "delivered" as const, submit_verified: true };
+        }
         // Compaction can temporarily render Codex's ready footer while the
         // queued message still belongs to the active turn's next tool call.
         const compactingCodexQueue =
@@ -3551,6 +3665,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         if (queued || cursorQueuedFollowup || (cli === "cursor" && pending)) {
           return {
             outcome: "pending" as const,
+            ...(queued ? { delivery_state: pendingKind ?? (receipt.delivery_state === "steer_pending" ? "steer_pending" : "queued") } : {}),
             ...(queued
               ? {
                   reason: compactingCodexQueue
@@ -3564,6 +3679,19 @@ export function createServer(opts?: CreateServerOptions): McpServer {
               : {}),
           };
         }
+        // AIDEV-NOTE (#935): a Codex submit is proven here exactly as the send
+        // proves it (codexScreenShowsSubmit): an empty composer alone is a
+        // paste-burst placeholder, and the payload somewhere on screen can be
+        // an old identical row. The baseline is this delivery's pre-type
+        // frame; without one (its read failed, or the daemon restarted) the
+        // receipt stays pending until its deadline.
+        if (cli === "codex" || agent.cli === "codex") {
+          const verified = !pending && codexScreenShowsSubmit(
+            context.deliveryPreTypeScreens.get(receipt.delivery_id), resolvedSnapshot.text, receipt.text,
+          );
+          if (verified) settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return verified ? { outcome: "delivered" as const, submit_verified: true } : { outcome: "pending" as const };
+        }
         const composerCleared = composer !== null && composer.trim() === "";
         const correlationTail = receipt.text
           .trim()
@@ -3574,7 +3702,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
             correlationTail,
           ) &&
           !pending;
-        if (composerCleared || inTranscript) {
+        const relayProof = receipt.source_event !== "send_to" || (baseline !== undefined && composerCleared && !pending && (
+          (screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) && !screenTranscriptContainsText(baseline, receipt.text)) ||
+          (["working", "thinking"].includes(parsed?.status ?? "") && !["working", "thinking"].includes(parseScreen(baseline).status))
+        ));
+        if (relayProof && (composerCleared || inTranscript)) {
+          settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
           return { outcome: "delivered" as const, submit_verified: true };
         }
         return { outcome: "pending" as const };
@@ -3584,39 +3717,33 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     // Reconstitute and discover live surfaces before the first sidebar paint.
     // The engine initializer is idempotent because daemon connections share a
     // context and may construct more than one MCP server over its lifetime.
+    // #938: a failed attempt (e.g. cmux rate_limited) is retried with
+    // backoff until it succeeds; it is never latched for the daemon's life.
     if (!context.lifecycleStarted) {
-      context.lifecycleStarted = true;
-      context.lifecycleStartError = null;
-      context.lifecycleStartStartedAtMs = Date.now();
-      context.lifecycleStartSettledAtMs = null;
-      const lifecycleInitialization = lifecycleInitializer
-        ? Promise.resolve().then(() => lifecycleInitializer())
-        : engine.initialize(discovery);
-      context.lifecycleStartPromise = lifecycleInitialization
-        .catch((error) => {
-          context.lifecycleStartError =
-            error instanceof Error ? error : new Error(String(error));
-          console.error(
-            "[cmuxlayer] lifecycle initialization failed:",
-            context.lifecycleStartError,
-          );
-        })
-        .then(() => {
-          context.lifecycleStartSettledAtMs = Date.now();
-          if (
-            !context.lifecycleStartError &&
-            context.lifecycleStarted &&
-            context.lifecycleSweepEngine === engine
-          ) {
-            engine.startSweep(resolveSweepTiming());
-          }
-        });
+      startLifecycleInitialization(context, () =>
+        lifecycleInitializer
+          ? lifecycleInitializer()
+          : engine.initialize(discovery),
+      );
+      void (context.lifecycleReadyPromise ?? Promise.resolve()).then(() => {
+        if (
+          !context.lifecycleStartError &&
+          context.lifecycleStarted &&
+          context.lifecycleSweepEngine === engine
+        ) {
+          engine.startSweep(resolveSweepTiming());
+        }
+      });
     }
     context.lifecycleLockStateProvider = () => engine.lifecycleLockState();
     // The daemon may immediately use this relay for monitor recovery. Publish
     // it only after persisted lifecycle state has been reconstituted so route
     // resolution is ready, then wake any boot-time recovery claim.
-    void (context.lifecycleStartPromise ?? Promise.resolve()).then(() => {
+    void (
+      context.lifecycleReadyPromise ??
+      context.lifecycleStartPromise ??
+      Promise.resolve()
+    ).then(() => {
       if (
         !context.lifecycleStartError &&
         context.lifecycleStarted &&
@@ -3829,6 +3956,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       collectDeliveryEvidence,
       collectTargetRecords,
       deliverAgentInput,
+      callerOwnsTypedDraft,
       engine,
       observePausedTarget,
       registry,

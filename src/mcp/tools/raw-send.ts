@@ -92,6 +92,7 @@ export const sendInputArgsShape = z.object({
       .describe(
         `${PANE_INPUT_BREAKAGE_GUIDANCE} Text to send. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default.`,
       ),
+    codex_busy_mode: z.enum(["steer", "queue"]).optional(),
     workspace: z.string().optional().describe("Target workspace ref"),
     chunk_size: z
       .number()
@@ -215,6 +216,7 @@ export async function sendInput(
         chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
         chunks,
         press_enter: args.press_enter,
+        codex_busy_mode: args.codex_busy_mode,
         verify_submit: shouldVerifySubmit,
         submit_verified: null,
         retry_count: 0,
@@ -242,11 +244,12 @@ export async function sendInput(
           agent_id: backgroundLifecycle.agent_id,
           text: sanitizedText,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           source_event: sourceEvent,
           rpc_methods: [],
         });
       }
-      startBackgroundDelivery(record, backgroundLifecycle);
+      startBackgroundDelivery(record, backgroundLifecycle, sourceEvent);
       const publicBackgroundDeliveryId =
         backgroundLifecycle || sourceEvent !== "send_to"
           ? record.delivery_id
@@ -295,6 +298,7 @@ export async function sendInput(
           chunk_size: effectiveChunkSize,
           chunk_delay_ms: SEND_INPUT_CHUNK_DELAY_MS,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           rename_to_task: args.rename_to_task,
           stableSurfaceIdentity: route.stableSurfaceIdentity,
           source_event: sourceEvent,
@@ -327,6 +331,7 @@ export async function sendInput(
     ) {
       if (
         delivery.delivery === "queued" ||
+        delivery.delivery === "steer_pending" ||
         delivery.delivery === "queued_followup"
       ) {
         receiptEngine.acceptComposerQueue({
@@ -334,6 +339,7 @@ export async function sendInput(
           agent_id: targetRecord.agent_id,
           text: sanitizedText,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           source_event: "send_to",
           retry_count: delivery.retry_count,
           rpc_methods: delivery.rpc_methods,
@@ -347,6 +353,7 @@ export async function sendInput(
           agent_id: targetRecord.agent_id,
           text: sanitizedText,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           source_event: "send_to",
           retry_count: delivery.retry_count,
           rpc_methods: delivery.rpc_methods,
@@ -359,6 +366,7 @@ export async function sendInput(
           agent_id: targetRecord.agent_id,
           text: sanitizedText,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           source_event: "send_to",
           delivery_state:
             delivery.delivery === "rescued"

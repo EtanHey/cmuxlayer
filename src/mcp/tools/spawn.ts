@@ -2,6 +2,7 @@
 // captured closure state arrives as SpawnAgentToolDeps.
 
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import {
@@ -85,6 +86,7 @@ import type { AgentRegistry } from "../../agent-registry.js";
 import type { CmuxServerContext, CreateServerOptions } from "../context.js";
 import type { CoordinationContract } from "../../coordination-paths.js";
 import type { DeliveryEngine } from "../../delivery/engine.js";
+import type { PublicDeliveryReceipt } from "../../delivery/receipts.js";
 import type { PreparedWorktree } from "../../worktree.js";
 import type { ServerAgentHealthEvaluator } from "./agent.js";
 import type { StateManager } from "../../state-manager.js";
@@ -95,6 +97,11 @@ import type {
   FocusTarget,
   MonitorBootResult,
 } from "../shared-types.js";
+
+function bootReturnDispatched(receipt: Pick<PublicDeliveryReceipt, "submit_dispatched">): boolean {
+  // Legacy receipts can omit this flag; only explicit false proves no Return.
+  return receipt.submit_dispatched !== false;
+}
 
 export interface SpawnAgentToolDeps {
   appendStaleBuildWarning: (result: { warnings?: string[]; }) => void;
@@ -183,10 +190,17 @@ export function registerSpawnAgentTool(
     watchRegistryPath,
     withSurfaceWrite,
   } = deps;
+  const runtimeMetadataAvailable = async (): Promise<boolean> =>
+    typeof client.listSurfaceRuntimeMetadata === "function" ||
+    (typeof client.listTerminalMetadata === "function" &&
+      await readRuntimeMetadata(() => client.listTerminalMetadata())
+        .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
+        .catch(() => false));
+
   // 11. spawn_agent
   server.tool(
     "spawn_agent",
-    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface while preserving its ID. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Boot prompts return evidence-backed receipts. Successful receipts are lean by default; verbose=true restores full transport and diagnostic detail. Failures always keep full detail.",
+    "Spawn a managed agent or terminal, or resume a captured agent on a fresh surface preserving its ID. Resume: {resume_agent_id:\"...\"}. Omit new-spawn fields: repo, cli, model, effort, cwd, prompt, boot_prompt_path, worktree, mcp_profile, role, placement, authority, collab_path, parent_agent_id, max_cost_per_agent; these cause INVALID_RESUME_SPEC. Optional resume controls such as force, workspace, focus, report_path and verbose remain supported. Resume restores session context; it does not resend a task. For a new task, check current readiness, then use send_to separately. ok:true/state:started means lifecycle started, not ready or task delivered. At a chooser or permission prompt, inspect the current frame with read_screen before acting; never blindly send Return or assume success. pending_verify leaves delivery unverified; follow wait_for guidance in warning when present; do not resend blindly. Placement is deterministic; boot_prompt_timeout_ms also bounds pane placement. Default successes have at most six fields: ok, agent_id, surface_id, state (spawn outcome), delivered (boot prompt), and optional warning. Use verbose:true for contract_path, report_path, done_marker, transport, worktree, and diagnostics; report_path and done_marker are also in the issued contract file. Failures always keep full detail.",
     {
       version: z
         .literal(1)
@@ -202,19 +216,19 @@ export function registerSpawnAgentTool(
         .string()
         .optional()
         .describe(
-          "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Mutually exclusive with new-spawn fields.",
+          "THE way to revive an agent: resume this captured session on a fresh surface, keeping its public agent ID and re-issuing its coordination contract. cmuxlayer never revives a pane by itself (#492) -- a pane you close stays closed -- so a lead that wants an agent back asks here, by id. Refused with a reason when the session transcript is not on disk, rather than opening an empty pane. Use {resume_agent_id:\"...\"}; omit all new-spawn fields listed in the tool description. Optional resume controls remain supported. Check current readiness before sending a new task separately with send_to; no task is automatically resent.",
         ),
       force: z
         .boolean()
         .optional()
         .default(false)
         .describe(
-          "With resume_agent_id only: override inconclusive recorded-process liveness after the caller deliberately verifies the old agent is gone. Does not bypass session or terminal-state requirements.",
+          "With resume_agent_id only: override missing or inconclusive proof that the old session is not running (no recorded pid, an unproven pid, an unreadable topology or process table) after the caller deliberately verifies the old agent is gone. Does not bypass session or terminal-state requirements.",
         ),
       repo: z
         .string()
         .optional()
-        .describe("Repository name (e.g. 'brainlayer', 'golems')"),
+        .describe("New spawn only; omit on resume. Repository name (e.g. 'brainlayer', 'golems')"),
       model: z
         .string()
         .optional()
@@ -222,15 +236,18 @@ export function registerSpawnAgentTool(
           "OPTIONAL — leave UNSET so the launcher pins the top-tier model. For cli:'codex', an explicit model is checked against Codex's runtime model list before any worktree or surface is created, then passed through to the launcher. Never pass 'opus' for claude — the top Claude model is already the default.",
         ),
       effort: z
-        .enum(CODEX_EFFORT_VALUES)
-        .optional()
+        .preprocess(
+          // Keep supplied blanks distinct from omission for non-Codex validation.
+          (value) => typeof value === "string" && !value.trim() ? "" : value,
+          z.enum([...CODEX_EFFORT_VALUES, ""]).optional(),
+        )
         .describe(
-          "Codex reasoning effort, passed to the repoGolem launcher. CHOOSE THIS DELIBERATELY PER MISSION — it is a cost decision, not a default to inherit. The installed launcher currently accepts: low, medium, high, xhigh, max, ultra. spawn_agent rejects other values before creating a worktree or surface. The live launcher defaults to HIGH when omitted (~/.config/ralphtools/golem-dispatch.zsh). Per /agent-routing, MEDIUM is the settled floor for well-specified implementation lanes — use it unless the task genuinely needs more; xhigh and above burn budget fast and are rarely warranted for a lane with a clear brief.",
+          'Required for codex new agent spawns: low, medium, high, xhigh, max, ultra. Choose deliberately: medium for well-specified lanes, high for security/open-ended; xhigh and above cost more. Omit on resume (the session keeps its effort) and for other CLIs (effort is invalid).',
         ),
       cli: z
         .enum(["claude", "codex", "gemini", "kiro", "cursor"])
         .optional()
-        .describe("CLI tool to launch"),
+        .describe("New spawn only; omit on resume. CLI tool to launch"),
       cwd: z
         .string()
         .optional()
@@ -245,14 +262,14 @@ export function registerSpawnAgentTool(
         .string()
         .optional()
         .describe(
-          `${PANE_INPUT_BREAKAGE_GUIDANCE} Inline task prompt to send after the agent is ready. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default; use boot_prompt_path for larger prompts. Mutually exclusive with boot_prompt_path.`,
+          `${PANE_INPUT_BREAKAGE_GUIDANCE} New spawn only; omit on resume and send a new task separately with send_to after checking readiness. Inline task prompt to send after the agent is ready. Capped at ${SEND_INPUT_MAX_INLINE_CHARS} inline UTF-8 bytes by default; use boot_prompt_path for larger prompts. Mutually exclusive with boot_prompt_path.`,
         ),
       boot_prompt_path: z
         .string()
         .nullable()
         .optional()
         .describe(
-          "Optional readable prompt-file path. Checked before spawning; multiline or over-cap files are submitted as one `Read and follow <path>` pointer and one final return after readiness. Mutually exclusive with prompt.",
+          "New spawn only; omit on resume. Optional readable prompt-file path. Checked before spawning; multiline or over-cap files are submitted as one `Read and follow <path>` pointer and one final return after readiness. Mutually exclusive with prompt.",
         ),
       boot_prompt_timeout_ms: z
         .number()
@@ -294,7 +311,7 @@ export function registerSpawnAgentTool(
       role: spawnFunctionSchema()
         .optional()
         .describe(
-          "Agent job function: implementor, reviewer, or gatherer. Legacy orchestrator/worker aliases remain accepted for compatibility. Claude requires this field explicitly.",
+          "Agent job function: implementor, reviewer, or gatherer. Lead callers may omit it to spawn an implementor with worker authority on the right by default; explicit roles and axes still apply. Legacy orchestrator/worker aliases remain accepted. Other Claude callers require an explicit role.",
         ),
       placement: spawnPlacementSchema()
         .optional()
@@ -333,7 +350,7 @@ export function registerSpawnAgentTool(
         })
         .optional()
         .describe(
-          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md, returns it here, and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. Check coordination_footer_delivered. For resume_agent_id calls, false means the pointer was deliberately not re-delivered: follow coordination_footer_note and relay only if the restored session lost its original context. For new spawns, if false and contract_path is present, folded pointer submission was queued or unverified, so YOU must relay contract_path, report_path, and done_marker. If false and contract_path is absent, inline mode is active or the contract file could not be written, so YOU must relay report_path and done_marker.',
+          'Optional ABSOLUTE override for the engine-issued report path. Omit in almost all cases: the engine issues ~/.cmux/agents/<agent_id>/report.md and verifies closure against it. Pass a distinct FILE path per child (never a directory) to place a report somewhere you already watch. report_path, done_marker, contract_path, coordination_footer_delivered and coordination_footer_note are verbose:true-only fields; the default warning contains any required relay instruction with its exact issued paths or marker. For resume_agent_id calls, coordination_footer_note is folded into warning: the pointer was deliberately not re-delivered, so relay only if the restored session lost its original context. For new spawns, when contract_path is present and folded pointer submission was queued or unverified, warning includes the pointer. Inspect the pane, then relay with send_to({agent_id, text:"Read and follow <contract_path>", press_enter:true}); do not use raw cmux send/send-key. When contract_path is absent, inline mode is active or the contract file could not be written, so warning tells YOU to relay report_path and done_marker.',
         ),
       force_new: z
         .boolean()
@@ -345,9 +362,8 @@ export function registerSpawnAgentTool(
       focus: z
         .boolean()
         .optional()
-        .default(false)
         .describe(
-          "Leave focus on the created agent tab instead of restoring the exact origin after initialization.",
+          "Leave focus on the created agent tab instead of restoring the exact origin after initialization. On resume, false suppresses focus; omitted stays in the background on metadata-capable cmux and initializes legacy cmux with focus.",
         ),
       allow_long_inline: z
         .boolean()
@@ -361,7 +377,7 @@ export function registerSpawnAgentTool(
         .optional()
         .default(false)
         .describe(
-          "Return the full legacy spawn response instead of the lean default.",
+          "Return the full success receipt, including contract_path, report_path, done_marker, transport, worktree, and diagnostics; defaults to at most six fields. Failures always keep full detail.",
         ),
     },
     ANNOTATIONS.mutating,
@@ -456,13 +472,14 @@ export function registerSpawnAgentTool(
             args.workspace ?? existing.workspace_id ?? undefined,
           );
           await assertWorkspaceMutationAllowed("spawn_agent", workspace);
-          let focusRestoreLease = await focusTargetBeforeSplit(
-            workspace,
-            args.focus !== true,
-          );
+          const focusForResume = args.focus ?? !await runtimeMetadataAvailable();
+          let focusRestoreLease = focusForResume
+            ? await focusTargetBeforeSplit(workspace, args.focus !== true)
+            : null;
           const result = await engine.resumeAgent(args.resume_agent_id, {
             workspace,
             force: args.force,
+            focus: focusForResume,
           });
           creation.record({
             agent_id: result.agent_id,
@@ -590,10 +607,12 @@ export function registerSpawnAgentTool(
             new Set<string>(),
             { role: "worker" },
           );
+          // Preserve terminal creation's former schema default; resume alone
+          // needs to distinguish omitted focus from an explicit false.
           const created =
             placement.kind === "surface"
               ? await client.newSurface({
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                   pane: placement.pane,
                   ...(workspace ? { workspace } : {}),
                   type: "terminal",
@@ -601,7 +620,7 @@ export function registerSpawnAgentTool(
               : await client.newSplit(placement.direction, {
                   ...(workspace ? { workspace } : {}),
                   ...(placement.pane ? { pane: placement.pane } : {}),
-                  focus: args.focus ?? !client.listSurfaceRuntimeMetadata,
+                  focus: args.focus ?? false,
                 });
           creation.record({
             surface_id: created.surface,
@@ -669,7 +688,17 @@ export function registerSpawnAgentTool(
             ...(cwdReceipt ? { cwd_receipt: cwdReceipt } : {}),
           });
         }
+        await refreshManagedMetadataBestEffort(args.parent_agent_id);
+        await refreshManagedMetadataBestEffort();
+        const callerAgent = resolveCurrentCallerAgent();
+        const callerRole = callerAgent
+          ? inferRecordRoleOrNull(callerAgent)
+          : null;
+        const callerIsLead = callerAgent?.authority !== undefined
+          ? callerAgent.authority === "lead"
+          : callerRole === "orchestrator";
         const spawnProblems: string[] = [];
+        let effortRequired = false;
         if (!args.repo) {
           spawnProblems.push("repo is required for type=agent");
         }
@@ -679,7 +708,8 @@ export function registerSpawnAgentTool(
         const rolelessClaude =
           args.version === 1 &&
           (args.cli === "claude" || args.cli === undefined) &&
-          args.role === undefined;
+          args.role === undefined &&
+          !callerIsLead;
         if (rolelessClaude) {
           spawnProblems.push(
             'Claude spawns require an explicit job role; use either authority:"lead", role:"implementor" or authority:"worker", role:"reviewer"',
@@ -696,6 +726,7 @@ export function registerSpawnAgentTool(
           try {
             resolveSpawnEffort(args.cli, args.effort);
           } catch (error) {
+            effortRequired = (error as { code?: string }).code === "EFFORT_REQUIRED";
             spawnProblems.push(
               error instanceof Error ? error.message : String(error),
             );
@@ -707,9 +738,11 @@ export function registerSpawnAgentTool(
             rolelessClaude &&
             args.cli === "claude"
               ? "ROLE_REQUIRED"
-              : spawnProblems.length > 1
-                ? "INVALID_SPAWN_SPEC"
-                : undefined;
+              : spawnProblems.length === 1 && effortRequired
+                ? "EFFORT_REQUIRED"
+                : spawnProblems.length > 1
+                  ? "INVALID_SPAWN_SPEC"
+                  : undefined;
           return err(
             new Error(spawnProblems.join("; ")),
             error_code ? { error_code } : {},
@@ -752,12 +785,6 @@ export function registerSpawnAgentTool(
           reportPathReservationKey = earlyReservation.key;
           reportPathReservationId = earlyReservation.reservation_id;
         }
-        await refreshManagedMetadataBestEffort(args.parent_agent_id);
-        await refreshManagedMetadataBestEffort();
-        const callerAgent = resolveCurrentCallerAgent();
-        const callerRole = callerAgent
-          ? inferRecordRoleOrNull(callerAgent)
-          : null;
         const callerIsWorker = callerRole === "worker";
         const effectiveParentAgentId = callerIsWorker
           ? callerAgent!.agent_id
@@ -912,11 +939,7 @@ export function registerSpawnAgentTool(
           }
           return true;
         };
-        const runtimeMetadataSupported = typeof client.listSurfaceRuntimeMetadata === "function" ||
-          (typeof client.listTerminalMetadata === "function" &&
-          await readRuntimeMetadata(() => client.listTerminalMetadata())
-            .then(({ terminals }) => terminals.some((item) => typeof item.runtime_surface_ready === "boolean"))
-            .catch(() => false));
+        const runtimeMetadataSupported = await runtimeMetadataAvailable();
         const focusForLaunch = args.focus === true || !runtimeMetadataSupported;
         let focusRestoreLease = focusForLaunch
           ? await focusTargetBeforeSplit(spawnWorkspace, args.focus !== true)
@@ -1109,6 +1132,8 @@ export function registerSpawnAgentTool(
 
         let bootPromptDelivery:
           Awaited<ReturnType<typeof deliverBootPrompt>> | undefined;
+        const bootDeliveryId = randomUUID();
+        let bootDeliveryText: string | null = null;
         let launcherSurfaceClosed = false;
         try {
           {
@@ -1118,6 +1143,7 @@ export function registerSpawnAgentTool(
             );
             bootPromptDelivery = await deliverBootPrompt({
               surface: result.surface_id,
+              delivery_id: bootDeliveryId,
               workspace: deliveryWorkspace,
               stableSurfaceIdentity: spawnedBinding?.surface_uuid,
               resolveRoute: spawnedBinding?.surface_uuid
@@ -1137,6 +1163,18 @@ export function registerSpawnAgentTool(
               boot_prompt_path: bootPromptPath,
               injected_prompt: injectedBootPrompt,
               timeout_ms: args.boot_prompt_timeout_ms,
+              onPreTypeScreen: (screenText, deliveryText) => {
+                bootDeliveryText = deliveryText;
+                try {
+                  const updated = stateMgr.updateRecord(result.agent_id, {
+                    boot_pre_type_screen: screenText,
+                    boot_delivery_text: deliveryText,
+                  });
+                  registry.set(result.agent_id, updated);
+                } catch {
+                  // This optional proof must not interrupt the actual delivery.
+                }
+              },
               onUpdateShellRelaunch: () =>
                 relaunchSpawnAgentAfterUpdate({
                   agentId: result.agent_id,
@@ -1158,6 +1196,18 @@ export function registerSpawnAgentTool(
             }
 
             await captureSpawnSessionBestEffort(result);
+            if (bootPromptDelivery.delivery_state === "pending_verify" &&
+                bootReturnDispatched(bootPromptDelivery) && bootPromptDelivery.delivery_id) {
+              const boot = engine.getAgentState(result.agent_id);
+              engine.acceptPendingVerify({
+                delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
+                text: bootDeliveryText ?? boot?.boot_delivery_text ?? bootPromptDelivery.prompt_text ?? "",
+                press_enter: true, source_event: "boot_prompt",
+                typed: bootPromptDelivery.typed, submit_dispatched: bootPromptDelivery.submit_dispatched,
+                retry_count: bootPromptDelivery.retry_count, rpc_methods: bootPromptDelivery.rpc_methods,
+                boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined,
+              });
+            }
             if (bootPromptDelivery.prompt_text !== null) {
               const updated = stateMgr.updateRecord(result.agent_id, {
                 ...bootPromptRegistryFields(
@@ -1166,6 +1216,14 @@ export function registerSpawnAgentTool(
                 ),
                 boot_prompt_pending:
                   bootPromptDelivery.submit_verified !== true,
+                boot_verify_started_at:
+                  bootPromptDelivery.submit_verified !== true
+                    ? new Date().toISOString() : null,
+                boot_submit_dispatched:
+                  bootPromptDelivery.submit_dispatched === true,
+                ...(bootPromptDelivery.submit_verified === true
+                  ? { boot_pre_type_screen: null, boot_delivery_text: null }
+                  : {}),
                 prompt_delivered: bootPromptDelivery.submit_verified === true,
                 submit_verified: bootPromptDelivery.submit_verified,
               });
@@ -1174,6 +1232,10 @@ export function registerSpawnAgentTool(
               const updated = stateMgr.updateRecord(result.agent_id, {
                 boot_prompt_pending:
                   bootPromptDelivery.delivery_state === "queued",
+                boot_verify_started_at:
+                  bootPromptDelivery.delivery_state === "queued"
+                    ? new Date().toISOString() : null,
+                boot_submit_dispatched: false,
                 prompt_delivered: false,
                 submit_verified: null,
               });
@@ -1227,6 +1289,13 @@ export function registerSpawnAgentTool(
                   boot_prompt_pending:
                     e instanceof BootPromptTimeoutError ||
                     e instanceof BootPromptDeliveryError,
+                  boot_verify_started_at:
+                    e instanceof BootPromptTimeoutError ||
+                    e instanceof BootPromptDeliveryError
+                      ? new Date().toISOString() : null,
+                  boot_submit_dispatched:
+                    e instanceof BootPromptDeliveryError &&
+                    e.submit_dispatched,
                   prompt_delivered: false,
                   submit_verified:
                     e instanceof BootPromptDeliveryError ? false : null,
@@ -1306,8 +1375,9 @@ export function registerSpawnAgentTool(
               next_action:
                 "Return WAS dispatched: the brief was submitted and the agent is working on it, " +
                 "but the text in composer_residue stayed unsent in its composer. Do not re-spawn. " +
-                "If the residue is the contract pointer, relay contract_path, report_path and done_marker " +
-                "to the agent yourself; otherwise send the residue with send_to once the draft is cleared.",
+                "If the residue is the contract pointer, inspect and clear that exact owned draft, then " +
+                "relay with send_to({agent_id, text:'Read and follow <contract_path>', press_enter:true}). " +
+                "Do not use a raw cmux send/send-key pair. Otherwise send the residue with send_to once the draft is cleared.",
             });
           }
           if (e instanceof BootPromptDeliveryError) {
@@ -1329,7 +1399,17 @@ export function registerSpawnAgentTool(
                 }),
               });
             }
-            const bootPromptReceipt = e.submit_verification_error
+            const bootPromptReceipt = e.submit_dispatched
+              ? { ...buildPublicDeliveryReceipt({
+                  delivery_state: "pending_verify",
+                  delivery_id: e.submit_verification_error?.receipt.delivery_id ?? bootDeliveryId,
+                  typed: e.typed || e.delivered_chars > 0, submit_attempted: true,
+                  submit_dispatched: true, submit_verified: null,
+                  submit_verification_reason: e.submit_verification_error?.reason,
+                  retry_count: e.submit_verification_error?.retry_count ?? currentTransportRetryCount(),
+                  rpc_methods: e.rpc_methods,
+                }), bytes: e.delivered_chars }
+              : e.submit_verification_error
               ? { ...submitVerificationFailurePayload(e.submit_verification_error),
                   terminal: true,
                   bytes: e.delivered_chars }
@@ -1347,16 +1427,24 @@ export function registerSpawnAgentTool(
                 };
             await refreshManagedMetadataBestEffort(result.agent_id);
             await lifecycleSeatManifestPublisher({ agentId: result.agent_id });
+            if (e.submit_dispatched && bootPromptReceipt.delivery_id) {
+              const boot = engine.getAgentState(result.agent_id);
+              engine.acceptPendingVerify({ delivery_id: bootPromptReceipt.delivery_id,
+                agent_id: result.agent_id, text: bootDeliveryText ?? boot?.boot_delivery_text ?? "",
+                press_enter: true, source_event: "boot_prompt", typed: true, submit_dispatched: true,
+                retry_count: bootPromptReceipt.retry_count, rpc_methods: e.rpc_methods,
+                boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined });
+            }
             return buildSpawnToolReturn(
               {
                 retry_count: currentTransportRetryCount(),
                 ...result,
-                spawn_state: "boot_unsubmitted",
+                spawn_state: e.submit_dispatched ? "pending_verify" : "boot_unsubmitted",
                 workspace_id: result.workspace_id,
                 delivered_chars: e.delivered_chars,
                 boot_prompt_delivered: false,
                 boot_prompt_receipt: bootPromptReceipt,
-                boot_prompt_submit_verified: false,
+                boot_prompt_submit_verified: e.submit_dispatched ? null : false,
               },
               args.verbose,
               undefined,
@@ -1433,7 +1521,9 @@ export function registerSpawnAgentTool(
           ...result,
           spawn_state:
             bootPromptDelivery && bootPromptDelivery.submit_verified !== true
-              ? "boot_unsubmitted"
+              ? bootPromptDelivery.delivery_state === "pending_verify" && !bootReturnDispatched(bootPromptDelivery)
+                ? "boot_unsubmitted"
+                : "pending_verify"
               : "started",
           worktree: worktree.prepared,
           mcp_profile: worktree.mcpProfileLabel,

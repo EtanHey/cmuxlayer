@@ -3,18 +3,21 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
-  checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkPrematureIdle, checkReceipt, checkSoakSession, checkStateAgreement,
+  checkPostSend, checkDeliveryDeadline, deliveryEvidence, checkClose, checkControlHealthSample, checkParsedReadAgreement, checkPlacement, checkPrematureIdle, checkReceipt, checkSoakSession, checkStateAgreement,
   checkReplyVisibility, checkSpawnIdentity, checkToolFailure, checkStopWait, healthSampleEntry, replyMarkerEvidence,
 } from "./soak-live-checks.mjs";
+import { deliveryCaseCaller, runDeliveryCases } from "./soak-live-delivery-cases.mjs";
 import { closeSpawnedAgent } from "./soak-live-cleanup.mjs";
-import { runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
+import { pollDelivery, runSoakCycles, soakSessionRecord, startSoakHealthClock, withHealthTimeout } from "./soak-live-timeline.mjs";
+import { requireLauncherMode } from "./xmac/target.mjs";
+import { startSoakRuntime } from "./soak-runtime.mjs";
 import { cycleAssignment, isPoolSeatDead, options } from "./soak-live-options.mjs";
 
-const WORKSPACE = "workspace:1";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const object = (value) => value && typeof value === "object" ? value : {};
 const boundedScreenContent = (value) => typeof value === "string"
@@ -45,25 +48,46 @@ function serverRssKb(pid) {
 
 async function main() {
   const opts = options(process.argv.slice(2));
-  const root = join(homedir(), ".cmux", "agents", opts.agentId, "soak");
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..", "docs.local", "soak", opts.agentId);
+  const runtime = await startSoakRuntime(opts, root);
+  const WORKSPACE = runtime.workspace;
+  if (opts.dryRun) {
+    const probeClient = new Client({ name: "cmuxlayer-soak-dry-run", version: "1" });
+    try {
+      await probeClient.connect(new StdioClientTransport({ command: opts.entry, args: [], env: runtime.env, stderr: "inherit" }));
+      runtime.receipt.server_info = probeClient.getServerVersion();
+      const health = payload(await probeClient.callTool({ name: "control_health", arguments: { detail: "full" } }, undefined, { timeout: 20_000 }));
+      runtime.receipt.control_health = health;
+      if (health.ok !== true || health.health?.current_process?.pid !== runtime.receipt.daemon.pid ||
+        health.socket_path !== runtime.env.CMUX_SOCKET_PATH) throw new Error("installed private control identity mismatch");
+    } catch (error) { runtime.receipt.error = String(error); }
+    finally {
+      await probeClient.close().catch(() => {});
+      const lifecycle = await runtime.close();
+      process.stdout.write(`${lifecycle.status === "PASS" ? "SOAK_DRY_RUN_PASS" : "SOAK_DRY_RUN_FAIL"} ${runtime.receiptPath}\n`);
+      if (lifecycle.status !== "PASS") process.exitCode = 1;
+    }
+    return;
+  }
   mkdirSync(root, { recursive: true });
-  const runId = new Date().toISOString().replace(/[:.]/g, "-");
+  const runId = new Date().toISOString().replace(/[:.]/gu, "-");
   const eventsPath = join(root, `${runId}.jsonl`);
   const summaryPath = join(root, `${runId}.summary.json`);
   const summary = { run_id: runId, started_at: new Date().toISOString(),
     mcp_entry: opts.entry, candidate_head: process.env.CMUXLAYER_SOAK_CANDIDATE_HEAD || null,
-    workspace: WORKSPACE, cycles_requested: opts.cycles, duration_floor_minutes: opts.durationMinutes,
+    workspace: WORKSPACE, target: opts.target, release_gate: opts.target === "m1-gate", lifecycle_receipt: runtime.receiptPath, cycles_requested: opts.cycles, duration_floor_minutes: opts.durationMinutes,
     concurrency: opts.concurrency, cycles_completed: 0, cli_counts: { claude: 0, codex: 0 },
     models: { claude: opts.claudeModel ?? "launcher-default", codex: opts.codexModel },
     codex_effort: opts.codexEffort,
     pool: { size: opts.pool, spawned: 0, replacements: 0, blocked_slots: 0, cycles: 0 },
     fresh: { every: opts.freshEvery, cycles: 0 },
-    invariants: {}, tools: {}, violations: [] };
+    delivery_cases_requested: opts.cases, invariants: {}, tools: {}, violations: [] };
   const active = new Map();
   const spawnedIds = new Set();
+  const unverifiedSends = new Map();
   const poolSeats = Array(opts.pool).fill(null);
   const blockedPoolSlots = new Set();
-  const stateDir = process.env.CMUXLAYER_STATE_DIR || join(homedir(), ".local", "state", "cmux-agents");
+  const stateDir = runtime.env.CMUXLAYER_STATE_DIR;
   const leadInbox = opts.leadAgentId
     ? join(homedir(), ".cmux", "agents", opts.leadAgentId, "inbox.jsonl") : null;
   let inboxOffset = 0;
@@ -84,7 +108,7 @@ async function main() {
   const client = new Client({ name: "cmuxlayer-soak-live", version: "1" });
   // This is an external stdio client, not a child turn of the worker running it.
   // An inherited pane identity would add two ancestors and hit the depth gate.
-  const serverEnv = Object.fromEntries(Object.entries(process.env).filter(([, v]) => typeof v === "string"));
+  const serverEnv = Object.fromEntries(Object.entries(runtime.env).filter(([, v]) => typeof v === "string"));
   delete serverEnv.CMUX_SURFACE_ID;
   delete serverEnv.CMUX_WORKSPACE_ID;
   delete serverEnv.CMUX_TAB_ID;
@@ -97,11 +121,12 @@ async function main() {
   let startPid = null;
   let rssStartKb = null;
   let connected = false;
-  const call = async (name, args, cycle, timeoutMs = Math.max(opts.timeoutMs + 15_000, 120_000)) => {
+  const call = async (name, args, cycle, timeoutMs = Math.max(opts.timeoutMs + 15_000, 120_000), policy = {}) => {
     const start = performance.now();
-    let result;
+    let result = null;
     try {
-      result = payload(await client.callTool({ name, arguments: args }, undefined,
+      result = payload(await client.callTool({ name, arguments: args, ...(policy.caller ? { _meta: {
+        "cmuxlayer/callerContext": { surfaceId: policy.caller.surface, workspaceId: WORKSPACE } } } : {}) }, undefined,
         { timeout: timeoutMs }));
     } catch (error) {
       result = { ok: false, isError: true, error: String(error) };
@@ -119,8 +144,11 @@ async function main() {
       snapshot_hash: name === "read_screen" ? result.snapshot_hash : undefined,
       column: name === "read_screen" ? result.column : undefined,
       column_count: name === "read_screen" ? result.column_count : undefined,
+      caller_agent_id: result.caller_agent_id, queue_verified: result.queue_verified,
+      needs_attention: result.needs_attention, submit_verification_reason: result.submit_verification_reason,
       warning: result.WARNING, error: result.error, error_code: result.error_code });
-    check("tool_refusal", checkToolFailure(result,
+    check("tool_refusal", policy.expectedCode && result.ok === false && result.error_code === policy.expectedCode
+      ? [] : checkToolFailure(result,
       { acceptTerminalDone: name === "wait_for" && args.target_state === "idle" }),
     { cycle, tool: name });
     return result;
@@ -129,7 +157,7 @@ async function main() {
     const sample = { atMs, label, healthy: false };
     healthSamples.push(sample);
     try {
-      let result;
+      let result = null;
       try {
         result = await withHealthTimeout(() =>
           call("control_health", { detail: "full" }, `health:${label}`, 20_000),
@@ -156,7 +184,7 @@ async function main() {
     const fresh = bytes.subarray(inboxOffset).toString("utf8");
     inboxOffset = bytes.length;
     const hits = fresh.split("\n").filter((line) =>
-      /agent_halt_wedged/.test(line) && [...spawnedIds].some((id) => line.includes(id)));
+      /agent_halt_wedged/u.test(line) && [...spawnedIds].some((id) => line.includes(id)));
     check("lead_inbox", hits.length ? ["false_agent_halt_wedged"] : [], { cycle });
   };
   const observe = async (cycle, agentId, surface) => {
@@ -195,8 +223,59 @@ async function main() {
     inboxCheck(cycle);
     return screen;
   };
+  const readDelivery = async (seat, text, deliveryId) => {
+    const screen = await call("read_screen", { surface: seat.surface, workspace: WORKSPACE,
+      raw: true, lines: 200 }, "delivery");
+    log({ kind: "delivery_screen", agent_id: seat.agentId, text: text ?? null,
+      content: screen.content ?? null, parsed: screen.parsed ?? null });
+    const evidence = deliveryEvidence(screen, text ?? "__SOAK_NO_MESSAGE__");
+    const listed = deliveryId || opts.cases.length ? await call("list_agents", { agent_ids: [seat.agentId],
+      detail: "full", max_age_ms: 0 }, "delivery") : null;
+    const delivery = listed?.deliveries?.find((row) => row.delivery_id === deliveryId);
+    const health = listed?.agents?.find((row) => row.agent_id === seat.agentId)?.health;
+    return { ...evidence, securityBanner: /Set up security for Daybreak mode/u.test(screen.content ?? "") &&
+      /esc to dismiss/u.test(screen.content ?? ""), busy: ["working", "thinking"].includes(screen.parsed?.status) ||
+      screen.parsed?.control_state === "busy", hasDraft: screen.parsed?.control_state === "composer_dirty",
+      hasQueue: /(?:Queued follow-up inputs|Messages to be submitted after next tool call)/iu.test(screen.content ?? ""),
+      needsAttention: delivery?.needs_attention === true,
+      draftAttention: health?.issue_codes?.includes("composer_draft_pending") === true, delivery_state: delivery?.delivery_state };
+  };
+  const sendChecked = async (seat, args, cycle, policy = {}) => {
+    const before = await readDelivery(seat, policy.text ?? args.text);
+    const receipt = await call("send_to", { ...args,
+      ...(args.mode === "agent" ? { agent_id: seat.agentId } : { surface: seat.surface, workspace: WORKSPACE }),
+      verbose: true }, cycle, undefined, policy);
+    // A completed socket write can precede the terminal's rendered frame.
+    // Bound that wait; visible composer text still fails an asserted submit.
+    const evidence = receipt.ok === true && !policy.control
+      ? await pollDelivery({ read: () => readDelivery(seat, policy.text ?? args.text, receipt.delivery_id),
+        now: Date.now, sleep, timeoutMs: 1000, until: (e) => e.readable &&
+          (policy.staged ? e.inComposer : e.inComposer || e.submitted || e.queued) })
+      : await readDelivery(seat, policy.text ?? args.text, receipt.delivery_id);
+    evidence.newAccepted = (evidence.submitted && !before.submitted) || (evidence.queued && !before.queued);
+    log({ kind: "post_send_evidence", cycle, receipt, before, evidence, text: policy.text ?? args.text });
+    if (policy.caller) check("caller_identity", receipt.caller_agent_id === policy.caller.agentId
+      ? [] : ["caller_identity_mismatch"], { cycle });
+    check("post_send", policy.control ? (evidence.readable ? [] : ["delivery_observation_unavailable"])
+      : checkPostSend(receipt, evidence, policy), { cycle });
+    if (receipt.error_code === "submit_unverified") unverifiedSends.set(receipt.delivery_id ?? `${cycle}:${args.text}`,
+      { seat, text: policy.text ?? args.text, receipt, before, cycle });
+    return { receipt, evidence };
+  };
+  const settleDelivery = async (seat, text, cycle, waitForIdle = true) => {
+    const evidence = await pollDelivery({ read: () => readDelivery(seat, text), now: Date.now,
+      sleep, timeoutMs: opts.queueDeadlineMs });
+    log({ kind: "delivery_deadline", cycle, text, evidence });
+    const failures = checkDeliveryDeadline(evidence, evidence.elapsedMs, opts.queueDeadlineMs);
+    check("no_stuck_delivery", failures, { cycle });
+    if (failures.length) throw new Error("stuck_delivery");
+    if (!waitForIdle) return;
+    const waited = await call("wait_for", { agent_id: seat.agentId,
+      target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
+    check("wait_for", checkStopWait(waited), { cycle });
+  };
   const readReply = async (cycle, agentId, surface, marker, waited) => {
-    let screen;
+    let screen = null;
     let firstObservation = true;
     const deadline = Date.now() + opts.timeoutMs;
     do {
@@ -259,16 +338,20 @@ async function main() {
     return close?.surface_closed === true;
   };
   const spawnSeat = async (cycle, cli, marker) => {
-    const spawn = await call("spawn_agent", { repo: "cmuxlayer", workspace: WORKSPACE,
+    const spawn = await call("spawn_agent", { repo: opts.target === "m1-gate" ? opts.repo : "soak", cwd: runtime.cwd, worktree: false, workspace: WORKSPACE,
       cli, ...(cli === "codex" ? { model: opts.codexModel, effort: opts.codexEffort }
         : opts.claudeModel ? { model: opts.claudeModel } : {}),
-      role: "worker", authority: "worker", placement: "right", force_new: true,
+      role: "worker", authority: "worker", placement: "right", force_new: true, verbose: true,
       mcp_profile: "sterile", prompt: `Reply exactly ${marker} then stop.` }, cycle);
     const seat = { agentId: spawn.agent_id, surface: spawn.surface_id ?? spawn.surface,
       surfaceUuid: spawn.surface_uuid ?? null, cli };
     if (seat.agentId) {
       active.set(seat.agentId, { surface: seat.surface, surfaceUuid: seat.surfaceUuid });
       spawnedIds.add(seat.agentId);
+    }
+    if (opts.target === "m1-gate" && seat.agentId) {
+      try { requireLauncherMode(JSON.parse(readFileSync(join(stateDir, seat.agentId, "state.json"), "utf8")), runtime.receipt.expected_launchers[cli]); }
+      catch (error) { check("launcher_gate", ["launcher_mode_unverified"], { cycle, cli, error: String(error) }); }
     }
     check("spawn_receipt", checkReceipt(spawn.boot_prompt_receipt ?? {
       submit_verified: spawn.boot_prompt_submit_verified,
@@ -279,6 +362,13 @@ async function main() {
     return { ...seat, spawn, valid: failures.length === 0 };
   };
   const closeSeat = async (cycle, seat) => {
+    for (const [id, entry] of unverifiedSends) if (entry.seat.agentId === seat?.agentId) {
+      const evidence = await readDelivery(seat, entry.text);
+      evidence.newAccepted = (evidence.submitted && !entry.before.submitted) || (evidence.queued && !entry.before.queued);
+      check("post_send_final", checkPostSend(entry.receipt, evidence), { cycle: entry.cycle });
+      log({ kind: "post_send_final", receipt: entry.receipt, evidence, text: entry.text });
+      unverifiedSends.delete(id);
+    }
     if (!seat?.agentId && !seat?.surface) return true;
     const closed = await closeOwned(cycle, seat.agentId, seat.surface, seat.surfaceUuid);
     if (closed && seat.agentId) active.delete(seat.agentId);
@@ -350,15 +440,16 @@ async function main() {
       if (!seat?.valid) return;
       const { agentId, surface } = seat;
       if (assignment.kind === "pool") {
-        const send = await call("send_to", { mode: "agent", agent_id: agentId,
-          text: `Reply exactly ${first} then stop.`, verbose: true }, cycle);
-        check("send_receipt", checkReceipt(send), { cycle, agent_id: agentId });
+        const { receipt: send } = await sendChecked(seat, { mode: "agent",
+          text: `Reply exactly ${first} then stop.` }, cycle);
+        check("send_receipt", send.queued_behind_turn === true ? [] : checkReceipt(send), { cycle, agent_id: agentId });
+        if (send.queued_behind_turn) await settleDelivery(seat, `Reply exactly ${first} then stop.`, cycle, false);
         await observe(cycle, agentId, surface);
         const waited = await call("wait_for", { agent_id: agentId,
           target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
         check("wait_for", checkStopWait(waited), { cycle, agent_id: agentId });
         const landed = await readReply(cycle, agentId, surface, first, waited);
-        check("send_receipt_after_reply", checkReceipt(send, landed), { cycle, agent_id: agentId });
+        check("send_receipt_after_reply", landed ? [] : ["stuck_delivery"], { cycle, agent_id: agentId });
         if (!send.ok || !landed || checkStopWait(waited).length) {
           check("pool_seat", ["pool_seat_died"], { cycle, slot: assignment.slot, agent_id: agentId });
           if (await closeSeat(cycle, seat)) {
@@ -376,15 +467,16 @@ async function main() {
       const firstLanded = await readReply(cycle, agentId, surface, first, firstWait);
       check("spawn_receipt_after_reply", checkReceipt(seat.spawn.boot_prompt_receipt ?? {
         submit_verified: seat.spawn.boot_prompt_submit_verified }, firstLanded), { cycle, agent_id: agentId });
-      const send = await call("send_to", { mode: "agent", agent_id: agentId,
-        text: `Reply exactly ${second} then stop.`, verbose: true }, cycle);
-      check("send_receipt", checkReceipt(send), { cycle, agent_id: agentId });
+      const { receipt: send } = await sendChecked(seat, { mode: "agent",
+        text: `Reply exactly ${second} then stop.` }, cycle);
+      check("send_receipt", send.queued_behind_turn === true ? [] : checkReceipt(send), { cycle, agent_id: agentId });
+      if (send.queued_behind_turn) await settleDelivery(seat, `Reply exactly ${second} then stop.`, cycle, false);
       await observe(cycle, agentId, surface);
       const secondWait = await call("wait_for", { agent_id: agentId,
         target_state: "idle", timeout_ms: opts.timeoutMs }, cycle);
       check("wait_for", checkStopWait(secondWait), { cycle, agent_id: agentId });
       const secondLanded = await readReply(cycle, agentId, surface, second, secondWait);
-      check("send_receipt_after_reply", checkReceipt(send, secondLanded), { cycle, agent_id: agentId });
+      check("send_receipt_after_reply", secondLanded ? [] : ["stuck_delivery"], { cycle, agent_id: agentId });
     } catch (error) {
       check("cycle_exception", ["cycle_exception"], { cycle, error: String(error) });
     } finally {
@@ -408,6 +500,8 @@ async function main() {
   try {
     await client.connect(transport);
     connected = true;
+    summary.server_info = client.getServerVersion();
+    if (opts.target === "m1-gate" && summary.server_info?.version !== "0.4.101") throw new Error("installed stdio release version mismatch");
     startPid = transport.pid;
     rssStartKb = serverRssKb(startPid);
     log({ kind: "start", options: opts });
@@ -416,6 +510,48 @@ async function main() {
       minimumCyclesComplete: () => summary.cycles_completed >= opts.cycles,
       onError: (error) => check("health", ["health_sample_exception"], { error: String(error) }) });
     startedAtMs = healthClock.startedAtMs;
+    if (opts.cases.length) {
+      const seat = await spawnSeat("delivery-cases", "codex", `SOAK_CASES_READY_${runId}`);
+      let callerSeat;
+      try {
+        if (!seat.valid) throw new Error("delivery case spawn failed");
+        const ownerMarker = `SOAK_OWNER_READY_${runId}`;
+        callerSeat = await spawnSeat("delivery-owner", "claude", ownerMarker);
+        if (!callerSeat.valid) throw new Error("delivery owner spawn failed");
+        const ownerWait = await call("wait_for", { agent_id: callerSeat.agentId, target_state: "idle", timeout_ms: opts.timeoutMs }, "delivery-owner");
+        if (!await readReply("delivery-owner", callerSeat.agentId, callerSeat.surface, ownerMarker, ownerWait)) throw new Error("delivery owner reply missing");
+        const waited = await call("wait_for", { agent_id: seat.agentId,
+          target_state: "idle", timeout_ms: opts.timeoutMs }, "delivery-cases");
+        if (!await readReply("delivery-cases", seat.agentId, seat.surface, `SOAK_CASES_READY_${runId}`, waited)) {
+          throw new Error("delivery case boot reply missing");
+        }
+        const callerState = JSON.parse(readFileSync(join(stateDir, callerSeat.agentId, "state.json"), "utf8"));
+        const owner = deliveryCaseCaller(callerSeat, callerState, WORKSPACE);
+        const targetState = JSON.parse(readFileSync(join(stateDir, seat.agentId, "state.json"), "utf8"));
+        const foreign = deliveryCaseCaller(seat, targetState, WORKSPACE);
+        seat.surfaceUuid = foreign.surface;
+        active.get(seat.agentId).surfaceUuid = foreign.surface;
+        const initial = await readDelivery(seat);
+        if (initial.securityBanner) {
+          await sendChecked(seat, { mode: "key", text: "escape" }, "delivery-cases:banner",
+            { caller: owner, control: true });
+          const dismissed = await pollDelivery({ read: () => readDelivery(seat), now: Date.now,
+            sleep, timeoutMs: 1000, until: (e) => !e.securityBanner });
+          if (dismissed.securityBanner) throw new Error("security_banner_not_dismissed");
+        }
+        const relayPrefix = `Read and follow ${root}/SOAK_LONG_RELAY_${runId}_`;
+        const relayText = `${relayPrefix}${"x".repeat(Math.max(0, 247 - relayPrefix.length))}.md`;
+        if (opts.cases.includes("h")) writeFileSync(relayText.slice("Read and follow ".length),
+          `Reply exactly SOAK_LONG_RELAY_DONE_${runId} then stop.\n`);
+        await runDeliveryCases({ cases: opts.cases, seat, owner, foreign, send: sendChecked, relayText,
+          read: (text, deliveryId) => readDelivery(seat, text, deliveryId), settle: settleDelivery,
+          opts, now: Date.now, sleep, check, log });
+      } catch (error) { check("delivery_case", ["delivery_case_setup_failed"], { error: String(error) }); }
+      finally {
+        try { await closeSeat("delivery-cases", seat); }
+        finally { await closeSeat("delivery-owner", callerSeat); }
+      }
+    }
     for (let slot = 0; slot < opts.pool; slot += 1) {
       try { poolSeats[slot] = await bootPoolSeat(slot, `pool:${slot}`); }
       catch (error) { check("pool_boot", ["pool_boot_exception"], { slot, error: String(error) }); }
@@ -458,6 +594,9 @@ async function main() {
     summary.pool.blocked_slots = blockedPoolSlots.size;
     summary.tools = Object.fromEntries(Object.entries(summary.tools).map(([name, values]) =>
       [name, { calls: values.length, p50_ms: percentile(values, 50), p95_ms: percentile(values, 95) }]));
+    const lifecycle = await runtime.close();
+    for (const code of lifecycle.violations) check("app_isolation", [code], {});
+    if (lifecycle.status !== "PASS" && !lifecycle.violations.length) check("app_isolation", ["app_lifecycle_failed"], {});
     summary.ok = summary.violations.length === 0 && summary.cycles_completed >= opts.cycles;
     writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
     process.stdout.write(`${summary.ok ? "SOAK_PASS" : "SOAK_FAIL"} ${summaryPath} ${eventsPath}\n`);

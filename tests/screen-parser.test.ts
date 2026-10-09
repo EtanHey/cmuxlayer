@@ -8,6 +8,7 @@ import {
   inferContextWindow,
   isPickerOrMenuScreen,
   classifyPromptDisposition,
+  codexScreenHasActiveTurn,
 } from "../src/screen-parser.js";
 
 const readFixture = (name: string) =>
@@ -37,6 +38,28 @@ const codexBannerOverlayReadyFixture = Buffer.from(
   readFixture("live/codex-0.154-update-banner-chronicle-ready.b64").trim(),
   "base64",
 ).toString("utf8");
+
+describe("codexScreenHasActiveTurn", () => {
+  it("detects an active turn above a bare composer", () => {
+    expect(codexScreenHasActiveTurn([
+      "OpenAI Codex",
+      "› Run the task",
+      "• Working (12s • esc to interrupt)",
+      "› ",
+      "gpt-6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n"))).toBe(true);
+  });
+
+  it("keeps an idle bare composer idle", () => {
+    expect(codexScreenHasActiveTurn([
+      "OpenAI Codex",
+      "› Run the task",
+      "• Done with the task",
+      "› ",
+      "gpt-6-sol high · ~/Gits/cmuxlayer",
+    ].join("\n"))).toBe(false);
+  });
+});
 
 describe("parseScreen", () => {
   it("treats the finished 0.4.81 Claude proof pane as ready and extracts its reply", () => {
@@ -1553,7 +1576,7 @@ Working (2m 06s • esc to interrupt)
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("working");
-    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBe(13); // 100 - 87% left = 13% used
     expect(parsed.actions).toContain('Ran rg -n "read_screen" src tests');
   });
@@ -1568,7 +1591,7 @@ Working (2m 08s • esc to interrupt)
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("working");
-    expect(parsed.model).toBe("gpt-5.4 xhigh");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBeNull();
   });
 
@@ -1579,7 +1602,7 @@ Working (2m 06s • esc to interrupt)
 `);
 
     expect(parsed.agent_type).toBe("codex");
-    expect(parsed.model).toBe("gpt-5.4 high");
+    expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.context_pct).toBe(13);
   });
 
@@ -1673,7 +1696,7 @@ TASK_DONE
 
     expect(parsed.agent_type).toBe("codex");
     expect(parsed.status).toBe("idle");
-    expect(parsed.model).toBe("gpt-5.5 xhigh");
+    expect(parsed.model).toBe("gpt-5.5");
   });
 
   it("keeps an explicit Codex header authoritative over a dot action glyph", () => {

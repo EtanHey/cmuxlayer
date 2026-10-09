@@ -1,3 +1,4 @@
+import { CODEX_FOOTER_RE } from "./codex-chrome.js";
 import type {
   ParsedCliUpdateState,
   ParsedScreenAgentType,
@@ -196,12 +197,11 @@ const MENU_SELECTOR_RE = /^\s*[>❯›]\s+\S.+$/m;
 const MENU_OPTION_RE = /^\s*\d+\.\s+\S.+$/m;
 const BARE_READY_PROMPT_RE = /^\s*(?:[>❯›]|codex\s*>)\s*$/i;
 const CODEX_READY_PLACEHOLDER_RE =
-  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/;
-const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/m;
+  /^\s*[›»]\s+(?:Implement \{feature\}|Ask Codex to do anything|Write tests for @filename|Find and fix a bug in @filename)\s*$/u;
+const PENDING_COMPOSER_LINE_RE = /^[ \t]*[❯›][ \t]+\S/mu;
 const CODEX_ALT_COMPOSER_LINE_RE = /^[ \t]*»[ \t]+\S/m;
-const CODEX_MODEL_FOOTER_RE =
-  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s]+(?:[ \t]+·[ \t]+\S[^\r\n·]{0,119})?$/i;
-const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/m;
+const CODEX_MODEL_FOOTER_RE = CODEX_FOOTER_RE;
+const CODEX_QUEUED_FOLLOWUP_RE = /^[ \t]*• Messages to be submitted after next tool call\b/mu;
 // Codex 0.157 prints this as the last row only while its composer holds a
 // draft during a running turn (#905).
 const CODEX_MIDTURN_DRAFT_FOOTER_RE = /(?:^|\n)[ \t]*tab to queue message[ \t]*\s*$/;
@@ -233,24 +233,23 @@ const CODEX_BOOT_PANEL_RE = /(?:^|\n)[^\n]*\bOpenAI\s+Codex\b[^\n]*(?:\n|$)/i;
 const CODEX_PANEL_MODEL_RE =
   /(?:^|\n)[^\n]*\b(?:Model|model)\s*:?\s*(gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?)\b/im;
 const CODEX_CONTEXT_LEFT_RE =
-  /^\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/m;
-const CODEX_CHROME_FOOTER_RE =
-  /^gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?\s*[·•]\s*\d+%\s+left\s*[·•]\s*(?:~\/|\/|\.{1,2}\/)[^\s]+(?:\s*[·•]\s*[^\n]*)?$/i;
-// Identity-only footer matcher. Composer/draft detection keeps its stricter
-// CODEX_MODEL_FOOTER_RE; live Codex chrome can append warning/task segments.
-const CODEX_BELOW_COMPOSER_FOOTER_RE =
-  /^[ \t]*[A-Za-z][\w.-]*[ \t]+(?:low|medium|high|xhigh|max|ultra)[ \t]+·[ \t]+(?:~\/|\/|\.{1,2}\/)[^\s·]+[ \t]*(?:·[^·\r\n]{0,240}){0,8}$/i;
+  /^\s*[^·\r\n]{1,120}\s*[·•]\s*(\d+)%\s+left(?:\s*[·•]\s*[^\n]*)?\s*$/mu;
+const CODEX_CHROME_FOOTER_RE = CODEX_FOOTER_RE;
+// Shared structural footer matcher includes warning/task segments.
+const CODEX_BELOW_COMPOSER_FOOTER_RE = CODEX_FOOTER_RE;
 const CODEX_CHROME_BANNER_RE =
-  /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/i;
+  /^\s*(?:[│┃║]\s*|>_\s*)?OpenAI Codex(?:\s*[│┃║])?\s*$/iu;
 const CODEX_CHROME_MODEL_RE =
-  /^\s*(?:[│┃║]\s*)?Model:\s*gpt-[0-9][0-9a-z.-]*(?:\s+\w+)?(?:\s*[│┃║])?\s*$/i;
+  /^\s*(?:[│┃║]\s*)?Model:[ \t]+[^│┃║\r\n]{1,120}(?:[│┃║])?\s*$/iu;
 const CLAUDE_CHROME_BANNER_RE = /^\s*Claude Code v\d+(?:\.\d+)*\b.*$/i;
-const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/i;
+const CLAUDE_CHROME_BYPASS_RE = /^\s*⏵⏵\s*bypass permissions on\b/iu;
 const CLAUDE_BELOW_COMPOSER_FOOTER_RE =
   /^[ \t]*(?:⏸[ \t]+plan mode on\b|⏵⏵[ \t]+accept edits on\b)/i;
 const CLAUDE_SHORTCUTS_FOOTER_RE = /^[ \t]*\?[ \t]+for shortcuts\b/i;
 const CODEX_WORKING_RE =
   /Working\s*\(([0-9]+m\s*[0-9]+s)\s*[•·]\s*esc to interrupt\)/i;
+const CODEX_TURN_ACTIVITY_LINE_RE =
+  /^\s*(?:[•·]\s*)?(?:Working|Thinking|Waiting(?: for background terminal)?)\s*\([^\n)]*\)(?:\s*[•·].*)?\s*$/i;
 const TERMINAL_ACTIVITY_LINE_RE =
   /^\s*(?:[•·]\s*)?(?:Working|Waiting for background terminal)\s*\((?:[0-9]+(?:\.[0-9]+)?[hms]\s*)+\s*[•·-]\s*esc to interrupt\)(?:\s*[•·].*)?\s*$/im;
 const CLAUDE_WORKING_LINE_RE =
@@ -826,6 +825,7 @@ export function antigravityScreenIsReady(text: string): boolean {
 }
 
 function detectAgentType(text: string): ParsedScreenAgentType {
+  if (isCodexDismissibleOverlay(text)) return "codex";
   // Transcript content above the last composer can quote another harness's
   // footer or spinner. Only footers below that composer establish live chrome;
   // boot banners remain useful before the composer is drawn.
@@ -1587,6 +1587,7 @@ function hasPickerNavigationBlock(text: string): boolean {
 export function isBlockingPromptChooserScreen(text: string): boolean {
   const normalized = normalizeText(text);
   return (
+    isCodexDismissibleOverlay(normalized) ||
     hasApprovalPromptBlock(normalized) ||
     analyzeActiveChooser(normalized) !== null ||
     hasInteractivePromptBlock(normalized) ||
@@ -1646,6 +1647,8 @@ export function hasVisibleAgentProgress(
 ): boolean {
   const normalized = normalizeText(text);
   if (
+    isCodexDismissibleOverlay(normalized) ||
+    isCodexModelAtCapacity(normalized) ||
     CONTEXT_LIMIT_BANNER_RE.test(normalized) ||
     hasApprovalPromptBlock(normalized)
   ) {
@@ -1680,6 +1683,41 @@ export function hasVisibleAgentProgress(
   );
 }
 
+/** Current Codex activity above the composer, including a dirty mid-turn draft. */
+export function codexScreenHasActiveTurn(text: string): boolean {
+  const normalized = normalizeText(text);
+  if (CODEX_MIDTURN_DRAFT_FOOTER_RE.test(normalized)) return true;
+  const lines = normalized.split("\n");
+  let composer = lines.length;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^\s*[›»](?:\s+\S|\s*$)/.test(lines[index] ?? "")) {
+      composer = index;
+      break;
+    }
+  }
+  let previousPrompt = -1;
+  for (let index = composer - 1; index >= 0; index -= 1) {
+    if (/^\s*[›»]\s+\S/.test(lines[index] ?? "")) {
+      previousPrompt = index;
+      break;
+    }
+  }
+  let latestActivity = -1;
+  let latestReply = -1;
+  for (let index = previousPrompt + 1; index < composer; index += 1) {
+    const line = lines[index] ?? "";
+    if (CODEX_TURN_ACTIVITY_LINE_RE.test(line) || THINKING_RE.test(line)) {
+      latestActivity = index;
+    }
+    else if (/^\s*[•·]\s+\S/.test(line) &&
+      !/^\s*[•·]\s+(?:Messages to be submitted after next tool call|Queued follow-up inputs)\b/.test(line) &&
+      !CODEX_CURRENT_ACTION_RE.test(line.replace(/^\s*[•·]\s+/, ""))) {
+      latestReply = index;
+    }
+  }
+  return latestActivity > latestReply;
+}
+
 function hasActiveAgentWork(
   text: string,
   agentType: ParsedScreenAgentType,
@@ -1698,6 +1736,7 @@ export function classifyPromptDisposition(
   cli?: CliType,
 ): PromptDisposition {
   const normalized = normalizeText(text);
+  if (isCodexDismissibleOverlay(normalized)) return { kind: "escalate", prompt_type: "human_or_unknown_chooser" };
   const agentType = detectAgentType(normalized);
   const chooser = analyzeActiveChooser(normalized);
   if (hasApprovalPromptBlock(normalized, chooser)) {
@@ -1721,9 +1760,126 @@ export function classifyPromptDisposition(
  * Detect an active terminal picker/menu whose next text bytes would be
  * interpreted as navigation or selection keystrokes instead of composer text.
  */
+/** Completion menus in the composer; permission/model choosers have other footers. */
+export function composerPickerFooterIndex(screenText: string): number {
+  const lines = normalizeText(screenText).split("\n");
+  for (let index = lines.length - 1; index >= Math.max(0, lines.length - 32); index--) {
+    const line = lines[index] ?? "";
+    if (!/^\s*(?:no matches\s*[·•]\s*)?enter\/tab insert\s*[·•]\s*esc close(?:\s*[·•]\s*↑\/↓ select\s*[·•]\s*←\/→ filter)?\s*$/iu.test(line) &&
+        !/^\s*↑(?:↓|\/↓) to navigate\s*[·•]\s*Enter to select\s*[·•]\s*Esc to cancel\s*$/iu.test(line)) continue;
+    if (lines.slice(index + 1).some(isReadyComposerLine)) return -1;
+    return index;
+  }
+  return -1;
+}
+
+const COMPLETION_OPTION_RE = /^\s*(?:[>❯›]\s*)?\/[\w:-]+\s{2,}\S/u;
+
+/** Bounds of the composer only, excluding completion rows on either side. */
+export function composerPickerBounds(text: string, cli?: CliType): { start: number; end: number } | null {
+  const lines = normalizeText(text).split("\n");
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^\s*[›❯>→](?:\s|$)/u.test(lines[index] ?? "") && !COMPLETION_OPTION_RE.test(lines[index] ?? "")) { composer = index; break; }
+  }
+  if (composer < 0) return null;
+  const footer = composerPickerFooterIndex(text);
+  if (footer >= 0) {
+    if (composer > footer) return { start: composer, end: lines.length };
+    let end = footer;
+    for (let index = composer + 1; index < footer; index++) {
+      if (/^\s*(?:no matches|loading\.\.\.)\s*$/iu.test(lines[index] ?? "") || COMPLETION_OPTION_RE.test(lines[index] ?? "")) { end = index; break; }
+    }
+    return { start: composer, end };
+  }
+  const input = (lines[composer] ?? "").replace(/^\s*[›❯>→]\s*/u, "");
+  const options = lines.map((line, index) => COMPLETION_OPTION_RE.test(line) ? index : -1).filter(index => index >= 0);
+  const lastOption = options.at(-1) ?? -1;
+  if (input.startsWith("/") && options.length >= 2) {
+    if ((cli === "codex" || cli === undefined) && lastOption < composer &&
+        lines.slice(lastOption + 1, composer).every(line => !line.trim())) return { start: composer, end: lines.length };
+    const first = options.find(index => index > composer);
+    if (first !== undefined && lines.slice(composer + 1, first).every(line => !line.trim() || /^─{8,}$/u.test(line.trim()))) return { start: composer, end: first };
+  }
+  if ((cli === "cursor" || cli === undefined) && /^\s*→/u.test(lines[composer] ?? "") &&
+      lines.slice(composer + 1).some(line => /^\s*▀{8,}\s*$/u.test(line)) &&
+      /^\s*No matches\s*$/iu.test([...lines].reverse().find(line => line.trim()) ?? "")) return { start: composer, end: composer + 1 };
+  return null;
+}
+
+/** Classify only the bottom setup overlay, never an earlier transcript quote. */
+export function codexDismissibleOverlayVariant(text: string): "advanced_account_security" | "daybreak" | "security" | "hooks_review" | null {
+  if (!/Press a number to choose|Hooks need review/iu.test(text)) return null;
+  const lines = normalizeText(text).trimEnd().split("\n").slice(-40);
+  const reverseFooter = [...lines].reverse().findIndex(line => /^\s*(?:Press a number to choose\s*·\s*esc to dismiss\s*·\s*type to continue|enter confirm\s*·\s*esc skip)\s*$/iu.test(line));
+  if (reverseFooter < 0) return null;
+  const footer = lines.length - 1 - reverseFooter;
+  const hooks = /enter confirm\s*·\s*esc skip/iu.test(lines[footer]);
+  const body = lines.slice(Math.max(0, footer - (hooks ? 12 : 8)), footer);
+  if (!body.some(line => (hooks ? /^\s*›\s*[123]\.\s+\S/u : /^\s*›\s*1\.\s+\S/u).test(line))) return null;
+  // An overlay may be the last thing drawn: no composer is required. If a
+  // composer follows, retain wrapped drafts, but reject later transcript rows.
+  const tail = lines.slice(footer + 1).filter(line => line.trim());
+  let composerSeen = false;
+  let chromeSeen = false;
+  for (const line of tail) {
+    if (/^\s*›(?:\s|$)/u.test(line)) {
+      if (composerSeen || chromeSeen) return null;
+      composerSeen = true;
+    } else if (codexIdleChromeLine(line)) {
+      chromeSeen = true;
+    } else if (!composerSeen || chromeSeen || !/^(?: {2}|\t)/u.test(line) ||
+        /^\s*[•■⏺]/u.test(line) || CODEX_WORKING_RE.test(line)) return null;
+  }
+  if (hooks) {
+    const option = (number: number, wording: string) => body.some(line => new RegExp(`^\\s*(?:›\\s*)?${number}\\.\\s+${wording}\\s*$`, "iu").test(line));
+    return body.some(line => /^\s*Hooks need review(?::.*)?\s*$/iu.test(line)) &&
+      option(1, "Review(?: hooks)?") && option(2, "Trust all(?: and continue)?") &&
+      option(3, "Continue without trusting(?: \\(hooks won't run\\))?") ? "hooks_review" : null;
+  }
+  const wording = body.join(" ");
+  if (/Advanced Account Security/iu.test(wording)) return "advanced_account_security";
+  if (/\bDaybreak\b/iu.test(wording)) return "daybreak";
+  return /\bsecurity\b/iu.test(wording) ? "security" : null;
+}
+
+export function codexAccountSecurityBannerVariant(text: string): "advanced_account_security" | "daybreak" | "security" | null {
+  const variant = codexDismissibleOverlayVariant(text);
+  return variant === "hooks_review" ? null : variant;
+}
+
+export function isCodexDismissibleOverlay(text: string): boolean {
+  // Account-security notices are inline chrome: text and Enter belong to the
+  // composer. Hooks review owns input and still requires Esc to skip.
+  return codexDismissibleOverlayVariant(text) === "hooks_review";
+}
+
+export function isCodexAccountSecurityBanner(text: string): boolean {
+  return codexAccountSecurityBannerVariant(text) !== null;
+}
+
+function codexIdleChromeLine(line: string): boolean {
+  return CODEX_CHROME_FOOTER_RE.test(line) || /^\s*\?\s*for shortcuts\b/iu.test(line) || /^\s*─+\s*$/u.test(line);
+}
+
+/** Capacity belongs to the latest message above an idle Codex composer. */
+function isCodexModelAtCapacity(text: string): boolean {
+  if (!text.includes("■ Selected model is at capacity. Please try a different model.")) return false;
+  if (detectAgentType(text) !== "codex") return false;
+  const lines = text.split("\n");
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (isReadyComposerLine(lines[index]) && /^\s*›/u.test(lines[index])) { composer = index; break; }
+  }
+  if (composer < 0 || lines.slice(composer + 1).some(line => line.trim() && !codexIdleChromeLine(line))) return false;
+  return /^\s*■ Selected model is at capacity\. Please try a different model\.\s*$/u.test(
+    [...lines.slice(0, composer)].reverse().find(line => line.trim()) ?? "",
+  );
+}
+
 export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   const normalized = normalizeText(text);
-  if (analyzeActiveChooser(normalized)) return true;
+  if (composerPickerBounds(normalized, cli) || isCodexDismissibleOverlay(normalized) || analyzeActiveChooser(normalized)) return true;
   if (
     (cli === undefined || cli === "codex") &&
     isCodexUpdateMenuScreenNormalized(normalized, { tailOnly: true })
@@ -1738,6 +1894,7 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
 
 function parseErrors(text: string): string[] {
   const errors: string[] = [];
+  if (isCodexModelAtCapacity(text)) errors.push("model_at_capacity");
 
   const rawLines = text.split("\n");
   const lines = rawLines.map((line) => line.trim());
@@ -1823,6 +1980,7 @@ function inferControlState(
   agentType: ParsedScreenAgentType,
   text: string,
 ): ParsedScreenResult["control_state"] {
+  if (isCodexDismissibleOverlay(text)) return "interactive_overlay";
   if (hasOsShellPrompt(text)) {
     return "shell";
   }
@@ -1939,10 +2097,14 @@ function parseModelAndCost(
   agentType: ParsedScreenAgentType,
 ): { model: string | null; cost: number | null } {
   if (agentType === "codex") {
-    const codexMatch = text.match(CODEX_HEADER_RE);
+    const footerMatch = text.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
+    // Canonical header/panel IDs outrank display labels in the footer.
+    const headerText = text.split("\n").filter(line => !CODEX_FOOTER_RE.test(line)).join("\n");
+    const codexMatch = headerText.match(CODEX_HEADER_RE);
     const panelModelMatch = text.match(CODEX_PANEL_MODEL_RE);
+    const canonical = codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim();
     return {
-      model: codexMatch?.[1]?.trim() ?? panelModelMatch?.[1]?.trim() ?? null,
+      model: canonical?.replace(/\s+(?:minimal|low|medium|high|xhigh|max|ultra|none)$/i, "") ?? footerMatch?.[1]?.trim() ?? null,
       cost: null,
     };
   }
@@ -2170,6 +2332,8 @@ function inferStatus(
     .map((line) => line.trim())
     .filter(Boolean);
   const joined = lines.join("\n");
+
+  if (isCodexDismissibleOverlay(text) || errors.includes("model_at_capacity")) return "frozen";
 
   if (doneSignal) {
     if (doneSignal.startsWith("CLAUDE_COUNTER:")) {

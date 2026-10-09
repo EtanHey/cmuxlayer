@@ -1,0 +1,12 @@
+  └ Making room to continue.
+
+• Queued follow-up inputs
+  ↳ PR-3 case-h delta @124ccc35: Opus PASS (strict exact-or-≥40-prefix queue evidence, wrap-
+    tolerant). Once your full hook is green: push and open the PR (size:L). The live run
+    waits for my "0.4.97 installed" post.
+    shift+← edit last queued message
+
+› Ask Codex to do anything
+
+  GPT-6.1-Sol high · ~/Gits/cmuxlayer/.worktrees/pr3-soak · Follow PR3 soak brief
+  ? for shortcuts                                                  ⚠ 1 warning · f2 to view

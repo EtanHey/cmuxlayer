@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
 import net from "node:net";
+import { chmodSync } from "node:fs";
 import {
+  chmod,
   lstat,
   mkdir,
   open,
+  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, basename, resolve } from "node:path";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
   Transport,
@@ -24,6 +27,20 @@ import {
   type CreateCmuxClientOptions,
 } from "./cmux-client-factory.js";
 import { createServer, createServerContext } from "./server.js";
+import {
+  appendCoalescedDaemonLog,
+  appendDaemonLog,
+  closeDaemonLog,
+  enableDaemonLog,
+  flushDaemonLog,
+  logErrorCode,
+  logErrorName,
+} from "./daemon-log.js";
+import {
+  awaitLifecycleFirstOutcome,
+  lifecycleInitState,
+  resolveLifecycleConnectionGateMs,
+} from "./mcp/context.js";
 import {
   makeSelfRegistrationSessionLookup,
   makeSelfRegistrationSessionResolver,
@@ -254,6 +271,12 @@ export interface CmuxLayerDaemonOptions extends Omit<
   serverFactory?: (
     connectionListener: (socket: net.Socket) => void,
   ) => net.Server;
+  /**
+   * #938: append lifecycle and connection events to the persistent daemon
+   * log (default path unless given). The daemon flushes and closes it on
+   * shutdown. `runDaemon` sets this only outside a test process.
+   */
+  daemonLog?: { path?: string };
 }
 
 export interface DaemonShutdownResult {
@@ -496,6 +519,9 @@ export class CmuxLayerDaemon {
   private contextPromise: Promise<CmuxServerContext> | null = null;
   private readonly socketPath: string;
   private readonly listenFd?: number;
+  private readonly socketPathKnown: boolean;
+  private readonly defaultSocketPath: boolean;
+  private socketPermissionsReady = false;
   private readonly drainTimeoutMs: number;
   private readonly activeTransports = new Set<SocketJsonRpcTransport>();
   private readonly activeServers = new Set<McpServer>();
@@ -513,11 +539,17 @@ export class CmuxLayerDaemon {
   private readonly logger: Pick<Console, "error">;
   private ownedSocketIdentity: { dev: number; ino: number } | null = null;
   private ownedPlaceholderIdentity: DaemonSocketIdentity | null = null;
+  private ownsDaemonLog = false;
 
   constructor(private readonly opts: CmuxLayerDaemonOptions = {}) {
     this.context = opts.context ?? null;
     this.socketPath = opts.socketPath ?? defaultDaemonSocketPath(process.env);
     this.listenFd = opts.listenFd ?? parseListenFd(process.env);
+    this.socketPathKnown = this.listenFd === undefined || opts.socketPath !== undefined ||
+      Boolean(process.env.CMUXLAYER_DAEMON_SOCKET?.trim());
+    this.defaultSocketPath = resolve(this.socketPath) === resolve(defaultDaemonSocketPath({
+      ...process.env, CMUXLAYER_DAEMON_SOCKET: undefined,
+    }));
     this.drainTimeoutMs = opts.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
     this.detectStaleBuildFn = opts.detectStaleBuild ?? detectStaleBuild;
     this.staleCheckIntervalMs =
@@ -531,16 +563,27 @@ export class CmuxLayerDaemon {
     if (this.server) {
       throw new Error("cmuxlayer daemon already started");
     }
+    if (this.opts.daemonLog) {
+      enableDaemonLog({ path: this.opts.daemonLog.path });
+      this.ownsDaemonLog = true;
+      appendDaemonLog("daemon_starting", {
+        node: process.version,
+        socket: basename(this.socketPath),
+      });
+    }
 
+    if (this.socketPathKnown) await this.prepareSocketDirectory();
     if (this.listenFd === undefined) {
-      await mkdir(dirname(this.socketPath), { recursive: true });
       await unlinkStaleSocket(this.socketPath);
     }
 
     await this.getContext();
 
     this.server = (this.opts.serverFactory ?? net.createServer)(
-      (socket) => void this.acceptConnection(socket),
+      (socket) => {
+        if (!this.socketPermissionsReady) socket.destroy();
+        else void this.acceptConnection(socket);
+      },
     );
     this.server.on("error", (error) => {
       if (!this.draining) {
@@ -566,7 +609,13 @@ export class CmuxLayerDaemon {
     }
 
     this.clearStaleBuildWatcher();
-    this.shutdownPromise = this.doShutdown(signal);
+    this.shutdownPromise = this.doShutdown(signal).finally(async () => {
+      if (this.ownsDaemonLog) {
+        this.ownsDaemonLog = false;
+        appendDaemonLog("daemon_stopped", { reason: signal });
+        await closeDaemonLog();
+      }
+    });
     return this.shutdownPromise;
   }
 
@@ -623,6 +672,11 @@ export class CmuxLayerDaemon {
 
   private async acceptConnection(socket: net.Socket): Promise<void> {
     if (this.draining) {
+      appendCoalescedDaemonLog(
+        "connection_refused",
+        "daemon_draining",
+        { cause: "daemon_draining" },
+      );
       socket.destroy();
       return;
     }
@@ -642,32 +696,70 @@ export class CmuxLayerDaemon {
     let context: CmuxServerContext;
     try {
       context = await this.getContext();
-    } catch {
+    } catch (error) {
       clearPendingSocket();
       socket.destroy();
+      this.logger.error(
+        "[cmuxlayer-daemon] dropping connection: server context creation failed",
+        error,
+      );
+      appendCoalescedDaemonLog(
+        "connection_refused",
+        `context_creation_failed:${logErrorCode(error)}`,
+        {
+          cause: "context_creation_failed",
+          error_code: logErrorCode(error),
+          error_name: logErrorName(error),
+        },
+      );
       return;
     }
 
     const mcpServer = createServer({
       context,
+      gateLifecycleTools: true,
       inboxBaseDir: this.opts.inboxBaseDir,
       outboxDrain: this.opts.outboxDrain,
       watchRegistryPath: this.opts.watchRegistryPath,
       watchRegistryNow: this.opts.watchRegistryNow,
       watchNotify: this.opts.watchNotify,
     });
-    try {
-      await (context.lifecycleStartPromise ?? Promise.resolve());
-      if (context.lifecycleStartError) {
-        throw context.lifecycleStartError;
-      }
-    } catch {
-      clearPendingSocket();
-      socket.destroy();
-      await mcpServer.close().catch(() => {});
-      return;
+    // #938: hold the connection only until lifecycle is ready or its first
+    // attempt has an outcome (bounded). A failed or slow lifecycle no longer
+    // drops the client: it is served, and lifecycle-gated tools answer with
+    // the named cause while initialization retries.
+    await awaitLifecycleFirstOutcome(
+      context,
+      resolveLifecycleConnectionGateMs(),
+    );
+    if (!context.lifecycleReady && context.lifecycleStarted) {
+      const lastErrorCode = context.lifecycleStartError
+        ? logErrorCode(context.lifecycleStartError)
+        : "none";
+      const state = lifecycleInitState(context);
+      this.logger.error(
+        `[cmuxlayer-daemon] serving connection before lifecycle is ready (state=${state}, attempt=${context.lifecycleStartAttempts}, last_error_code=${lastErrorCode})`,
+      );
+      appendCoalescedDaemonLog(
+        "connection_gated",
+        `lifecycle_not_ready:${state}:${lastErrorCode}`,
+        {
+          cause: "lifecycle_not_ready",
+          state,
+          attempt: context.lifecycleStartAttempts,
+          last_error_code: lastErrorCode,
+        },
+      );
     }
     if (this.draining || socket.destroyed || !socket.readable) {
+      const closedCause = this.draining
+        ? "daemon_draining_before_gate"
+        : "client_left_before_gate";
+      appendCoalescedDaemonLog(
+        "connection_closed",
+        closedCause,
+        { cause: closedCause },
+      );
       clearPendingSocket();
       socket.destroy();
       await mcpServer.close().catch(() => {});
@@ -800,6 +892,7 @@ export class CmuxLayerDaemon {
     if (this.retirementPromise) {
       return;
     }
+    appendDaemonLog("daemon_retiring", { reason });
     if (reason === "stale-build" && stale) {
       this.logger.error(
         `[cmuxlayer-daemon] installed version bump detected (running v${stale.running}, installed v${stale.installed}); retiring`,
@@ -824,6 +917,34 @@ export class CmuxLayerDaemon {
     }
   }
 
+  private async prepareSocketDirectory(): Promise<void> {
+    const dir = dirname(this.socketPath);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const stats = await lstat(dir);
+    if (!stats.isDirectory()) {
+      throw new Error(`Daemon socket directory is not a directory: ${dir}`);
+    }
+    if (this.defaultSocketPath) {
+      if ((stats.mode & 0o777) !== 0o700) await chmod(dir, 0o700);
+    } else if ((stats.mode & 0o022) !== 0) {
+      const error = `Refusing daemon socket directory: group/other-writable parent ${dir}`;
+      this.logger.error(`[cmuxlayer-daemon] ${error}`);
+      throw new Error(error);
+    }
+    const uid = process.getuid?.();
+    for (let ancestor = await realpath(dir); ; ancestor = dirname(ancestor)) {
+      const ancestorStats = await lstat(ancestor);
+      if (uid === undefined || !ancestorStats.isDirectory() ||
+        (ancestorStats.uid !== uid && ancestorStats.uid !== 0) ||
+        ((ancestorStats.mode & 0o022) !== 0 && (ancestorStats.mode & 0o1000) === 0)) {
+        const error = `Refusing daemon socket directory; unsafe ancestor: ${ancestor}`;
+        this.logger.error(`[cmuxlayer-daemon] ${error}`);
+        throw new Error(error);
+      }
+      if (dirname(ancestor) === ancestor) break;
+    }
+  }
+
   private listen(options: string | { fd: number }): Promise<void> {
     const server = this.server;
     if (!server) {
@@ -836,7 +957,17 @@ export class CmuxLayerDaemon {
       };
       const onListening = () => {
         server.off("error", onError);
-        resolve();
+        try {
+          // Synchronous chmod finishes in the listening event before a connection
+          // can be handed to MCP. Socket activation may not supply a pathname.
+          if (this.socketPathKnown) chmodSync(this.socketPath, 0o600);
+          else this.logger.error("[cmuxlayer-daemon] socket activation path unknown; skipping socket chmod");
+          this.socketPermissionsReady = true;
+          resolve();
+        } catch (error) {
+          server.close();
+          reject(error);
+        }
       };
       server.once("error", onError);
       if (typeof options === "string") {
@@ -1041,6 +1172,9 @@ export async function runDaemon(
   };
   const daemon = new CmuxLayerDaemon({
     ...opts,
+    // #938: the persistent log is on for the real daemon process; a test
+    // process gets it only when the test passes an explicit `daemonLog`.
+    daemonLog: opts.daemonLog ?? (testProcess ? undefined : {}),
     stateDir: opts.stateDir ?? configuredStateDir,
     inboxBaseDir: opts.inboxBaseDir ?? configuredInboxBaseDir,
     outboxDrain:
@@ -1081,8 +1215,17 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   // reported to its waiters. A piped stderr breaks when that parent exits; an
   // unhandled EPIPE there would kill an otherwise healthy shared daemon.
   process.stderr.on("error", () => {});
-  runDaemon().catch((error) => {
+  runDaemon().catch(async (error) => {
     console.error("[cmuxlayer-daemon] fatal", error);
+    appendDaemonLog("daemon_fatal", {
+      error_code: logErrorCode(error),
+      error_name: logErrorName(error),
+    });
+    // Bounded: a wedged disk must not keep a failed daemon alive.
+    await Promise.race([
+      flushDaemonLog(),
+      new Promise((resolve) => setTimeout(resolve, 500)),
+    ]);
     process.exit(1);
   });
 }

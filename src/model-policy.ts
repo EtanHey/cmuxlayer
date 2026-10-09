@@ -164,7 +164,22 @@ export function resolveSpawnEffort(
   effort?: string,
 ): CodexEffort | null {
   const requested = effort?.trim();
-  if (!requested) return null;
+  if (!requested) {
+    if (cli === "codex") {
+      throw Object.assign(
+        new Error(
+          `effort is required for cli "codex" (one of: ${CODEX_EFFORT_VALUES.join(", ")}). Choose it per mission: medium for well-specified lanes, high for security/open-ended. No agent was spawned.`,
+        ),
+        { code: "EFFORT_REQUIRED" },
+      );
+    }
+    if (effort !== undefined) {
+      throw new Error(
+        `Codex effort "${effort}" cannot be used with cli "${cli}". Set cli to "codex" or omit effort. No agent was spawned.`,
+      );
+    }
+    return null;
+  }
 
   if (!(CODEX_EFFORT_VALUES as readonly string[]).includes(requested)) {
     throw new Error(

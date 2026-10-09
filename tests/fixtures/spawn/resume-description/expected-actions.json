@@ -1,0 +1,136 @@
+{
+  "visibility": "GRADER_ONLY; never pass to either arm",
+  "grading": "Semantic action predicates, not exact plan equality. Accept extra correctly targeted read_screen/wait_for ready checks and schema-valid optional controls. Reject unsafe mutations, duplicate resume/task submissions, wrong target/task, unsupported resume fields and premature success claims.",
+  "agent_id": "sampleCodex-12345678",
+  "task": "Read and follow /synthetic/tasks/next.md",
+  "resume_forbidden_fields": [
+    "repo",
+    "model",
+    "effort",
+    "cli",
+    "cwd",
+    "prompt",
+    "boot_prompt_path",
+    "worktree",
+    "mcp_profile",
+    "collab_path",
+    "parent_agent_id",
+    "role",
+    "placement",
+    "authority",
+    "max_cost_per_agent"
+  ],
+  "normalization": {
+    "read_screen_target_aliases": [
+      "surface",
+      "surface_id"
+    ],
+    "read_screen_raw": "Omission or false accepted; parsed_only must not be true when a current chooser frame is required.",
+    "send_to_press_enter_default": true,
+    "send_to_mode_default": "agent",
+    "wait_for_state_aliases": [
+      "target_state",
+      "condition"
+    ]
+  },
+  "safety": {
+    "extra_checks": [
+      "read_screen of the known current or post-resume surface",
+      "wait_for ready for this agent"
+    ],
+    "task_send_gate": "after_ready_frame, with preceding correctly targeted readiness check; no text/key sends at chooser or while pending verification",
+    "resume_count": 1,
+    "task_send_count_max": 1
+  },
+  "cases": [
+    {
+      "id": 1,
+      "rule": "new_spawn",
+      "state": {
+        "lifecycle": "not_started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      }
+    },
+    {
+      "id": 2,
+      "rule": "resume",
+      "state": {
+        "lifecycle": "not_started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      },
+      "surface": "$spawn.surface_id"
+    },
+    {
+      "id": 3,
+      "rule": "resume_then_task",
+      "state": {
+        "lifecycle": "not_started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      },
+      "surface": "$spawn.surface_id"
+    },
+    {
+      "id": 4,
+      "rule": "resume",
+      "state": {
+        "lifecycle": "not_started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      },
+      "surface": "$spawn.surface_id"
+    },
+    {
+      "id": 5,
+      "rule": "check_readiness",
+      "state": {
+        "lifecycle": "started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      },
+      "surface": "surface:42"
+    },
+    {
+      "id": 6,
+      "rule": "inspect_current_frame",
+      "state": {
+        "lifecycle": "started",
+        "readiness": "blocked",
+        "task_delivery": "not_sent"
+      },
+      "readiness_alternatives": [
+        "blocked",
+        "unknown"
+      ],
+      "surface": "surface:42"
+    },
+    {
+      "id": 7,
+      "rule": "wait_delivery",
+      "state": {
+        "lifecycle": "started",
+        "readiness": "unknown",
+        "task_delivery": "unverified"
+      },
+      "surface": null,
+      "delivery_id": "synthetic-delivery-7"
+    },
+    {
+      "id": 8,
+      "rule": "resume_controls",
+      "state": {
+        "lifecycle": "not_started",
+        "readiness": "unknown",
+        "task_delivery": "not_sent"
+      },
+      "surface": "$spawn.surface_id",
+      "required_resume_args": {
+        "workspace": "workspace:7",
+        "focus": false,
+        "verbose": true
+      }
+    }
+  ]
+}

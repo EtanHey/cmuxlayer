@@ -53,6 +53,7 @@ export type DeliveryQueueOptions = Pick<
   | "deliveryVerifyTimeoutMs"
   | "deliveryVerifyDeadlineMs"
   | "deliveryQueueDeadlineMs"
+  | "deliveryAttentionMs"
   | "deliveryTicketDir"
   | "deliveryIssueFiler"
   | "deliveryVerifier"
@@ -84,6 +85,7 @@ export class DeliveryQueue {
   private deliveryVerifyTimeoutMs: number;
   private deliveryVerifyDeadlineMs: number;
   private deliveryQueueDeadlineMs: number;
+  private deliveryAttentionMs: number;
   private deliveryTicketDir: string | null;
   private deliveryIssueFiler: DeliveryIssueFiler | null = null;
 
@@ -111,6 +113,8 @@ export class DeliveryQueue {
       1,
       opts?.deliveryQueueDeadlineMs ?? DEFAULT_DELIVERY_QUEUE_DEADLINE_MS,
     );
+    const attentionEnv = Number(process.env.CMUXLAYER_DELIVERY_ATTENTION_MS);
+    this.deliveryAttentionMs = opts?.deliveryAttentionMs ?? (Number.isSafeInteger(attentionEnv) && attentionEnv > 0 ? attentionEnv : 10 * 60 * 1000);
     this.deliveryTicketDir = opts?.deliveryTicketDir ?? null;
     this.deliveryIssueFiler = opts?.deliveryIssueFiler ?? null;
     this.deliveryVerifier = opts?.deliveryVerifier ?? null;
@@ -219,6 +223,7 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
+    codex_busy_mode?: "steer" | "queue";
   }): AgentDeliveryReceipt {
     const existing = input.delivery_id
       ? this.deliveryReceipts.get(input.delivery_id)
@@ -229,6 +234,7 @@ export class DeliveryQueue {
       text: input.text,
       press_enter: input.press_enter,
       source_event: input.source_event,
+      codex_busy_mode: input.codex_busy_mode,
       delivery_state: "queued",
       terminal: false,
       created_at: existing?.created_at ?? new Date().toISOString(),
@@ -263,6 +269,7 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
+    codex_busy_mode?: "steer" | "queue";
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -298,11 +305,12 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
+    codex_busy_mode?: "steer" | "queue";
     retry_count: number;
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
     typed?: boolean;
     submit_dispatched?: boolean;
-    delivery_state?: "queued" | "queued_followup";
+    delivery_state?: "queued" | "steer_pending" | "queued_followup";
   }): AgentDeliveryReceipt {
     const acceptedAt = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
@@ -386,6 +394,7 @@ export class DeliveryQueue {
       if (
         (receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued" ||
+          receipt.delivery_state === "steer_pending" ||
           receipt.delivery_state === "queued_followup") &&
         receipt.agent_id === input.agent_id &&
         receipt.text === input.text &&
@@ -403,6 +412,7 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
     source_event: DeliveryEventType;
+    codex_busy_mode?: "steer" | "queue";
     retry_count: number;
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
     typed?: boolean;
@@ -413,6 +423,7 @@ export class DeliveryQueue {
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
     const existing = this.deliveryReceipts.get(input.delivery_id);
+    if (existing?.terminal && existing.submit_verified === true && existing.agent_id === input.agent_id && existing.text === input.text) return snapshotDeliveryReceipt(existing);
     const receipt: AgentDeliveryReceipt = {
       ...input,
       delivery_state: "pending_verify",
@@ -478,6 +489,7 @@ export class DeliveryQueue {
   }
 
   async verifyPendingDeliveries(): Promise<void> {
+    this.markStalePendingDeliveries();
     if (this.deliveryVerifyInFlight || !this.deliveryVerifier) return;
     this.deliveryVerifyInFlight = true;
     try {
@@ -494,10 +506,11 @@ export class DeliveryQueue {
         const watching =
           receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued_followup" ||
+          receipt.delivery_state === "steer_pending" ||
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
-        const deadlineApplies = receipt.delivery_state !== "queued_followup";
+        const deadlineApplies = receipt.delivery_state === "pending_verify";
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
@@ -550,6 +563,8 @@ export class DeliveryQueue {
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = observation.submit_verified ?? true;
           receipt.error = null;
+          receipt.needs_attention = false;
+          receipt.attention_reason = null;
           receipt.verify_miss_count = 0;
           this.persistDeliveryReceipts();
           if (receipt.press_enter && receipt.submit_verified === true) {
@@ -560,6 +575,10 @@ export class DeliveryQueue {
           this.appendDeliveryReceiptEventBestEffort(receipt);
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
+        }
+        if (observation.delivery_state && receipt.composer_accepted) {
+          receipt.delivery_state = observation.delivery_state;
+          this.persistDeliveryReceipts();
         }
         const compactionVisible =
           observation.reason === "queued_compaction_busy" ||
@@ -640,6 +659,18 @@ export class DeliveryQueue {
     }
   }
 
+  private markStalePendingDeliveries(): void {
+    for (const receipt of this.deliveryReceipts.values()) {
+      if (receipt.terminal || (receipt.delivery_state !== "queued" && receipt.delivery_state !== "steer_pending" && receipt.delivery_state !== "queued_followup")) continue;
+      const age = Date.now() - Date.parse(receipt.created_at);
+      if (!Number.isFinite(age) || age < this.deliveryAttentionMs || receipt.needs_attention) continue;
+      receipt.needs_attention = true;
+      receipt.attention_reason = `Delivery ${receipt.delivery_id} remains ${receipt.delivery_state} beyond ${this.deliveryAttentionMs}ms; inspect the target and verify delivery. No interrupt or replay was attempted.`;
+      this.persistDeliveryReceipts();
+      this.appendDeliveryReceiptEventBestEffort(receipt);
+    }
+  }
+
   private finalizeConfirmedBootRecovery(receipt: AgentDeliveryReceipt): void {
     if (!receipt.boot_recovery || receipt.boot_recovery_finalized_at ||
       receipt.delivery_state !== "submitted" ||
@@ -648,9 +679,10 @@ export class DeliveryQueue {
     if (!agent || agent.boot_instance_id !== receipt.boot_instance_id ||
       !["booting", "ready", "working"].includes(agent.state)) return;
     if (agent.boot_prompt_pending !== false || agent.prompt_delivered !== true ||
-      agent.submit_verified !== true) {
+      agent.submit_verified !== true || agent.boot_verify_started_at != null) {
       agent = this.stateMgr.updateRecord(agent.agent_id, {
         boot_prompt_pending: false,
+        boot_verify_started_at: null,
         prompt_delivered: true,
         submit_verified: true,
       });
@@ -696,6 +728,7 @@ export class DeliveryQueue {
   ): number {
     if (
       receipt.delivery_state === "queued_followup" ||
+      receipt.delivery_state === "steer_pending" ||
       !receipt.verify_deadline_at
     ) {
       const ageMs = Math.max(0, now - Date.parse(receipt.created_at));
@@ -768,7 +801,7 @@ export class DeliveryQueue {
       cli: agent?.cli ?? null,
       what_happened: `Delivery ${receipt.delivery_id} to ${receipt.agent_id} reached failed_confirmed (${reason}) after background verify.`,
       what_fixed_it:
-        "Do not blind-retry. Identical send_to while pending_verify/queued/queued_followup returns duplicate_of. Query wait_for({delivery_id}) or list_agents detail=full.",
+        "Do not blind-retry. Identical send_to while pending_verify/queued/steer_pending/queued_followup returns duplicate_of. Query wait_for({delivery_id}) or list_agents detail=full.",
       evidence: {
         receipt,
         observation,
@@ -918,6 +951,7 @@ export class DeliveryQueue {
           receipt.retry_screen_fingerprint = null;
           if (
             result.delivery === "queued" ||
+            result.delivery === "steer_pending" ||
             result.delivery === "queued_followup"
           ) {
             receipt.delivery_state = result.delivery;

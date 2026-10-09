@@ -599,6 +599,16 @@ describe.skipIf(!CAN_BIND_MOCK_SOCKET)("CmuxSocketClient", () => {
     ).rejects.toThrow(/does not support chunk_size/i);
   });
 
+  it.each(["Enter", "Return", "RETURN", "Escape", "Tab", "A"])(
+    "P0 dispatches normalized key %s without changing literal case",
+    async key => {
+      const client = new CmuxSocketClient({ socketPath: MOCK_SOCKET_PATH });
+      await client.sendKey("surface:1", key, { workspace: "workspace:1" });
+      expect(lastV2Request?.method).toBe("surface.send_key");
+      expect(lastV2Request?.params.key).toBe(key === "A" ? "A" : key.toLowerCase());
+    },
+  );
+
   it.each(["C-c", "ctrl-c", "^c", "Ctrl+C", "Ctrl-C"])(
     "normalizes %s to ctrl-c before sending",
     async (key) => {

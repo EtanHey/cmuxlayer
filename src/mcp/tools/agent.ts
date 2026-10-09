@@ -11,7 +11,7 @@ import { createDefaultCloseForensicsRunner } from "../../close-forensics.js";
 import { SURFACE_EVICTION_CONFIRMATION_MS } from "../../agent-registry.js";
 import { AgentEngine } from "../../agent-engine.js";
 import { type ClosureState } from "../../coordination-paths.js";
-import { defaultDeliveryTicketDir, fileDeliveryFailureGithubIssue } from "../../delivery-failure-tickets.js";
+import { defaultDeliveryTicketDir, defaultDeliveryIssueFiler } from "../../delivery-failure-tickets.js";
 import {
   canonicalAgentId,
   resolveWatchOwnerFromSources,
@@ -32,13 +32,18 @@ import type {
   AgentRole,
   CliType,
 } from "../../agent-types.js";
-import { isDeliberateCloseTombstone, isFailedSpawnTombstone } from "../../agent-types.js";
+import {
+  isDeliberateCloseTombstone,
+  isFailedSpawnTombstone,
+  isUnboundResumableSession,
+} from "../../agent-types.js";
 import { formatListAgents } from "../../format.js";
 import { dispatch } from "../../inbox.js";
 import { inferRecordRoleOrNull } from "../../layout-policy.js";
 import {
   invalidateSurfaceTopologyCallScope,
   healthTopologyOverrides,
+  placementMismatchForAgent,
   type SurfaceTopologySnapshot,
 } from "../../surface-topology.js";
 import { ANNOTATIONS } from "../schemas.js";
@@ -59,6 +64,7 @@ import type {
   CreateServerOptions,
   LifecycleAgentInputDeliverer,
 } from "../context.js";
+import { hasInboxTailRecordAuthority } from "../context.js";
 import type {
   CmuxSurface,
   ParsedControlPlaneState,
@@ -278,6 +284,12 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         clearStatus: (key, clearOpts) => client.clearStatus(key, clearOpts),
         readScreen: (surface, readOpts) =>
           client.readScreen(surface, readOpts),
+        withSurfaceWrite: (surface, run, writeOpts) => withSurfaceWrite(
+          surface,
+          // Bind the transport target too: a UUID lock cannot prevent ref reuse.
+          () => run(key => client.sendKey(writeOpts.stableSurfaceIdentity || surface, key, writeOpts)),
+          { ...writeOpts, toolName: "send_key", observePtyWrite: true },
+        ),
         send: (surface, text, sendOpts) => {
           const { beforeMutation, stableSurfaceIdentity, ...clientOpts } =
             sendOpts ?? {};
@@ -429,6 +441,12 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         selfRegistrationSessionLookup: context.selfRegistrationSessionLookup,
         roleSurfaceIdsProvider: collectServerRoleSurfaceIds,
         inboxOpts,
+        inboxTailReaper: {
+          recordAuthority: hasInboxTailRecordAuthority(
+            context.stateDir,
+            inboxOpts.baseDir,
+          ),
+        },
         launchCommandSender: async ({
           surface,
           stableSurfaceIdentity,
@@ -641,8 +659,15 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
                 source_event: "report_to_parent",
                 delivery_id: randomUUID(),
               });
+              if (delivery.delivery_id && (delivery.delivery === "steer_pending" || delivery.delivery === "queued" || delivery.delivery === "queued_followup")) {
+                engine.acceptComposerQueue({ delivery_id: delivery.delivery_id, agent_id: owner.agent_id,
+                  text, press_enter: true, source_event: "report_to_parent", retry_count: delivery.retry_count,
+                  rpc_methods: delivery.rpc_methods, typed: delivery.typed, submit_dispatched: delivery.submit_dispatched,
+                  delivery_state: delivery.delivery });
+              }
               const ownerDelivered =
                 delivery.delivery === "submitted" ||
+                delivery.delivery === "steer_pending" ||
                 delivery.delivery === "queued";
               return ownerDelivered
                 ? true
@@ -665,16 +690,13 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
         seatRegistry,
         seatRegistryPath: opts?.seatRegistryPath,
         deliveryVerifyDeadlineMs: opts?.deliveryVerifyDeadlineMs,
+        deliveryAttentionMs: opts?.deliveryAttentionMs,
         deliveryTicketDir:
           opts?.deliveryTicketDir ??
           (testProcess ? undefined : defaultDeliveryTicketDir()),
         deliveryIssueFiler:
           opts?.deliveryIssueFiler ??
-          (testProcess
-            ? undefined
-            : async (ticket) => {
-                await fileDeliveryFailureGithubIssue(ticket);
-              }),
+          (testProcess ? undefined : defaultDeliveryIssueFiler()),
       },
     );
   return engine;
@@ -716,11 +738,13 @@ export function registerListAgentsTool(
     surface_id: string;
     send_via: "send_to";
     closure: ClosureState;
-    /** #863: present only while the managed boot prompt is unsubmitted. */
-    boot?: "unsubmitted";
+    /** #950: expose pending boot resolution without another full-detail call. */
+    boot?: "unsubmitted" | "submitted" | "failed";
+    boot_reason?: string;
     /** #905: present only while the composer holds unsent text. */
     composer?: "draft_pending";
     parsed_cli_mismatch?: true;
+    placement_mismatch?: true;
     health?: AgentHealth;
   };
   type ListAgentsCacheEntry = {
@@ -741,6 +765,7 @@ export function registerListAgentsTool(
               surface,
               workspace,
               uuid: topology.surfaceIdByRef.get(surface) ?? null,
+              column: topology.topologyBySurface.get(surface)?.column ?? null,
             }))
             .sort((a, b) => a.surface.localeCompare(b.surface))
         : [],
@@ -822,7 +847,8 @@ export function registerListAgentsTool(
       const filter = {
         repo: args.repo,
         model: args.model,
-        blocked_on_prompt: args.blocked_on_prompt,
+        // Apply prompt filtering after the live screen enriches each row.
+        blocked_on_prompt: undefined,
       };
       const requestedState = args.state;
       const cacheKey = JSON.stringify({
@@ -867,9 +893,13 @@ export function registerListAgentsTool(
                 send_via: agent.send_via,
                 closure: agent.closure,
                 ...(agent.boot ? { boot: agent.boot } : {}),
+                ...(agent.boot_reason ? { boot_reason: agent.boot_reason } : {}),
                 ...(agent.composer ? { composer: agent.composer } : {}),
                 ...(agent.parsed_cli_mismatch === true
                   ? { parsed_cli_mismatch: true }
+                  : {}),
+                ...(agent.placement_mismatch === true
+                  ? { placement_mismatch: true }
                   : {}),
               }));
         const data = {
@@ -957,6 +987,7 @@ export function registerListAgentsTool(
             : records.filter(
                 (agent) =>
                   !isDeliberateCloseTombstone(agent) &&
+                  !isUnboundResumableSession(agent) &&
                   (!isFailedSpawnTombstone(agent) ||
                     failedSpawnSurfaceStillListed(agent)),
               );
@@ -1022,14 +1053,28 @@ export function registerListAgentsTool(
                 topology,
               );
               const reconciledState = health.reconciled_state ?? agent.state;
+              const role = inferRecordRoleOrNull(agent);
+              const placementMismatch = placementMismatchForAgent(agent, topology);
               // #863: the health block keeps an unsubmitted boot `booting`;
               // that state is the registry's, not the screen's.
               const bootUnsubmitted = health.issue_codes.includes(
                 "boot_prompt_unsubmitted",
               );
-              const screenObservation = trustedScreenObservation
+              const bootResolvedFromPending =
+                !!agent.boot_verify_started_at &&
+                agent.boot_prompt_pending === false;
+              const boot = bootUnsubmitted
+                ? "unsubmitted" as const
+                : bootResolvedFromPending && agent.prompt_delivered === true &&
+                    agent.submit_verified === true
+                  ? "submitted" as const
+                  : bootResolvedFromPending && agent.state === "error" &&
+                      agent.submit_verified === false
+                    ? "failed" as const
+                    : null;
+              const screenObservation = trustedScreenObservation && liveDiscovery
                 ? {
-                    observed_at_ms: liveDiscovery!.observed_at_ms,
+                    observed_at_ms: liveDiscovery.observed_at_ms,
                     status: trustedScreenObservation.parsed_status,
                     agent_type:
                       trustedScreenObservation.cli === "kiro"
@@ -1066,8 +1111,16 @@ export function registerListAgentsTool(
                           }
                         : {}),
                   }),
+                  ...(liveDiscovery &&
+                      (trustedScreenObservation?.control_state === "interactive_overlay" ||
+                       trustedScreenObservation?.control_state === "permission_prompt")
+                    ? { blocked_on_prompt: { value: true, source: "screen" as const, observed_at_ms: liveDiscovery.observed_at_ms } }
+                    : {}),
                   cli: agent.cli,
-                  role: inferRecordRoleOrNull(agent),
+                  role,
+                  ...(placementMismatch
+                    ? { placement_mismatch: true as const }
+                    : {}),
                   ...(agent.collab_path ? { collab_path: agent.collab_path } : {}),
                   surface_id: agent.surface_id,
                   send_via: "send_to" as const,
@@ -1084,7 +1137,10 @@ export function registerListAgentsTool(
                   // (pending -> wait) WITHOUT a second full-detail call. A bare
                   // boolean made both of those `false`; that was the S3 bug.
                   closure: rowHarvestability.closure,
-                  ...(bootUnsubmitted ? { boot: "unsubmitted" as const } : {}),
+                  ...(boot ? { boot } : {}),
+                  ...(boot === "failed"
+                    ? { boot_reason: agent.error ?? "Boot submission was not verified" }
+                    : {}),
                   ...(health.issue_codes.includes("composer_draft_pending")
                     ? { composer: "draft_pending" as const }
                     : {}),
@@ -1123,11 +1179,14 @@ export function registerListAgentsTool(
         const skippedAgents = rows.flatMap((row) =>
           row.skipped ? [row.skipped] : [],
         );
+        const promptFilteredAgents = args.blocked_on_prompt === undefined
+          ? enrichedAgents
+          : enrichedAgents.filter(agent => agent.blocked_on_prompt.value === args.blocked_on_prompt);
         const agents = requestedState
-          ? enrichedAgents.filter(
+          ? promptFilteredAgents.filter(
               (agent) => agent.state.value === requestedState,
             )
-          : enrichedAgents;
+          : promptFilteredAgents;
         const entry: ListAgentsCacheEntry = {
           topology_signature: topologySignature,
           derived_at: Date.now(),
@@ -1229,6 +1288,25 @@ export function registerListAgentsTool(
           // holder cannot stale this scan, so it must not invalidate it (#892).
           { label: "list-agents", observeOnly: true },
         );
+        const selfRegisteredIds = new Set(
+          live.merged
+            .filter((agent) =>
+              (agent.surface_provenance ?? "unknown") === "unknown" &&
+              Boolean(agent.cli_session_id && agent.surface_uuid))
+            .map((agent) => agent.agent_id),
+        );
+        if (selfRegisteredIds.size > 0) {
+          try {
+            await engine.runLifecycleMutation(
+              () => engine.reconcileRolePlacements("idle", {
+                agentIds: selfRegisteredIds,
+              }),
+              { label: "self-registration-placement" },
+            );
+          } catch {
+            // Listing remains available; the unresolved mismatch stays visible.
+          }
+        }
         invalidateSurfaceTopologyCallScope(client as object);
         const reconciledTopology = await collectSurfaceTopology();
         const reconciledTopologySignature =
@@ -1272,7 +1350,7 @@ export function registerListAgentsTool(
 export interface ReportToParentToolDeps {
   assertWorkerUpwardChannel: (target: string) => void;
   awaitLifecycleStart: () => Promise<void>;
-  deliverReportInboxPointer: (recipient: AgentRecord, message: ReturnType<typeof dispatch>) => Promise<{ delivery: "submitted" | "queued" | "queued_followup" | "rescued" | "pending_verify"; delivery_id?: string; }>;
+  deliverReportInboxPointer: (recipient: AgentRecord, message: ReturnType<typeof dispatch>) => Promise<{ delivery: "submitted" | "queued" | "steer_pending" | "queued_followup" | "rescued" | "pending_verify"; delivery_id?: string; }>;
   inboxOpts: InboxOpts;
   registry: AgentRegistry;
   resolveCurrentCallerAgent: () => AgentRecord | null;

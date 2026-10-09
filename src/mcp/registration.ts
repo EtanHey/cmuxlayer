@@ -14,6 +14,7 @@ import type { CmuxClient } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
 import type { DefaultToolPalette } from "../palette.js";
+import { shapeSpawnResponse } from "../spawn-response.js";
 import type { StateManager } from "../state-manager.js";
 import { runWithSurfaceTopologyCallScope } from "../surface-topology.js";
 import {
@@ -30,6 +31,7 @@ import {
   PUBLIC_TOOL_OUTPUT_SCHEMAS,
 } from "./schemas.js";
 import {
+  err,
   ok,
   shapeSuccessfulSendToResult,
   type ToolReturn,
@@ -139,7 +141,20 @@ export interface ToolRegistrationOptions {
   palette: DefaultToolPalette | null;
   /** Caller agent stamped onto send_to receipts. */
   resolveCallerAgentId: () => string | null;
+  /**
+   * #938: throws a named error while lifecycle initialization is retrying;
+   * applied to every tool that needs the lifecycle engine.
+   */
+  lifecycleGate?: () => Promise<void>;
 }
+
+/** #938: tools that answer from cmux or process state, not the engine. */
+const LIFECYCLE_FREE_TOOLS = new Set([
+  "control_health",
+  "list_surfaces",
+  "read_screen",
+  "expand_palette",
+]);
 
 export interface ToolRegistration {
   toolHandlersByName: ToolHandlerRegistry;
@@ -177,7 +192,8 @@ function isLeanSuccessfulTransportReceipt(
     structured.delivery_state === "submitted" && structured.submitted === true;
   const verifiedKeyReceipt =
     typeof structured.key === "string" && structured.submit_verified === true;
-  return submittedReceipt || verifiedKeyReceipt;
+  const verifiedBatch = Array.isArray(structured.receipts) && structured.receipts.length > 0 && structured.receipts.every(receipt => receipt?.ok === true || Boolean(receipt?.skipped) || receipt?.resolution === "filtered_out");
+  return verifiedBatch || submittedReceipt || structured.delivery_state === "queued" || structured.delivery_state === "steer_pending" || structured.delivery_state === "queued_followup" || verifiedKeyReceipt;
 }
 
 export function installToolRegistration(
@@ -186,6 +202,7 @@ export function installToolRegistration(
     client,
     palette,
     resolveCallerAgentId,
+    lifecycleGate,
   }: ToolRegistrationOptions,
 ): ToolRegistration {
   const rawTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
@@ -237,6 +254,16 @@ export function installToolRegistration(
       toolName,
       verbose,
     );
+    // Spawn's compact receipt has no transport fields, including warnings.
+    if (leanSuccessfulReceipt && toolName === "spawn_agent") {
+      // Covers terminal spawns as well as managed spawn/resume receipts.
+      const payload = shapeSpawnResponse(structured);
+      return {
+        ...toolResult,
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
+    }
     const provenance = transportProvenance();
     const existingWarnings = Array.isArray(structured.warnings)
       ? structured.warnings
@@ -246,6 +273,7 @@ export function installToolRegistration(
       : [];
     const warnings = [...new Set([...existingWarnings, ...provenanceWarnings])];
     if (leanSuccessfulReceipt) {
+      if (toolName === "send_to" && typeof structured.key !== "string") return result;
       if (warnings.length === 0) return result;
       const nextStructured = { ...structured, warnings };
       return {
@@ -363,6 +391,13 @@ export function installToolRegistration(
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
+            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString)) {
+              try {
+                await lifecycleGate();
+              } catch (error) {
+                return err(error);
+              }
+            }
             const callerAgentId = toolNameString === "send_to" ? resolveCallerAgentId() : null;
             let handled = (await handler(...handlerArgs)) as ToolReturn;
             if (toolNameString === "send_to") {
@@ -379,7 +414,7 @@ export function installToolRegistration(
               }) };
             }
             const shaped =
-              toolNameString === "send_to" && !verbose
+              toolNameString === "send_to"
                 ? shapeSuccessfulSendToResult(handled, rawArgs)
                 : handled;
             return attachTransportProvenance(shaped, toolNameString, verbose);

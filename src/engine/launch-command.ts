@@ -6,6 +6,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { CODEX_FOOTER_RE } from "../codex-chrome.js";
 import { isSafeShellToken } from "../sanitize.js";
 import {
   AGENT_ENV,
@@ -193,13 +194,22 @@ export function computeModelMismatch(
     }
     return requestedClaude.context === parsedClaude.context ? false : null;
   }
+  // Codex display labels do not identify a pinned model ID.
+  if (requested.startsWith("gpt-") && !/^gpt-\d[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh|max|ultra|none))?$/.test(parsed)) {
+    return null;
+  }
   return !parsed.includes(requested) && !requested.includes(parsed);
 }
 
 export function parseCodexEffort(
   parsedModel: string | null,
+  screen?: string,
 ): CodexEffort | null {
-  const candidate = parsedModel?.trim().split(/\s+/).at(-1)?.toLowerCase();
+  const footer = screen?.split("\n").reverse().map(line => line.match(CODEX_FOOTER_RE)).find(Boolean);
+  const footerWord = footer?.[0].split(/[·•]/u)[0].trim().split(/\s+/u).at(-1)?.toLowerCase();
+  const footerEffort = footerWord && (CODEX_EFFORT_VALUES as readonly string[]).includes(footerWord) ? footerWord : null;
+  const headerEffort = screen?.match(/(?:^|\n)[ \t]*(?:[│┃║][ \t]*)?(?:Model:[ \t]*)?gpt-\d[\w.-]*[ \t]+(minimal|low|medium|high|xhigh|max|ultra|none)\b/iu)?.[1];
+  const candidate = (footerEffort ?? headerEffort ?? parsedModel?.trim().split(/\s+/).at(-1))?.toLowerCase();
   return candidate &&
     (CODEX_EFFORT_VALUES as readonly string[]).includes(candidate)
     ? (candidate as CodexEffort)
@@ -314,7 +324,7 @@ export function buildLaunchCommand(
     allowModelOverride?: boolean;
     effort?: CodexEffort;
     launchMode?: AgentLaunchMode;
-    /** Non-Claude worker authority skips launcher persona injection. */
+    /** Worker authority is conveyed to repoGolem launchers with --worker. */
     authority?: AgentAuthority;
     /** Approval handling for this launch; defaults to the machine's setting. */
     permissionMode?: SpawnPermissionMode;
@@ -343,8 +353,6 @@ export function buildLaunchCommand(
   const codexModelOverride =
     cli === "codex" && modelFlag !== null && modelFlag !== "codex";
   const envParts = [
-    // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
-    opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
     codexModelOverride ? `${MODEL_OVERRIDE_ENV}=1` : null,
     opts?.envPrefix ?? null,
   ].filter((part): part is string => Boolean(part));
@@ -358,8 +366,6 @@ export function buildLaunchCommand(
     // REPOGOLEM_ALLOW_MODEL is a launcher-only escape hatch; it means nothing
     // to a raw binary, so raw mode carries only the harness + caller env.
     const rawEnvParts = [
-      // Claude maps GOLEM_ROLE=worker to medium effort; preserve its existing effort.
-      opts?.authority === "worker" && cli !== "claude" ? "GOLEM_ROLE=worker" : null,
       cli === "claude" || cli === "gemini" ? AGENT_ENV : null,
       opts?.envPrefix ?? null,
     ].filter((part): part is string => Boolean(part));
@@ -389,17 +395,17 @@ export function buildLaunchCommand(
   switch (cli) {
     case "claude":
       // repoGolem launcher handles env vars via ralph-registry
-      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${claudeModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Claude`}${launcherSkipArg}${launcherWorkerArg}${claudeModelArgs}${launcherWorktreeArg}`;
     case "codex":
       return `${envPrefix}${launcherName ?? `${safeRepo}Codex`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherEffortArg}${launcherWorktreeArg}`;
     case "gemini":
       // repoGolem launcher (e.g. golemsGemini -s) wires antigravity + MCP.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Gemini`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherWorktreeArg}`;
     case "kiro":
       return `${rawCdPrefix || defaultKiroCd(repo)}${envPrefix}${AGENT_ENV} kiro-cli${rawModelArgs}`;
     case "cursor":
       // repoGolem launcher - requires registration via golem-powers.
-      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`}${launcherSkipArg}${launcherModelArgs}${launcherWorktreeArg}`;
+      return `${envPrefix}${launcherName ?? `${safeRepo}Cursor`}${launcherSkipArg}${launcherWorkerArg}${launcherModelArgs}${launcherWorktreeArg}`;
   }
 }
 

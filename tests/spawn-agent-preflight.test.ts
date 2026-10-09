@@ -99,6 +99,15 @@ describe("spawn_agent launcher preflight", () => {
     expect(mockClient.newSplit).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, "", "   "])("rejects missing Codex effort %j before engine allocation", async (effort) => {
+    await expect(engine.spawnAgent({ repo: "cmuxlayer", cli: "codex", effort, prompt: "" }))
+      .rejects.toMatchObject({ code: "EFFORT_REQUIRED" });
+    expect(stateMgr.listStates()).toHaveLength(0);
+    expect(engine.listAgents()).toHaveLength(0);
+    expect(mockClient.newSplit).not.toHaveBeenCalled();
+    expect(mockClient.newSurface).not.toHaveBeenCalled();
+  });
+
   it("rejects an unknown Codex model from Codex's account model list before creating anything", async () => {
     const registryPath = join(TEST_DIR, "launchers.zsh");
     writeFileSync(
@@ -118,7 +127,7 @@ describe("spawn_agent launcher preflight", () => {
         defaultEngine.spawnAgent({
           repo: "cmuxlayer",
           model: "gpt-9.9-totally-not-a-model",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "",
         }),
       ).rejects.toThrow(
@@ -164,7 +173,7 @@ describe("spawn_agent launcher preflight", () => {
     );
     try {
       return await engine
-        .spawnAgent({ repo: "cmuxlayer", model, cli: "codex", prompt: "" })
+        .spawnAgent({ repo: "cmuxlayer", model, cli: "codex", effort: "medium", prompt: "" })
         .then(
           () => ({ ok: true as const, error: null }),
           (error: unknown) => ({

@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultDeliveryTicketDir } from "../src/delivery-failure-tickets.js";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,8 @@ import {
   type CmuxAppServerRuntimeOptions,
 } from "../src/app-server-runtime.js";
 import type { AgentRecord } from "../src/agent-types.js";
+
+afterEach(() => vi.unstubAllEnvs());
 
 const TEST_DIR = join(tmpdir(), "cmux-app-server-runtime-test");
 
@@ -97,6 +100,39 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it("#1007 native banner transaction excludes concurrent UUID-routed input", async () => {
+    rmSync(TEST_DIR, { recursive: true, force: true }); mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const uuid = "11111111-2222-4333-8444-555555555555";
+    vi.spyOn(runtime as any, "resolveFreshMutationRoute").mockResolvedValue({ ...makeRecord(), surface_uuid: uuid });
+    try {
+      await (runtime as any).engine.client.withSurfaceWrite("surface:1", async (sendKey: (key: string) => Promise<void>) => {
+        await expect(runtime.sendTurn({ threadId: "agent-1", text: "concurrent" })).rejects.toThrow(/busy/u);
+        expect(client.send).not.toHaveBeenCalled();
+        await sendKey("escape");
+      }, { workspace: "workspace:app", stableSurfaceIdentity: uuid });
+      expect(client.sendKey).toHaveBeenCalledWith(uuid, "escape", { workspace: "workspace:app", stableSurfaceIdentity: uuid });
+      await runtime.sendTurn({ threadId: "agent-1", text: "after dismissal" });
+      expect(client.sendKey.mock.calls.map((call: unknown[]) => call[1])).toEqual(["escape", "return"]);
+    } finally { runtime.dispose(); rmSync(TEST_DIR, { recursive: true, force: true }); }
+  });
+  it.each([undefined, "0", "1"])("gates production public filing with flag %s", (flag) => {
+    vi.stubEnv("VITEST", "false");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("CMUXLAYER_FILE_DELIVERY_TICKETS", flag);
+    const runtime = new CmuxAppServerRuntime({ client: makeClient(), stateDir: TEST_DIR });
+    try {
+      const queue = (runtime as any).engine.deliveryQueue;
+      expect(typeof queue.deliveryIssueFiler).toBe(flag === "1" ? "function" : "object");
+      if (flag !== "1") expect(queue.deliveryIssueFiler).toBeNull();
+      expect(queue.deliveryTicketDir).toBe(defaultDeliveryTicketDir());
+    } finally {
+      runtime.dispose();
+      vi.unstubAllEnvs();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
   it("passes its inbox directory to the engine marker reaper", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -750,6 +786,28 @@ describe("CmuxAppServerRuntime", () => {
     }
   });
 
+  it.each([
+    [undefined, undefined, /App Server thread\/start needs a Codex launch effort: send params.effort or set CMUXLAYER_APP_SERVER_CODEX_EFFORT/],
+    [undefined, "invalid", /Invalid Codex effort/],
+    [undefined, "", /effort is required/],
+    ["", "medium", /effort is required/],
+    ["   ", "medium", /effort is required/],
+  ])("rejects launch effort %j with env %j before App Server allocation", async (effort, env, error) => {
+    vi.stubEnv("CMUXLAYER_APP_SERVER_CODEX_EFFORT", env);
+    const client = makeClient();
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR });
+    const spawnAgent = vi.spyOn((runtime as any).engine, "spawnAgent");
+    try {
+      await expect(runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer", effort }))
+        .rejects.toThrow(error);
+      expect(spawnAgent).not.toHaveBeenCalled();
+      expect(client.newSplit).not.toHaveBeenCalled();
+      expect(client.newSurface).not.toHaveBeenCalled();
+    } finally {
+      runtime.dispose();
+    }
+  });
+
   it("blocks starting a thread in a selected manual workspace", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -774,7 +832,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
+        runtime.startThread({ effort: "medium", cwd: "/home/test-user/Gits/brainlayer" }),
       ).rejects.toThrow(/manual mode/i);
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
@@ -785,7 +843,11 @@ describe("CmuxAppServerRuntime", () => {
     }
   });
 
-  it("starts a thread in a repo workspace belonging to another window", async () => {
+  it.each([
+    ["medium", "invalid", "medium"],
+    [undefined, "high", "high"],
+  ])("starts a thread in another window with param %j and env %j", async (effort, env, expectedEffort) => {
+    vi.stubEnv("CMUXLAYER_APP_SERVER_CODEX_EFFORT", env);
     rmSync(TEST_DIR, { recursive: true, force: true });
     mkdirSync(TEST_DIR, { recursive: true });
     const client = makeClient();
@@ -843,10 +905,10 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
+        runtime.startThread({ effort, cwd: "/home/test-user/Gits/brainlayer" }),
       ).resolves.toMatchObject({ threadId: record.agent_id });
       expect(spawnAgent).toHaveBeenCalledWith(
-        expect.objectContaining({ workspace: "workspace:B" }),
+        expect.objectContaining({ workspace: "workspace:B", effort: expectedEffort }),
       );
       expect(client.listWorkspaces).toHaveBeenCalledWith({
         window: "window:A",
@@ -881,7 +943,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
+        runtime.startThread({ effort: "medium", cwd: "/home/test-user/Gits/brainlayer" }),
       ).rejects.toThrow(/matching workspace.*brainlayer/i);
       expect(spawnAgent).not.toHaveBeenCalled();
       expect(client.newSplit).not.toHaveBeenCalled();
@@ -1005,7 +1067,7 @@ describe("CmuxAppServerRuntime", () => {
 
       try {
         await expect(
-          runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
+          runtime.startThread({ effort: "medium", cwd: "/home/test-user/Gits/brainlayer" }),
         ).resolves.toMatchObject({ threadId: record.agent_id });
         expect(client.identify).toHaveBeenCalledTimes(expectedIdentifyCalls);
         expect(client.focusSurface).toHaveBeenCalledTimes(expectedRestoreCalls);
@@ -1070,7 +1132,7 @@ describe("CmuxAppServerRuntime", () => {
 
     try {
       await expect(
-        runtime.startThread({ cwd: "/home/test-user/Gits/brainlayer" }),
+        runtime.startThread({ effort: "medium", cwd: "/home/test-user/Gits/brainlayer" }),
       ).resolves.toMatchObject({ threadId: record.agent_id });
       expect(client.identify).toHaveBeenCalledTimes(3);
       expect(client.focusSurface).not.toHaveBeenCalled();

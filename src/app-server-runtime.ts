@@ -1,3 +1,4 @@
+import { CODEX_EFFORT_VALUES, resolveSpawnEffort } from "./model-policy.js";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { createDefaultCloseForensicsRunner } from "./close-forensics.js";
 import { defaultOutboxDrain } from "./outbox-drainer.js";
 import {
   defaultDeliveryTicketDir,
-  fileDeliveryFailureGithubIssue,
+  defaultDeliveryIssueFiler,
 } from "./delivery-failure-tickets.js";
 import { AgentRegistry } from "./agent-registry.js";
 import {
@@ -282,15 +283,23 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         clearStatus: async () => {},
         readScreen: (surface, readOpts) =>
           this.client.readScreen(surface, readOpts),
+        withSurfaceWrite: (surface, run, writeOpts) => this.runWorkspaceMutation(
+          "send_key", writeOpts.workspace,
+          () => this.withSurfaceWrite(
+            writeOpts.stableSurfaceIdentity ? `uuid:${writeOpts.stableSurfaceIdentity.toLowerCase()}` : surface,
+            // Bind the transport target too: a UUID lock cannot prevent ref reuse.
+            () => run(key => this.client.sendKey(writeOpts.stableSurfaceIdentity || surface, key, writeOpts)),
+          ),
+        ),
         send: (surface, text, sendOpts) =>
           this.runWorkspaceMutation("send_command", sendOpts?.workspace, () =>
-            this.withSurfaceWrite(surface, () =>
+            this.withSurfaceWrite(sendOpts?.stableSurfaceIdentity ? `uuid:${sendOpts.stableSurfaceIdentity.toLowerCase()}` : surface, () =>
               this.client.send(surface, text, sendOpts),
             ),
           ),
         sendKey: (surface, key, keyOpts) =>
           this.runWorkspaceMutation("send_key", keyOpts?.workspace, () =>
-            this.withSurfaceWrite(surface, () =>
+            this.withSurfaceWrite(keyOpts?.stableSurfaceIdentity ? `uuid:${keyOpts.stableSurfaceIdentity.toLowerCase()}` : surface, () =>
               this.client.sendKey(surface, key, keyOpts),
             ),
           ),
@@ -409,9 +418,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         deliveryIssueFiler:
           process.env.VITEST === "true" || process.env.NODE_ENV === "test"
             ? undefined
-            : async (ticket) => {
-                await fileDeliveryFailureGithubIssue(ticket);
-              },
+            : defaultDeliveryIssueFiler(),
       },
     );
   }
@@ -428,7 +435,18 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
   async startThread(input: {
     cwd: string;
     model?: string;
+    effort?: string;
   }): Promise<BridgeThread> {
+    const launchEffort = input.effort ?? process.env.CMUXLAYER_APP_SERVER_CODEX_EFFORT;
+    if (launchEffort === undefined) {
+      throw new Error(
+        `App Server thread/start needs a Codex launch effort: send params.effort or set CMUXLAYER_APP_SERVER_CODEX_EFFORT (${CODEX_EFFORT_VALUES.join(", ")})`,
+      );
+    }
+    const effort = resolveSpawnEffort("codex", launchEffort);
+    if (effort === null) {
+      throw new Error("App Server thread/start did not resolve a Codex launch effort");
+    }
     const repo = deriveRepoFromCwd(input.cwd);
     const createdAt = Math.floor(Date.now() / 1000);
     const observerEpoch = this.captureSurfaceObserverEpoch();
@@ -459,6 +477,7 @@ export class CmuxAppServerRuntime implements AppServerBridgeRuntime {
         repo,
         model: input.model ?? "codex",
         cli: "codex",
+        effort,
         prompt: `App Server bridge session for ${repo}`,
         ...(workspace ? { workspace } : {}),
         ...(priorFocus

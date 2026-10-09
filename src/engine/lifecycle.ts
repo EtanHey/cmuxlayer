@@ -6,7 +6,10 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { AgentEngine } from "../agent-engine.js";
 import { resumeInvocationForAgent, toPublicAgent } from "../agent-facade.js";
-import { SURFACE_EVICTION_CONFIRMATION_MS } from "../agent-registry.js";
+import {
+  SURFACE_EVICTION_CONFIRMATION_MS,
+  type AgentRegistry,
+} from "../agent-registry.js";
 import {
   type AgentRecord,
   type AgentRoute,
@@ -30,7 +33,9 @@ import {
 } from "../model-policy.js";
 import { buildTitle } from "../naming.js";
 import { matchReadyPattern } from "../pattern-registry.js";
-import { agentProcessLiveness } from "../util/pid-alive.js";
+import {
+  agentProcessLiveness,
+} from "../util/pid-alive.js";
 import {
   antigravityScreenIsActive,
   isAntigravityScreen,
@@ -99,6 +104,8 @@ export interface LifecycleHost {
   readonly registry: AgentEngine["registry"];
   readonly seatRegistry: AgentEngine["seatRegistry"];
   readonly selfRegistrationSessionLookup: AgentEngine["selfRegistrationSessionLookup"];
+  readonly sessionProcessScanner: AgentEngine["sessionProcessScanner"];
+  unattributedAgentPanes: AgentEngine["unattributedAgentPanes"];
   readonly selfRegistrationSessionResolver: AgentEngine["selfRegistrationSessionResolver"];
   readonly spawnGuard: AgentEngine["spawnGuard"];
   readonly spawnPreflight: AgentEngine["spawnPreflight"];
@@ -129,6 +136,7 @@ export interface LifecycleHost {
   resolveAgentRoute: AgentEngine["resolveAgentRoute"];
   resolveAgentStopIoRoute: AgentEngine["resolveAgentStopIoRoute"];
   resolveResumeAgent: AgentEngine["resolveResumeAgent"];
+  assertSessionNotRunningElsewhere: AgentEngine["assertSessionNotRunningElsewhere"];
   resolveStopSurfaceClosePolicy: AgentEngine["resolveStopSurfaceClosePolicy"];
   resolveUnchangedAgentStopIoRoute: AgentEngine["resolveUnchangedAgentStopIoRoute"];
   sameSurfaceRoute: AgentEngine["sameSurfaceRoute"];
@@ -336,7 +344,7 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
     boot_instance_id: randomUUID(),
     repo: spawnParams.repo,
     model: spawnParams.model ?? modelPolicy.effective_model,
-    effort: spawnParams.cli === "codex" ? (effort ?? "high") : null,
+    effort,
     cli: spawnParams.cli,
     cli_session_id: null,
     cli_session_path: null,
@@ -568,7 +576,7 @@ export async function spawnAgent(this: LifecycleHost, params: SpawnAgentParams):
 export async function resumeAgent(
   this: LifecycleHost,
   agentId: string,
-  opts?: { workspace?: string; force?: boolean },
+  opts?: { workspace?: string; force?: boolean; focus?: boolean },
 ): Promise<SpawnAgentResult> {
   let agent = this.resolveResumeAgent(agentId);
   if (!agent) {
@@ -608,6 +616,8 @@ export async function resumeAgent(
   const resumeCommand = resumeInvocation.command;
   const requestedWorkspace =
     opts?.workspace ?? agent.workspace_id ?? undefined;
+  // Match spawn's metadata-aware default while retaining legacy initialization.
+  const focus = opts?.focus ?? !this.client.supportsSurfaceRuntimeMetadata;
   this.spawnGuard.check(requestedWorkspace);
   const persistedAgent = this.stateMgr.readState(agent.agent_id);
   if (!persistedAgent) {
@@ -625,12 +635,18 @@ export async function resumeAgent(
     );
   }
 
+  agent = await this.assertSessionNotRunningElsewhere(
+    agent,
+    opts?.force === true,
+  );
+
   let surface: CreatedAgentSurface | null = null;
   let surfaceBound = false;
   let recordReopened = false;
   try {
     surface = await this.createAgentSurface(requestedWorkspace, {
       role: inferRecordRole(agent),
+      focus,
       parentAgent: agent.parent_agent_id
         ? this.registry.get(agent.parent_agent_id)
         : null,
@@ -642,15 +658,17 @@ export async function resumeAgent(
       "explicit agent resume",
     );
     const workspace = surface.actual_workspace ?? surface.workspace;
-    await this.client.focusSurface(surface.surface, {
-      workspace,
-      beforeMutation: async () => {
-        this.assertSurfaceObserverEpochCurrent(
-          surface!.observerEpoch,
-          "explicit agent resume focus",
-        );
-      },
-    });
+    if (focus) {
+      await this.client.focusSurface(surface.surface, {
+        workspace,
+        beforeMutation: async () => {
+          this.assertSurfaceObserverEpochCurrent(
+            surface!.observerEpoch,
+            "explicit agent resume focus",
+          );
+        },
+      });
+    }
 
     const creating = this.stateMgr.reopenForResume(agent.agent_id);
     recordReopened = true;
@@ -721,6 +739,126 @@ export async function resumeAgent(
     }
     throw error;
   }
+}
+
+/**
+ * #926: a record with a session is never resumed onto a second process while
+ * its first may still be running. The recorded pid is checked by the caller;
+ * this also requires that neither the row's own pane nor the pane its session
+ * self-registered on is live. A live registered pane is proof the agent is
+ * running there, so the row is rebound to it (reachable by id again) and the
+ * resume is refused.
+ *
+ * Absent a live pane, resume still needs POSITIVE proof: the recorded pid is
+ * confirmed gone (a null pid is never proof) and no live process carries the
+ * session id in its argv. Anything short of that refuses, naming what is
+ * missing; `force` overrides once the caller has checked by hand.
+ */
+export async function assertSessionNotRunningElsewhere(
+  this: LifecycleHost,
+  agent: AgentRecord,
+  force: boolean,
+): Promise<AgentRecord> {
+  const registration = agent.cli_session_id
+    ? this.selfRegistrationSessionLookup?.(agent.cli_session_id) ?? null
+    : null;
+  const registeredAt = registration?.ts !== null &&
+    registration?.ts !== undefined &&
+    Math.abs(registration.ts) <= 8.64e15
+      ? new Date(registration.ts).toISOString()
+      : null;
+  const registrationMayRun =
+    registration !== null &&
+    (!registration.pid || agentProcessLiveness({
+      pid: registration.pid,
+      created_at: agent.created_at,
+      pid_registered_at: registeredAt,
+    }, {
+      // Recovered rows record discovery time, not process launch time.
+      ignoreCreationLowerBound: agent.surface_provenance !== "cmuxlayer_spawn",
+    }) !== "gone");
+  let occupant: Awaited<ReturnType<AgentRegistry["findLiveSessionSurface"]>>;
+  try {
+    occupant = await this.registry.findLiveSessionSurface(
+      agent,
+      registrationMayRun ? registration.surface_uuid : null,
+    );
+  } catch (error) {
+    if (force) return agent;
+    throw new Error(
+      `Agent "${agent.agent_id}" cannot resume: cannot prove its session is ` +
+        `not already running (${
+          error instanceof Error ? error.message : String(error)
+        }); retry once cmux lists its surfaces, or pass force`,
+    );
+  }
+  if (!occupant) {
+    if (!force) await assertPositiveAbsenceProof.call(this, agent);
+    return agent;
+  }
+  const { surface, via } = occupant;
+  if (via === "binding") {
+    throw new Error(
+      `Agent "${agent.agent_id}" cannot resume: its pane ${surface.ref} is still ` +
+        `live and may be running session ${agent.cli_session_id}; send_to it, ` +
+        `or close that pane first`,
+    );
+  }
+  const rebound = this.stateMgr.updateRecord(agent.agent_id, {
+    surface_id: surface.ref,
+    surface_uuid: surface.id ?? null,
+    workspace_id: surface.workspace_ref ?? null,
+  });
+  this.registry.set(rebound.agent_id, rebound);
+  throw new Error(
+    `Agent "${agent.agent_id}" cannot resume: session ${agent.cli_session_id} ` +
+      `is running on ${surface.ref}; rebound the agent to that pane, send_to it`,
+  );
+}
+
+async function assertPositiveAbsenceProof(
+  this: LifecycleHost,
+  agent: AgentRecord,
+): Promise<void> {
+  const sessionId = agent.cli_session_id ?? "";
+  const cli = agent.cli ?? "unknown";
+  let missing: string | null = null;
+  if (!agent.pid) {
+    missing = "it has no recorded pid, so its process cannot be proven gone";
+  } else if (agentProcessLiveness(agent) !== "gone") {
+    // Identity-qualified: unknown is never gone.
+    missing = `its recorded pid ${agent.pid} is not proven gone`;
+  } else {
+    const carriers = await this.sessionProcessScanner(sessionId);
+    if (carriers === null) {
+      missing = "the process table could not be read";
+    } else if (carriers.length > 0) {
+      const [first] = carriers;
+      missing =
+        `a live process carries session ${sessionId} ` +
+        `(pid ${first!.pid}: ${first!.command.slice(0, 120)})`;
+    } else {
+      // No per-session absence signal exists (a live CLI need not carry its
+      // id in argv, nor hold its transcript open), so attribution decides:
+      // a live pane of this CLI that no agent claims may be running it.
+      const panes = await this.unattributedAgentPanes(cli);
+      if (panes === null) {
+        missing =
+          "the cmux topology is empty or inconclusive, so live panes cannot be attributed";
+      } else if (panes.length > 0) {
+        missing =
+          `${panes.length} live ${cli} pane${panes.length === 1 ? " is" : "s are"} ` +
+          `not attributed to any agent (${panes.join(", ")}); one may already ` +
+          `run this session`;
+      }
+    }
+  }
+  if (!missing) return;
+  throw new Error(
+    `Agent "${agent.agent_id}" cannot resume without proof that session ` +
+      `${sessionId} is not already running: ${missing}. Check that no pane ` +
+      `or process runs it, then resume with force:true`,
+  );
 }
 
 /** Resolve either cmuxlayer's public label or the harness's full session id. */
@@ -1479,9 +1617,10 @@ export async function stopAgent(
         surfaceGone &&
         (this.isProcessConfirmedGone(agent) || agent.pid == null)
       ) {
+        // #926: keep a pid proven gone; resume accepts nothing weaker.
         const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
           user_killed: true,
-          pid: null,
+          pid: this.isProcessConfirmedGone(agent) ? agent.pid : null,
         });
         this.registry.set(canonicalAgentId, tombstone);
         return;
@@ -1751,9 +1890,12 @@ export async function stopAgent(
       this.registry.evictExplicit(canonicalAgentId);
       return;
     }
+    // #926: keep the pid only when its death is proven with identity; the
+    // post-condition may have counted an unknown liveness as gone, and
+    // resume must never take unknown for gone.
     const tombstone = this.stateMgr.updateRecord(canonicalAgentId, {
       user_killed: true,
-      pid: null,
+      pid: this.isProcessConfirmedGone(agent) ? agent.pid : null,
     });
     this.registry.set(canonicalAgentId, tombstone);
     if (!TERMINAL_STATES.has(current.state)) {

@@ -1,0 +1,223 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { existsSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { homedir, hostname } from "node:os";
+import { join } from "node:path";
+import { startSoakRuntime, rpc, INSTALLED_ENTRY } from "../soak-runtime.mjs";
+import { targetOptions, shellQuote, privateBuild, distDigest, requireLauncherMode } from "./target.mjs";
+import { unwrap } from "./ctx.mjs";
+import { productionSnapshot, productionChanges } from "./production-guard.mjs";
+import { checkLauncherRoots } from "./launcher-preflight.mjs";
+import { closeOwnedSurfaces } from "./surface-cleanup.mjs";
+import { guardLaunch } from "./launch-overlay.mjs";
+import { launchRecords } from "./launch-cwd.mjs";
+import { captureSpawnIdentity, resumeArgs } from "./resume-identity.mjs";
+
+
+export function boundedSpawn(args, defaults, identities = new Map()) {
+  if (args.resume_agent_id) return { ...resumeArgs(args, identities), workspace: defaults.workspace };
+  const cli = args.cli ?? "codex", model = cli === "codex" ? "gpt-6-luna" : "haiku";
+  if (!["codex", "claude"].includes(cli) || args.model && args.model !== model || cli === "codex" && args.effort && args.effort !== "low") throw new Error("cheapest models only");
+  return { ...args, repo: defaults.repo, cwd: defaults.cwd, workspace: defaults.workspace, worktree: false,
+    force_new: true, mcp_profile: "sterile", cli, model, ...(cli === "codex" ? { effort: "low" } : {}) };
+}
+export function checkCliAuth(cli, env, probe = spawnSync) {
+  const binary = cli === "codex" ? "/opt/homebrew/bin/codex" : join(homedir(), ".local/bin/claude");
+  const result = probe(binary, cli === "codex" ? ["login", "status"] : ["auth", "status", "--json"], { env, encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+  let authenticated = result.status === 0;
+  if (cli === "claude") { try { authenticated &&= JSON.parse(result.stdout).loggedIn === true; } catch { authenticated = false; } }
+  if (!authenticated) throw new Error(`${cli} authentication precondition absent`);
+}
+
+export function claudeWrapper(binary, config) {
+  // A registered launcher can supply its own --mcp-config. Strip ALL such flags.
+  return `#!/bin/bash\nargs=()\nwhile (($#)); do\ncase "$1" in\n--mcp-config) shift; (($#)) || exit 2 ;;\n--mcp-config=*) ;;\n--strict-mcp-config) ;;\n*) args+=("$1") ;;\nesac\nshift\ndone\nexec ${shellQuote(binary)} --strict-mcp-config --mcp-config ${shellQuote(config)} "\${args[@]}"\n`;
+}
+export async function startTarget(input, { launcherRegistry } = {}) {
+  const opts = targetOptions(input);
+  if (opts.host === "m1" && hostname() !== opts.gateHost) throw new Error("SSH target hostname mismatch");
+  // Read-only target registry check before any app, daemon or model seat starts.
+  const launcherPreflight = opts.target === "m1-gate" ? await checkLauncherRoots(opts.repo, opts.launcherClis ?? ["codex", "claude"], { registry: launcherRegistry }) : null;
+  const { deriveRoleColumnIndex } = await import("../../dist/layout-policy.js");
+  const { agentProcessLiveness } = await import("../../dist/util/pid-alive.js");
+  const harness = privateBuild(opts.driverRoot, opts.driverSha);
+  opts.outputRoot = join(harness.root, "evidence");
+  if (!opts.buildRoot && (!/^[a-f0-9]{64}$/.test(opts.installedDistDigest) || distDigest("/opt/homebrew/opt/cmuxlayer/libexec/dist") !== opts.installedDistDigest)) throw new Error("installed exact-SHA dist digest missing or mismatched");
+  const before = productionSnapshot(homedir());
+  let closeTarget;
+  const runtime = await startSoakRuntime({ ...opts, privateAppHome: true, onSignal: fallback => closeTarget ? closeTarget() : fallback(), launcherMode: opts.target === "m1-gate", entry: opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY }, opts.outputRoot);
+  runtime.receipt.release_gate = false; runtime.receipt.scope = "scenario-target-lifecycle";
+  runtime.receipt.launcher_preflight = launcherPreflight;
+  const client = new Client({ name: "xmac-under-test", version: "1.1" });
+  const socket = (method, params = {}) => rpc(runtime.env.CMUX_SOCKET_PATH, method, { workspace_id: runtime.workspace, ...params });
+  const identities = new Map(), agents = new Map(), leads = new Set(), owned = new Set(), ownedSurfaces = new Set();
+  const defaults = { repo: opts.repo ?? "soak", cwd: runtime.cwd, workspace: runtime.workspace };
+  let finished;
+  const call = async (name, args = {}) => {
+    if (name === "spawn_agent") {
+      args = boundedSpawn(args, defaults, identities);
+      checkCliAuth(args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli, runtime.env);
+      (runtime.receipt.normalized_spawn_args ??= []).push(args);
+    }
+    if (name === "close_surface" && args.agent_id && !agents.has(args.agent_id)) {
+      const child = await inspect(args.agent_id);
+      if (child?.surface_id) { owned.add(args.agent_id); agents.set(args.agent_id, { surface: child.surface_uuid ?? child.surface_id }); }
+    }
+    const before = name === "spawn_agent" ? new Set((await surfaceList()).flatMap(row => [row.id, row.ref]).filter(Boolean)) : null;
+    const invoke = async () => {
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 90_000 });
+      const value = result.structuredContent ?? (() => { try { return unwrap(result); } catch { return {}; } })();
+      if (name === "spawn_agent" && value.agent_id) {
+        owned.add(value.agent_id);
+        agents.set(value.agent_id, { surface: value.surface_uuid ?? value.surface_id });
+        if (!result.isError && !args.resume_agent_id) await captureSpawnIdentity(identities, value, inspect);
+        if (opts.target === "m1-gate") {
+          const state = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, value.agent_id, "state.json"), "utf8"));
+          requireLauncherMode(state, runtime.receipt.expected_launchers[args.resume_agent_id ? identities.get(args.resume_agent_id).cli : args.cli]);
+          (runtime.receipt.engine_launch_cwds ??= []).push({ agent_id: value.agent_id, launch_cwd: state.launch_cwd, worktree_path: state.worktree_path });
+        }
+      }
+      return result;
+    };
+    try {
+      return before ? await guardLaunch(invoke, { frames: async () => {
+        const fresh = (await surfaceList()).filter(row => ![row.id, row.ref].some(ref => ref && before.has(ref)));
+        return Promise.all(fresh.map(async row => {
+          const surface = row.id ?? row.ref;
+          for (const ref of [row.id, row.ref].filter(Boolean)) ownedSurfaces.add(ref);
+          return { surface, text: (await socket("surface.read_text", { surface_id: surface })).text ?? "" };
+        }));
+      } }) : await invoke();
+    } catch (error) {
+      if (error.precondition?.kind === "launch_overlay") runtime.receipt.launch_overlay = error.precondition;
+      throw error;
+    } finally {
+      if (name === "spawn_agent" && runtime.receipt.launch_receipt_path) runtime.receipt.launches = launchRecords(runtime.receipt.launch_receipt_path);
+    }
+  };
+  const inspect = async id => unwrap(await call("list_agents", { agent_ids: [id], detail: "full" })).agents?.[0];
+  const surfaceList = async () => {
+    const value = await socket("surface.list");
+    if (!Array.isArray(value.surfaces)) throw new Error("raw surface enumeration incomplete");
+    return value.surfaces;
+  };
+  const anchor = new Set([runtime.receipt.workspace?.surface_id, runtime.receipt.workspace?.surface_ref].filter(Boolean));
+  const closeSurfaces = ownedSurfaces => closeOwnedSurfaces({ list: surfaceList,
+    close: surface => socket("surface.close", { surface_id: surface }), owned: ownedSurfaces, anchor });
+  const sweepChildren = async () => {
+    const receipts = [], errors = [];
+    for (const parent of leads) {
+      try {
+        const listed = unwrap(await call("list_agents", { parent_agent_id: parent, detail: "full" }));
+        if (!Array.isArray(listed.agents)) throw new Error("child enumeration failed");
+        for (const child of listed.agents.filter(child => child.parent_agent_id === parent)) {
+          owned.add(child.agent_id); agents.set(child.agent_id, { surface: child.surface_uuid ?? child.surface_id });
+          receipts.push(unwrap(await call("close_surface", { agent_id: child.agent_id, scope: "agent", force: true })));
+          if (!await driver.verifyClosed(child.agent_id)) throw new Error("child close unverified");
+        }
+      } catch (error) { errors.push(String(error)); }
+    }
+    if (errors.length) {
+      // This entire workspace was created by this run; never sweep another one.
+      receipts.push(await closeSurfaces(new Set((await surfaceList()).flatMap(row => [row.id, row.ref]).filter(Boolean))));
+    }
+    return { receipts, enumeration_errors: errors, fallback: errors.length > 0 };
+  };
+  const driver = {
+    target: { host: opts.host, cmux: opts.cmux === "prod" ? "prod-0.64.22" : "nightly", cmuxVersion: runtime.receipt.app_target.version,
+      cmuxlayerSha: opts.sha, codexWrapper: opts.cmux === "nightly" && existsSync(join(opts.app, "Contents/Resources/bin/codex")) ? join(opts.app, "Contents/Resources/bin/codex") : null },
+    call, sweepChildren,
+    spawnLeadSeat: async args => {
+      if (!runtime.receipt.private_mcp_config) throw new Error("lead private MCP config missing");
+      const result = await call("spawn_agent", { ...args, cli: "claude", model: "haiku", authority: "lead", role: "implementor", placement: "left" });
+      const value = result.structuredContent ?? unwrap(result);
+      if (value.agent_id) leads.add(value.agent_id);
+      return result;
+    },
+    readScreen: async surface => {
+      const raw = await socket("surface.read_text", { surface_id: surface });
+      const { panes } = await socket("pane.list"), columns = deriveRoleColumnIndex(panes);
+      const pane = panes.find(pane => [...pane.surface_refs, ...(pane.surface_ids ?? [])].includes(surface));
+      return { text: raw.text, column: pane ? columns.get(pane.ref) ?? null : null, column_count: new Set(columns.values()).size };
+    },
+    focusedSurface: async () => {
+      const focused = (await socket("system.identify")).focused?.surface_ref;
+      if (!focused) throw new Error("focused surface missing");
+      return focused;
+    },
+    processArgs: async id => {
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error("invalid agent id");
+      const agent = JSON.parse(readFileSync(join(runtime.env.CMUXLAYER_STATE_DIR, id, "state.json"), "utf8"));
+      if (agentProcessLiveness(agent) !== "alive") throw new Error("agent PID identity unverified");
+      const args = execFileSync("ps", ["-ww", "-p", String(agent.pid), "-o", "args="], { encoding: "utf8", timeout: 2000 }).trim();
+      const executable = execFileSync("ps", ["-p", String(agent.pid), "-o", "comm="], { encoding: "utf8", timeout: 2000 }).trim();
+      if (!new RegExp(`/(?:${agent.cli})(?:$|[-.])`).test(executable)) throw new Error("recorded pane child is not the CLI process");
+      return args;
+    },
+    verifyClosed: async id => {
+      const known = agents.get(id);
+      if (!known?.surface) throw new Error("closed seat surface identity missing");
+      const listed = await surfaceList();
+      return !listed.some(row => [row.id, row.ref].includes(known.surface));
+    },
+    close: () => finished ??= (async () => {
+      const errors = [];
+      try { await sweepChildren(); } catch (error) { errors.push(String(error)); }
+      try {
+        runtime.receipt.surface_cleanup = await closeSurfaces(new Set([...ownedSurfaces, ...[...agents.values()].map(agent => agent.surface).filter(Boolean)]));
+      } catch (error) { errors.push(String(error)); }
+      try { await client.close(); } catch (error) { errors.push(String(error)); }
+      const lifecycle = await runtime.close();
+      const reads = []; let changes = [];
+      try { changes = productionChanges(before, productionSnapshot(homedir()), [runtime.receipt.launch_token, runtime.env.CMUXLAYER_DAEMON_SOCKET, runtime.env.CMUX_SOCKET_PATH, runtime.receipt.scratch, ...owned], [...owned], reads); }
+      catch (error) { errors.push(`attribution guard: ${error}`); }
+      const logPath = join(runtime.env.CMUXLAYER_STATE_DIR, "daemon.log");
+      const positive = existsSync(logPath) ? statSync(logPath).size : 0;
+      if (!positive) errors.push("private daemon log positive control absent");
+      lifecycle.attribution = { changes, reads, private_socket: runtime.env.CMUXLAYER_DAEMON_SOCKET, positive_control: { path: logPath, bytes: positive, status: positive ? "PASS" : "FAIL" } };
+      lifecycle.violations.push(...errors, ...changes.map(path => `production attribution: ${path}`));
+      if (lifecycle.violations.length) lifecycle.status = "FAIL";
+      writeFileSync(runtime.receiptPath, JSON.stringify(lifecycle, null, 2) + "\n");
+      return lifecycle;
+    })(),
+  };
+  closeTarget = driver.close;
+  try {
+    const bin = join(runtime.receipt.scratch, "bin"); mkdirSync(bin, { mode: 0o700 });
+    const config = join(runtime.receipt.scratch, "private-mcp.json");
+    const routing = Object.fromEntries(Object.entries(runtime.env).filter(([key]) => /^(CMUXLAYER|CMUX_SOCKET|CMUX_BUNDLE|CMUX_ALLOW|CODEX_HOME|CLAUDE_CONFIG_DIR)/.test(key)));
+    routing.XMAC_ENTRY = opts.buildRoot ? `${opts.buildRoot}/dist/index.js` : INSTALLED_ENTRY;
+    routing.XMAC_DEFAULTS = JSON.stringify(defaults);
+    if (opts.target === "m1-gate") routing.XMAC_EXPECTED_LAUNCHERS = JSON.stringify(runtime.receipt.expected_launchers);
+    writeFileSync(config, JSON.stringify({ mcpServers: { cmuxlayer: { command: "/opt/homebrew/opt/node/bin/node", args: [`${opts.driverRoot}/scripts/xmac/lead-proxy.mjs`], env: routing } } }), { mode: 0o600 });
+    const binary = join(homedir(), ".local/bin/claude");
+    if (!existsSync(binary)) throw new Error("target Claude binary missing");
+    writeFileSync(join(bin, "claude"), claudeWrapper(binary, config), { mode: 0o700 });
+    runtime.env.PATH = `${bin}:${runtime.env.PATH}`;
+    // App is already running, but no model seat has been launched. Update only its private zsh startup.
+    const zshenv = join(runtime.env.ZDOTDIR, ".zshenv");
+    writeFileSync(zshenv, readFileSync(zshenv, "utf8") + "\n" + Object.entries(runtime.env).filter(([key]) => /^(HOME|PATH|ZDOTDIR|CMUX|CMUXLAYER|CODEX_HOME|CLAUDE_CONFIG_DIR|XDG_)/.test(key)).map(([key, value]) => `export ${key}=${shellQuote(value)}`).join("\n") + "\n", { mode: 0o600 });
+    runtime.receipt.private_mcp_config = config;
+    const entry = routing.XMAC_ENTRY, privateEntry = !!opts.buildRoot;
+    await client.connect(new StdioClientTransport({ command: privateEntry ? "/opt/homebrew/opt/node/bin/node" : entry, args: privateEntry ? [entry] : [], env: runtime.env, stderr: "inherit" }));
+    const health = unwrap(await call("control_health", { detail: "full" }));
+    if (!health.ok || health.health?.current_process?.pid !== runtime.receipt.daemon.pid || health.socket_path !== runtime.env.CMUX_SOCKET_PATH) throw new Error("private daemon control identity mismatch");
+    runtime.receipt.control_health = health;
+    // Execute a model-free command inside the actual app-created pane, preserving its real PATH.
+    const marker = `XMAC_CODEX_${runtime.receipt.launch_token}:`;
+    const probe = await socket("workspace.create", { cwd: runtime.cwd,
+      initial_command: `/bin/zsh -lc ${shellQuote(`printf '%s%s\\n' ${shellQuote(marker)} "$(command -v codex)"; exec /bin/cat`)}` });
+    try {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const text = (await rpc(runtime.env.CMUX_SOCKET_PATH, "surface.read_text", { workspace_id: probe.workspace_id, surface_id: probe.surface_id })).text;
+        const resolved = text?.split("\n").find(line => line.startsWith(marker))?.slice(marker.length).trim();
+        if (resolved) { runtime.receipt.resolved_codex = resolved; runtime.receipt.codex_probe_screen = text; break; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!runtime.receipt.resolved_codex?.startsWith("/")) throw new Error("pane Codex resolution probe missing");
+      if (driver.target.codexWrapper && runtime.receipt.resolved_codex !== driver.target.codexWrapper) throw new Error("bundle Codex wrapper is not first on pane PATH");
+    } finally { await rpc(runtime.env.CMUX_SOCKET_PATH, "workspace.close", { workspace_id: probe.workspace_id }); }
+    return driver;
+  } catch (error) { await driver.close(); throw error; }
+}

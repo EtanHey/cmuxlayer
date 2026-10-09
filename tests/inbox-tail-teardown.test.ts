@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { renderBootContractFile } from "../src/coordination-paths.js";
+import { reapInboxTail } from "../src/inbox.js";
 import { shellQuote } from "../src/shell-safe.js";
 
 const AGENT_ID = "cmuxlayerClaude-w27bfake";
@@ -51,7 +52,7 @@ describe("boot contract mailbox teardown", () => {
     const block = mailboxBlock(render());
     expect(block).toContain(`perl -MPOSIX=setsid -e 'my $pidfile=shift;`);
     expect(block).toContain("rename $tmp, $pidfile or die $!; close $lock; print $write");
-    expect(block).toContain("$0=\"cmuxlayer-inbox-tail:$token\"");
+    expect(block).toContain('$0="cmuxlayer-inbox-tail ".($agent // "unknown")." $token"');
     expect(block).toContain(`' ${shellQuote(PID_FILE)} tail -n0 -F ${INBOX}`);
   });
 
@@ -87,6 +88,61 @@ describe("boot contract mailbox teardown", () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+
+  // A resumed id can carry characters outside [A-Za-z0-9._-]; the title must
+  // still name the whole id, or stop_agent's reaper reads it as a mismatch.
+  it.each(["fleetWorker-t911abcd", "fleetWorker+resumed1"])(
+    "#911: the supervisor's ps line is a fixed title with no environment text (%s)",
+    async (agentId) => {
+    // The seat's environment carries CMUX_* vars and cmux's .../claude and
+    // .../codex shim paths. On main, `$0=` left ps reading on into that
+    // environment, so every tailer looked like a "claude" process.
+    const base = mkdtempSync(join(tmpdir(), "cmux-inbox-title-"));
+    const agentDir = join(base, agentId);
+    const inbox = join(agentDir, "inbox.jsonl");
+    const pidFile = join(agentDir, "inbox-tail.pid");
+    mkdirSync(agentDir);
+    writeFileSync(inbox, "");
+    let pid = 0;
+    try {
+      const block = mailboxBlock(
+        renderBootContractFile({
+          agentId,
+          mailbox: {
+            monitor_command: `tail -n0 -F ${inbox}`,
+            tail_pid_path: pidFile,
+            cursor_update_command: `cmuxlayer inbox-cursor '${agentId}'`,
+            cursor_update_env: "CMUX_INBOX_MSG_ID",
+          },
+          coordination: null,
+        }),
+      );
+      const command = block.match(/^    (.*perl -MPOSIX=setsid.*)$/m)?.[1];
+      const launcher = spawnSync("/bin/sh", ["-c", `( ${command!} ) > /dev/null 2>&1`], {
+        timeout: 3000,
+        env: {
+          ...process.env,
+          CMUX_CLAUDE_WRAPPER_SHIM: "/var/folders/x/cmux-cli-shims/ABC/claude",
+          CMUX_CODEX_WRAPPER_SHIM: "/var/folders/x/cmux-cli-shims/ABC/codex",
+          CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+        },
+      });
+      expect(launcher.status).toBe(0);
+      const [pidText, token] = readFileSync(pidFile, "utf8").trim().split(" ");
+      pid = Number(pidText);
+      const shown = spawnSync("ps", ["-ww", "-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout.trim();
+      expect(shown).toBe(`cmuxlayer-inbox-tail ${agentId} ${token}`);
+      expect(shown).not.toMatch(/claude|codex|CMUX_|=/i);
+      // stop_agent's reaper still recognizes its own supervisor by the new title.
+      expect(await reapInboxTail(agentId, { baseDir: base })).toEqual({ tail_reaped: true });
+    } finally {
+      if (pid > 0) {
+        try { process.kill(pid); } catch { /* already exited */ }
+      }
+      rmSync(base, { recursive: true, force: true });
+    }
+  },
+  );
 
   it("gives the exact stop command, addressed by pid", () => {
     const block = mailboxBlock(render());

@@ -5,9 +5,10 @@
  * verbatim from server.ts (CX-2 S4); imports nothing from the server.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { inboxBaseDir as inboxBaseDirOf } from "../inbox.js";
 import { CmuxClient, type ExecFn } from "../cmux-client.js";
 import type { CmuxSocketClient } from "../cmux-socket-client.js";
 import { type SeatManifestWriter } from "../seat-manifest.js";
@@ -36,7 +37,16 @@ import { type WorktreeExec } from "../worktree.js";
 import { type SeatRegistry } from "../seat-identity.js";
 import { SurfaceWriteLivenessTracker } from "../surface-write-liveness.js";
 import type { PublicDeliveryReceipt, DeliveryRecord } from "../delivery/receipts.js";
-import { LifecycleStartTimeoutError } from "./tool-result.js";
+import { CmuxSocketError } from "../cmux-socket-error.js";
+import {
+  appendDaemonLog,
+  logErrorCode,
+  logErrorName,
+} from "../daemon-log.js";
+import {
+  LifecycleNotReadyError,
+  LifecycleStartTimeoutError,
+} from "./tool-result.js";
 
 export interface CreateServerOptions {
   exec?: ExecFn;
@@ -57,6 +67,12 @@ export interface CreateServerOptions {
   lifecycleRegistry?: AgentRegistry;
   /** Override persisted-state reconstitution at lifecycle startup (primarily for tests). */
   lifecycleInitializer?: () => Promise<void>;
+  /**
+   * #938: answer lifecycle-engine tools with the named not-ready cause while
+   * initialization retries. The daemon sets this, because it serves
+   * connections before lifecycle is ready.
+   */
+  gateLifecycleTools?: boolean;
   /** Skip agent lifecycle initialization (for testing low-level tools only) */
   skipAgentLifecycle?: boolean;
   /**
@@ -135,6 +151,8 @@ export interface CreateServerOptions {
   seatManifestNow?: () => string;
   /** Background send_to verify deadline; defaults to 10 minutes. */
   deliveryVerifyDeadlineMs?: number;
+  /** Pending queue/steer age before attention, default 10min. */
+  deliveryAttentionMs?: number;
   /**
    * Local evidence tickets for failed_confirmed deliveries. Omitted in tests;
    * production createServer injects ~/.cmuxlayer/tickets when not VITEST/NODE_ENV=test.
@@ -156,6 +174,7 @@ export type LifecycleAgentInputDeliverer = (args: {
   text: string;
   press_enter: boolean;
   allow_busy?: boolean;
+  codex_busy_mode?: "steer" | "queue";
   source_event: DeliveryEventType;
   delivery_id?: string;
 }) => Promise<PublicDeliveryReceipt & { bytes: number }>;
@@ -200,8 +219,208 @@ export async function awaitBoundedLifecycleStart(
   }
 }
 
+export const DEFAULT_LIFECYCLE_RETRY_BASE_MS = 500;
+export const DEFAULT_LIFECYCLE_RETRY_MAX_MS = 30_000;
+/** How long a daemon connection waits for the first lifecycle outcome. */
+export const DEFAULT_LIFECYCLE_CONNECTION_GATE_MS = 10_000;
+
+function positiveIntegerEnv(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Jittered exponential backoff after `failures` failed lifecycle attempts. */
+export function resolveLifecycleRetryDelayMs(
+  failures: number,
+  env: NodeJS.ProcessEnv = process.env,
+  random: () => number = Math.random,
+): number {
+  const baseMs = positiveIntegerEnv(
+    env.CMUXLAYER_LIFECYCLE_RETRY_BASE_MS,
+    DEFAULT_LIFECYCLE_RETRY_BASE_MS,
+  );
+  const maxMs = Math.max(
+    baseMs,
+    positiveIntegerEnv(
+      env.CMUXLAYER_LIFECYCLE_RETRY_MAX_MS,
+      DEFAULT_LIFECYCLE_RETRY_MAX_MS,
+    ),
+  );
+  const unjittered = Math.min(
+    maxMs,
+    baseMs * 2 ** Math.max(0, Math.min(30, failures - 1)),
+  );
+  return Math.max(1, Math.round(unjittered * (0.5 + random() * 0.5)));
+}
+
+export function resolveLifecycleConnectionGateMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return positiveIntegerEnv(
+    env.CMUXLAYER_LIFECYCLE_CONNECTION_GATE_MS,
+    DEFAULT_LIFECYCLE_CONNECTION_GATE_MS,
+  );
+}
+
+export type LifecycleInitState = "idle" | "initializing" | "ready" | "retrying";
+
+export function lifecycleInitState(
+  context: CmuxServerContext,
+): LifecycleInitState {
+  if (!context.lifecycleStarted) return "idle";
+  if (context.lifecycleReady) return "ready";
+  if (context.lifecycleStartError) return "retrying";
+  // Contexts whose lifecycle promise was installed by hand (tests) have no
+  // retry loop; a settled promise without an error is ready.
+  return context.lifecycleStartAttempts === 0 &&
+    context.lifecycleStartSettledAtMs !== null
+    ? "ready"
+    : "initializing";
+}
+
+function describeLifecycleCause(error: Error): string {
+  return error instanceof CmuxSocketError && error.code === "rate_limited"
+    ? "rate_limited by cmux"
+    : error.message;
+}
+
+/**
+ * The named error a tool returns while the retry loop is still bringing the
+ * lifecycle up, or null when it is ready or not driven by the retry loop.
+ */
+export function lifecycleNotReadyError(
+  context: CmuxServerContext,
+): LifecycleNotReadyError | null {
+  if (
+    !context.lifecycleStarted ||
+    context.lifecycleReady ||
+    context.lifecycleStartAttempts === 0
+  ) {
+    return null;
+  }
+  const attempt = context.lifecycleStartAttempts;
+  const error = context.lifecycleStartError;
+  return new LifecycleNotReadyError(
+    error
+      ? `lifecycle initializing: ${describeLifecycleCause(error)}, retrying (attempt ${attempt})`
+      : `lifecycle initializing (attempt ${attempt})`,
+    attempt,
+  );
+}
+
+/**
+ * #938: run lifecycle initialization until it succeeds. A failed attempt is
+ * recorded (never latched) and retried after jittered exponential backoff.
+ * `lifecycleStartPromise` keeps its meaning (the first attempt settled:
+ * success, or a failure recorded in `lifecycleStartError`);
+ * `lifecycleReadyPromise` resolves once, on the first success.
+ */
+export function startLifecycleInitialization(
+  context: CmuxServerContext,
+  initialize: () => Promise<void>,
+): void {
+  const generation = context.lifecycleStartGeneration;
+  let resolveReady!: () => void;
+  let resolveFirstOutcome!: () => void;
+  context.lifecycleStarted = true;
+  context.lifecycleReady = false;
+  context.lifecycleStartError = null;
+  context.lifecycleStartAttempts = 0;
+  context.lifecycleStartStartedAtMs = Date.now();
+  context.lifecycleStartSettledAtMs = null;
+  context.lifecycleReadyPromise = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+  context.lifecycleStartPromise = new Promise<void>((resolve) => {
+    resolveFirstOutcome = resolve;
+  });
+  const current = () => context.lifecycleStartGeneration === generation;
+  const attempt = (): void => {
+    if (!current()) return;
+    context.lifecycleRetryTimer = null;
+    context.lifecycleStartAttempts += 1;
+    const attemptNumber = context.lifecycleStartAttempts;
+    Promise.resolve()
+      .then(initialize)
+      .then(
+        () => {
+          // A disposed context never goes ready, but its first-outcome
+          // waiters must still wake.
+          if (!current()) return resolveFirstOutcome();
+          context.lifecycleStartError = null;
+          context.lifecycleReady = true;
+          appendDaemonLog("lifecycle_ready", { attempts: attemptNumber });
+          context.lifecycleStartSettledAtMs = Date.now();
+          // Ready first: its continuations (sweep start, deliverer publish)
+          // must run before anyone awaiting the first outcome resumes.
+          resolveReady();
+          resolveFirstOutcome();
+        },
+        (error: unknown) => {
+          if (!current()) return resolveFirstOutcome();
+          context.lifecycleStartError =
+            error instanceof Error ? error : new Error(String(error));
+          context.lifecycleStartSettledAtMs = null;
+          const delayMs = resolveLifecycleRetryDelayMs(attemptNumber);
+          console.error(
+            "[cmuxlayer] lifecycle initialization failed:",
+            context.lifecycleStartError,
+          );
+          console.error(
+            `[cmuxlayer] lifecycle initialization attempt ${attemptNumber} failed; retrying in ${delayMs}ms`,
+          );
+          appendDaemonLog("lifecycle_attempt_failed", {
+            attempt: attemptNumber,
+            retry_in_ms: delayMs,
+            error_code: logErrorCode(context.lifecycleStartError),
+            error_name: logErrorName(context.lifecycleStartError),
+          });
+          resolveFirstOutcome();
+          const timer = setTimeout(attempt, delayMs);
+          timer.unref?.();
+          context.lifecycleRetryTimer = timer;
+        },
+      );
+  };
+  attempt();
+}
+
+/**
+ * Wait until lifecycle's first attempt has settled, bounded by `timeoutMs`.
+ * Never throws; callers read the state afterwards.
+ */
+export async function awaitLifecycleFirstOutcome(
+  context: CmuxServerContext,
+  timeoutMs: number,
+): Promise<void> {
+  const settled = context.lifecycleStartPromise;
+  if (!settled) return;
+  await awaitBoundedLifecycleStart(settled, timeoutMs).catch(() => {});
+}
+
+/**
+ * #938: the central gate for tools that need the lifecycle engine. A no-op
+ * unless the retry loop is driving lifecycle and it is not ready yet; then it
+ * waits (bounded) for the first attempt's outcome and throws the named cause.
+ */
+export async function assertLifecycleReadyForTool(
+  context: CmuxServerContext,
+  timeoutMs: number,
+): Promise<void> {
+  if (lifecycleNotReadyError(context) === null) return;
+  if (!context.lifecycleStartError) {
+    await awaitLifecycleFirstOutcome(context, timeoutMs);
+  }
+  const notReady = lifecycleNotReadyError(context);
+  if (notReady) throw notReady;
+}
+
 export interface TypedDraftOwner {
-  caller: string; text: string; at: number; ref: string; uuid: string | null;
+  caller: string | null; text: string; texts?: string[]; deliveryIds?: string[]; at: number; ref: string; uuid: string | null;
   workspace: string | null; fp: string; seen: boolean;
   /** #793: the managed agent whose unsubmitted boot draft this is. */
   bootAgentId?: string;
@@ -225,6 +444,12 @@ export interface CmuxServerContext {
   >;
   eventLog: ReturnType<StateManager["getEventLog"]>;
   deliveries: Map<string, DeliveryRecord>;
+  /**
+   * The screen read before typing, by delivery_id: the baseline the pending
+   * sweep needs for a Codex submit proof. In memory only (receipts never
+   * persist screen text); bounded by the delivery engine (#935).
+   */
+  deliveryPreTypeScreens: Map<string, string>;
   latestDeliveryBySurface: Map<string, string>;
   activeDeliveryBySurface: Map<string, string>;
   activeSurfaceWrites: Map<string, string>;
@@ -255,7 +480,21 @@ export interface CmuxServerContext {
   lifecycleInitializer: (() => Promise<void>) | null;
   lifecycleStarted: boolean;
   lifecycleStartPromise: Promise<void> | null;
+  /**
+   * #938: the last failed attempt's error while lifecycle is retrying;
+   * cleared on success. Never a permanent latch.
+   */
   lifecycleStartError: Error | null;
+  /** #938: set once lifecycle initialization has succeeded. */
+  lifecycleReady: boolean;
+  /** #938: lifecycle initialization attempts started by the retry loop. */
+  lifecycleStartAttempts: number;
+  /** #938: resolves once lifecycle initialization has succeeded. */
+  lifecycleReadyPromise: Promise<void> | null;
+  /** #938: the pending backoff before the next attempt. */
+  lifecycleRetryTimer: NodeJS.Timeout | null;
+  /** #938: bumped on dispose so a stale retry loop stops. */
+  lifecycleStartGeneration: number;
   /** #529 observability: when lifecycle init began and whether it settled. */
   lifecycleStartStartedAtMs: number | null;
   lifecycleStartSettledAtMs: number | null;
@@ -384,6 +623,7 @@ export function createServerContext(
     eventLog: stateMgr.getEventLog(),
     typedDraftOwners: new Map(),
     deliveries: new Map(),
+    deliveryPreTypeScreens: new Map(),
     latestDeliveryBySurface: new Map(),
     activeDeliveryBySurface: new Map(),
     activeSurfaceWrites: new Map(),
@@ -410,6 +650,11 @@ export function createServerContext(
     lifecycleStarted: false,
     lifecycleStartPromise: null,
     lifecycleStartError: null,
+    lifecycleReady: false,
+    lifecycleStartAttempts: 0,
+    lifecycleReadyPromise: null,
+    lifecycleRetryTimer: null,
+    lifecycleStartGeneration: 0,
     lifecycleStartStartedAtMs: null,
     lifecycleStartSettledAtMs: null,
     lifecycleStartTimeouts: 0,
@@ -441,7 +686,15 @@ export function createServerContext(
       context.capturedSurfaceUuidByRef.clear();
       context.ambiguousCapturedSurfaceRefs.clear();
       context.capturedSurfaceObserverEpoch = null;
+      context.lifecycleStartGeneration += 1;
+      if (context.lifecycleRetryTimer) {
+        clearTimeout(context.lifecycleRetryTimer);
+        context.lifecycleRetryTimer = null;
+      }
       context.lifecycleStarted = false;
+      context.lifecycleReady = false;
+      context.lifecycleStartAttempts = 0;
+      context.lifecycleReadyPromise = null;
       context.lifecycleStartPromise = null;
       context.lifecycleStartError = null;
       context.lifecycleStartStartedAtMs = null;
@@ -457,6 +710,40 @@ export function createServerContext(
   };
 
   return context;
+}
+
+/**
+ * #911: the registry may call a record-less tailer an orphan only when it is
+ * the VERIFIED fleet registry for that inbox dir: the state dir IS the
+ * production state dir and the inbox dir IS the production inbox dir, judged
+ * by filesystem identity (realpath, then device+inode), never by spelling. A
+ * scratch state dir, even one beside a symlink to the real inbox, is not.
+ * Anything that cannot be resolved has no authority.
+ */
+export function hasInboxTailRecordAuthority(
+  stateDir: string,
+  inboxBaseDir: string | undefined,
+  production: { stateDir: string; inboxBaseDir: string } = {
+    stateDir: join(homedir(), ".local", "state", "cmux-agents"),
+    inboxBaseDir: inboxBaseDirOf(),
+  },
+): boolean {
+  const identity = (path: string): string | null => {
+    try {
+      const stat = statSync(realpathSync(path));
+      return stat.isDirectory() ? `${stat.dev}:${stat.ino}` : null;
+    } catch {
+      return null;
+    }
+  };
+  const same = (left: string, right: string): boolean => {
+    const leftId = identity(left);
+    return leftId !== null && leftId === identity(right);
+  };
+  return (
+    same(stateDir, production.stateDir) &&
+    same(inboxBaseDir ?? production.inboxBaseDir, production.inboxBaseDir)
+  );
 }
 
 export function resolveServerInboxBaseDir(input: {

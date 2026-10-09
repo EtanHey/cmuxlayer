@@ -5,7 +5,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AgentRecord } from "../../agent-types.js";
-import { type ControlHealth, formatControlHealth } from "../../control-health.js";
+import { type ControlHealth, formatControlHealth, summarizeCmuxFds } from "../../control-health.js";
 import { canonicalAgentId, resolveWatchOwner, watchOwnerIncludesCanonical, watchRecordOwner } from "../../watch-owner.js";
 import { readWatchRegistry } from "../../watch-spec.js";
 import type { CmuxServerContext, CreateServerOptions } from "../context.js";
@@ -84,8 +84,10 @@ export function registerControlHealthTool(
           : [];
         const terse = {
           transport: healthWithStale.selected_transport,
+          ...(summarizeCmuxFds(healthWithStale) ? { cmux_fds: summarizeCmuxFds(healthWithStale) } : {}),
           warnings: healthWithStale.warnings,
           daemon_lifecycle: healthWithStale.daemon_lifecycle,
+          ...(healthWithStale.tailers ? { tailers: healthWithStale.tailers } : {}),
           self_heal: {
             pane_pty_dead:
               healthWithStale.self_heal.pane_pty_dead.count,

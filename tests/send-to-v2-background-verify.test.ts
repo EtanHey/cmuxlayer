@@ -40,7 +40,7 @@ async function callTool(
     throw new Error(`Tool not found: ${name}`);
   }
   const resultPromise = tool.handler(
-    name === "send_to" ? { mode: "agent", ...args } : args,
+    name === "send_to" ? { mode: "agent", verbose: true, ...args } : args,
     {} as any,
   );
   for (let elapsed = 0; elapsed < 10_000; elapsed += 100) {
@@ -229,7 +229,7 @@ class FakeAgentSurfaceClient {
           ]
             .filter((line) => line !== "")
             .join("\n")
-        : `Claude Code\n> ${tail}\nCLAUDE_COUNTER:1\n`);
+        : `Claude Code\n${this.transcriptTail ?? ""}\n> ${tail}\nCLAUDE_COUNTER:1\n`);
     return {
       surface,
       text,
@@ -300,6 +300,20 @@ function registerAgent(
 }
 
 describe("send_to v2 background verify", () => {
+  it.each([undefined, "0", "1"])("gates MCP production public filing with flag %s", (flag) => {
+    vi.stubEnv("VITEST", "false");
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("CMUXLAYER_FILE_DELIVERY_TICKETS", flag);
+    try {
+      server = createVerifyServer(new FakeAgentSurfaceClient());
+      const queue = (engineForTests(server) as any).deliveryQueue;
+      expect(typeof queue.deliveryIssueFiler).toBe(flag === "1" ? "function" : "object");
+      if (flag !== "1") expect(queue.deliveryIssueFiler).toBeNull();
+      expect(queue.deliveryTicketDir).toBe(defaultDeliveryTicketDir());
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   let server: any;
 
   beforeEach(() => {
@@ -328,9 +342,10 @@ describe("send_to v2 background verify", () => {
     });
     const parsed = parseResult(result);
 
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
     expect(parsed).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivery_id: expect.any(String),
       delivery_state: "pending_verify",
       delivery: "pending_verify",
@@ -404,6 +419,23 @@ describe("send_to v2 background verify", () => {
     );
   });
 
+  it("RESCOPE a Cursor queue matching only the tail does not prove our complete message", async () => {
+    const client = new FakeAgentSurfaceClient();
+    client.cli = "cursor";
+    client.cursorFollowUpBox = true;
+    const text = "owned prefix " + "shared tail ".repeat(10) + "end";
+    const read = client.readScreen.bind(client);
+    vi.spyOn(client, "readScreen").mockImplementation(async (surface, opts) => client.sendKeyCalls.length > 1
+      ? { surface, text: `Cursor Agent\nWorking\nforeign prefix ${text.slice(-80)}\n→ Add a follow-up\nctrl+c to stop`, lines: 30, scrollback_used: false }
+      : read(surface, opts));
+    server = createVerifyServer(client);
+    registerAgent(server, { cli: "cursor" });
+    const result = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text, press_enter: true }));
+    expect(result).toMatchObject({ ok: false, error_code: "submit_unverified", delivery_state: "queued_followup", submitted: false, terminal: false });
+    expect(result).not.toHaveProperty("queue_verified");
+    expect(client.sendCalls).toEqual([text]);
+  });
+
   it("presses Cursor's follow-up Return and receipts queued_followup once the composer is consumed", async () => {
     const client = new FakeAgentSurfaceClient();
     client.cli = "cursor";
@@ -423,6 +455,7 @@ describe("send_to v2 background verify", () => {
     expect(result.isError).not.toBe(true);
     expect(parsed).toMatchObject({
       ok: true,
+      queue_verified: true,
       delivery_id: expect.any(String),
       delivery_state: "queued_followup",
       delivery: "queued_followup",
@@ -676,7 +709,7 @@ describe("send_to v2 background verify", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     expect(engine.getDeliveryReceipt(queued.delivery_id)?.needs_attention).toBeFalsy();
@@ -747,13 +780,13 @@ describe("send_to v2 background verify", () => {
 
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     await vi.advanceTimersByTimeAsync(5_100);
     await engine.verifyPendingDeliveries();
     expect(engine.getDeliveryReceipt(queued.delivery_id)).toMatchObject({
-      delivery_state: "queued",
+      delivery_state: "steer_pending",
       terminal: false,
     });
     await vi.advanceTimersByTimeAsync(10_000);
@@ -766,6 +799,16 @@ describe("send_to v2 background verify", () => {
     });
     expect(engine.getDeliveryReceipt(queued.delivery_id)?.error).not.toMatch(/Escape/i);
     expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("RESCOPE background placeholder repaint without a new turn or echo stays pending", async () => {
+    const client = new FakeAgentSurfaceClient();
+    server = createVerifyServer(client);
+    registerAgent(server);
+    const sent = parseResult(await callTool(server, "send_to", { agent_id: "agent-1", text: "not consumed", press_enter: true }));
+    client.clearComposer();
+    await engineForTests(server).verifyPendingDeliveries();
+    expect(engineForTests(server).getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "pending_verify", terminal: false });
   });
 
   it("promotes a pending_verify delivery to submitted once the composer clears", async () => {
@@ -1479,6 +1522,7 @@ describe("send_to v2 background verify", () => {
       }),
     );
     expect(sent.delivery_state).toBe("queued_followup");
+    expect(sent).toMatchObject({ ok: true, queue_verified: true });
 
     await vi.advanceTimersByTimeAsync(11 * 60 * 1000);
     const engine = engineForTests(server);

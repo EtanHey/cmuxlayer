@@ -70,9 +70,13 @@ function makeExec(
     },
     ...additionalSurfaces,
   ];
+  let inputSurface = surfaces[0];
   const setScreenText = (text: string) => {
-    currentScreenText = text;
-    if (mutableScreen) mutableScreen.text = text;
+    inputSurface.text = text;
+    if (inputSurface.ref === "surface:new") {
+      currentScreenText = text;
+      if (mutableScreen) mutableScreen.text = text;
+    }
   };
   return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
@@ -156,6 +160,9 @@ function makeExec(
         }),
         stderr: "",
       };
+    }
+    if (args.includes("send") || args.includes("paste-buffer") || args.includes("send-key")) {
+      inputSurface = surfaces.find(surface => args.includes(surface.ref)) ?? surfaces[0];
     }
     if (args.includes("send-key") && args.includes("return")) {
       if (promptPending) {

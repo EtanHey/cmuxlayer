@@ -307,6 +307,45 @@ describe("control health", () => {
     rmSync(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("#911: reports inbox tailers under their own key", async () => {
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async () => ({ stdout: "" }),
+      inboxTailers: async () => ({ live: 11, orphaned: 82 }),
+    });
+
+    expect(health.tailers).toEqual({ live: 11, orphaned: 82 });
+    expect(formatControlHealth(health)).toContain("inbox tailers: live=11 orphaned=82");
+  });
+
+  it("#911: an inbox tailer is never listed as a cmux production pid", async () => {
+    // Observed at the v0.4.90 install: a legacy tailer's ps line runs on into
+    // its environment (CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/...), so
+    // six tailer PIDs were listed as cmux "production pids".
+    const health = await collectControlHealth({
+      homeDir: join(TEST_ROOT, "home-911"),
+      tmpDir: join(TEST_ROOT, "tmp-911"),
+      env: { PATH: "" },
+      execFile: async (file, args) => {
+        if (file === "ps" && args.join(" ") === "ax -o pid= -o command=") {
+          return {
+            stdout: [
+              "59547 /Applications/cmux.app/Contents/MacOS/cmux",
+              "2770 cmuxlayer-inbox-tail:4f612677f0026e922e65d9c14a014e99      CMUX_BUNDLED_CLI_PATH=/Applications/cmux.app/Contents/Resources/bin/cmux CMUX_CLAUDE_WRAPPER_SHIM=/var/folders/x/claude",
+              "2771 cmuxlayer-inbox-tail fleetWorker-abc 0123456789abcdef",
+            ].join("\n"),
+          };
+        }
+        if (file === "ps") return { stdout: "" };
+        throw new Error(`unexpected execFile: ${file}`);
+      },
+    });
+
+    expect(health.cmux_instances.production.processes.map((proc) => proc.pid)).toEqual([59547]);
+  });
+
   it("reports the daemon spawner's real app ancestry instead of inherited cmux env", async () => {
     const health = await collectControlHealth({
       homeDir: join(TEST_ROOT, "ancestry-home"),
@@ -625,6 +664,15 @@ describe("control health", () => {
       env: { PATH: "" },
       execFile: async () => ({ stdout: "" }),
     });
+    rawHealth.cmux_instances.production.processes = [{
+      pid: 25528,
+      command: "/Applications/cmux.app/Contents/MacOS/cmux",
+      fd_pressure: {
+        pid: 25528, open_fds: 22, udp_fds: 6,
+        by_type: { REG: 10, PIPE: 4, KQUEUE: 0, UDP: 6, ptmx: 2, unix: 0, other: 0 },
+        warn: false, warn_threshold: 4096, sampled_at: rawHealth.generated_at,
+      },
+    }];
     const stateMgr = new StateManager(TEST_ROOT);
     stateMgr.writeState({
       agent_id: "caller-agent",
@@ -724,6 +772,7 @@ describe("control health", () => {
         },
       ],
     });
+    expect(terse.structuredContent.health.cmux_fds).toBe("22 (udp 6)");
     expect(unscopedTerse.structuredContent.health.caller_live_watches).toEqual({
       count: 0,
       watches: [],
@@ -731,7 +780,11 @@ describe("control health", () => {
     expect(
       recycledRefTerse.structuredContent.health.caller_live_watches,
     ).toEqual({ count: 0, watches: [] });
-    expect(terse.content[0].text.length).toBeLessThan(full.content[0].text.length);
+    expect(JSON.parse(terse.content[0].text).health).toEqual(
+      terse.structuredContent.health,
+    );
+    expect(terse.structuredContent.health).not.toHaveProperty("cmux_instances");
+    expect(full.structuredContent.health).toHaveProperty("cmux_instances");
     await server.close();
   });
 

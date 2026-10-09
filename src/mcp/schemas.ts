@@ -144,6 +144,7 @@ export const SendToArgsSchema = z.object({
     .default(BOOT_PROMPT_TIMEOUT_MS),
   press_enter: z.boolean().optional().default(true),
   allow_busy: z.boolean().optional().default(false),
+  codex_busy_mode: z.enum(["steer", "queue"]).optional().describe("Busy Codex defaults to Return steering at the next tool call; queue opts into Tab after-turn delivery. Neither pending state is delivered."),
   allow_long_inline: z.boolean().optional().default(false),
   verbose: z.boolean().optional().default(false).describe("Return the full legacy success receipt, including transport and timing diagnostics. Failures always keep full detail."),
   targeting: z
@@ -178,6 +179,7 @@ export const DeliveryOutputShape = {
       "submitted",
       "typed",
       "queued",
+      "steer_pending",
       "queued_followup",
       "rescued",
       "failed",
@@ -191,6 +193,7 @@ export const DeliveryOutputShape = {
       "submitted",
       "typed",
       "queued",
+      "steer_pending",
       "queued_followup",
       "rescued",
       "failed",
@@ -231,9 +234,13 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
   spawn_agent: z
     .object({
       ...BaseOutputShape,
+      retry_count: BaseOutputShape.retry_count.optional(),
+      state: z.string().optional(),
+      delivered: z.boolean().optional(),
+      warning: z.string().optional(),
       version: z.literal(1).optional(),
       type: z.enum(["agent", "terminal"]).optional(),
-      agent_id: z.string().optional(),
+      agent_id: z.string().nullable().optional(),
       parent_agent_id: z.string().nullable().optional(),
       role: z.string().optional(),
       surface_id: z.string().optional(),
@@ -253,7 +260,7 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
       boot_prompt_submit_verified: z.boolean().nullable().optional(),
       update_menu_skipped: z.boolean().optional(),
       update_menu_text_hash: z.string().optional(),
-      spawn_state: z.enum(["started", "boot_unsubmitted"]).optional(),
+      spawn_state: z.enum(["started", "boot_unsubmitted", "pending_verify"]).optional(),
       next_action: z.string().optional(),
       delivered_chars: z.number().int().nonnegative().optional(),
     })
@@ -274,6 +281,7 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
   send_to: z
     .object({
       ...BaseOutputShape,
+      retry_count: BaseOutputShape.retry_count.optional(),
       ...DeliveryOutputShape,
       agent_id: z.string().optional(),
       surface: z.string().optional(),

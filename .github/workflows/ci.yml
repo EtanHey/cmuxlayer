@@ -11,6 +11,10 @@ on:
         description: Required audit reason if imported measurements raise any committed row
         required: false
         type: string
+      baseline_rebase_rows:
+        description: Required comma-separated metrics for a runner rebase (e.g. send_to_surface_warm.p50_ms,cli_send_ms)
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -32,6 +36,10 @@ jobs:
       - name: Guard against tracked docs.local
         run: bash scripts/guard-no-docslocal.sh
 
+  # Keep the committed baseline calibrated to current PR-class runners by
+  # importing their perf artifact via baseline_source_run_id: observed PR send
+  # rows are about 15–20% slower than push/dispatch runs. After reviewed runner
+  # calibration, the §12 pristine-sprint target is to tighten measured ceilings.
   perf-budget:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -255,6 +263,8 @@ jobs:
       # bun.lock pins every platform's optional deps (e.g. the rollup linux
       # binary); --frozen-lockfile fails the job if the lockfile would change.
       - run: bun install --frozen-lockfile
+      - name: Install zsh for harness shell regression tests
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - run: bun run typecheck
       - run: bun run test
       - name: Check bounded event-log RSS
@@ -368,7 +378,20 @@ jobs:
           echo "CMUXLAYER_BENCH_SOURCE_RUN_ID=$SOURCE_RUN_ID" >> "$GITHUB_ENV"
           echo "CMUXLAYER_BENCH_SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
       - name: Produce canonical CI-runner baseline
+        if: inputs.baseline_source_run_id == ''
         env:
+          BASELINE_INCREASE_REASON: ${{ inputs.baseline_increase_reason }}
+        run: |
+          if [ -n "$BASELINE_INCREASE_REASON" ]; then
+            bun run bench:daemon:refresh -- --reason "$BASELINE_INCREASE_REASON"
+          else
+            bun run bench:daemon:refresh
+          fi
+
+      - name: Produce rebased CI-runner baseline
+        if: inputs.baseline_source_run_id != ''
+        env:
+          CMUXLAYER_BENCH_REBASE_ROWS: ${{ inputs.baseline_rebase_rows }}
           BASELINE_INCREASE_REASON: ${{ inputs.baseline_increase_reason }}
         run: |
           if [ -n "$BASELINE_INCREASE_REASON" ]; then

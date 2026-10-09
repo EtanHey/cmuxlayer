@@ -186,8 +186,9 @@ export function formatListAgents(
     const model = pad(truncate(a.model.value ?? "unknown", 16), 18);
     const session = pad(a.session_id.value ?? "\u2014", 14);
     const pausedMark = a.paused?.value ? ` paused:${a.paused.source}` : "";
+    const placementMark = a.placement_mismatch ? " placement_mismatch" : "";
     lines.push(
-      `\u2502 ${id} ${repo} ${state} ${model} ${session}${pausedMark}`,
+      `\u2502 ${id} ${repo} ${state} ${model} ${session}${pausedMark}${placementMark}`,
     );
   }
 

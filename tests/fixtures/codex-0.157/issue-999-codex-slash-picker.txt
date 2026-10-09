@@ -1,0 +1,6 @@
+OpenAI Codex
+  /help    Show help
+
+› PAYLOAD
+
+  enter/tab insert · esc close

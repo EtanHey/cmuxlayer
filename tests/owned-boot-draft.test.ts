@@ -63,7 +63,7 @@ function makeSlowComposerPane() {
     if (args.includes("send") && !args.includes("send-key")) {
       const text = String(args.at(-1));
       // The launcher command is echoed by the shell, not typed into Claude.
-      if (!/ulimit -Sn/.test(text)) state.composer += text;
+      if (!/^brainlayerClaude(?: |$)/.test(text)) state.composer += text;
       return { stdout: "{}", stderr: "" };
     }
     if (args.includes("read-screen")) {
@@ -128,7 +128,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     const as = <T>(uuid: string | undefined, fn: () => Promise<T>) =>
       runWithCallerContext(uuid ? { surfaceId: uuid, workspaceId: "workspace:1" } : undefined, fn);
     const spawn = (uuid: string | undefined) => as(uuid, async () => parseToolResult(
-      await server._registeredTools.spawn_agent.handler({
+      await server._registeredTools.spawn_agent.handler({ verbose: true,
         repo: "brainlayer", model: "sonnet", cli: "claude", workspace: "workspace:1",
         prompt: "Read and follow /tmp/reviewer-brief.md", boot_prompt_timeout_ms: 2_000,
       }, {})));
@@ -137,17 +137,30 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     return { pane, context, engine, spawn, keyReturn, setSession: (id: string) => { sessionId = id; } };
   }
 
-  it("accepts the advised key-Return from the spawning caller and settles the boot", async () => {
+  it.each([false, true])("accepts the advised key-Return and settles the boot after retyping=%s", async retype => {
     const t = await setup();
     try {
       t.setSession("11111111-2222-4333-8444-555555555555");
       const spawned = await t.spawn(LEAD_UUID);
       expect(spawned.spawn_state, JSON.stringify(spawned)).toBe("boot_unsubmitted");
       expect(spawned.boot_prompt_receipt).toMatchObject({ typed: true, submit_dispatched: false });
+      expect(t.engine.listDeliveryReceipts().filter(receipt =>
+        receipt.boot_recovery && receipt.agent_id === spawned.agent_id)).toHaveLength(0);
       expect(t.pane.state.submitted).toHaveLength(0);
       expect(spawned.next_action).toContain('send_to({mode:"key"');
       const surface = spawned.next_action.match(/surface:"([^"]+)"/)?.[1];
       expect(surface).toBe(spawned.surface_id);
+
+      if (retype) {
+        const { runWithCallerContext } = await import("../src/caller-context.js");
+        const deliver = t.context.lifecycleAgentInputDeliverer;
+        if (!deliver) throw new Error("lifecycle relay was not initialized");
+        const previousText = t.pane.state.composer;
+        await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
+          deliver({ agent_id: spawned.agent_id, text: t.pane.state.composer, press_enter: false, source_event: "send_input", allow_busy: true }));
+        expect(t.pane.state.composer).toBe(previousText + previousText);
+        expect([...t.context.typedDraftOwners.values()][0]).toMatchObject({ bootAgentId: spawned.agent_id, bootInstanceId: t.engine.stateMgr.readState(spawned.agent_id)?.boot_instance_id });
+      }
 
       // The draft finishes rendering: exactly the text spawn typed.
       t.pane.state.rendered = true;
@@ -199,7 +212,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  it("refuses the key-Return when a newer boot instance replaced the one that typed the draft", async () => {
+  it.each([false, true])("a newer boot cannot inherit the draft settlement after retyping=%s", async retype => {
     const t = await setup();
     try {
       t.setSession("11111111-2222-4333-8444-555555555555");
@@ -209,6 +222,15 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
         boot_instance_id: "22222222-3333-4444-8555-666666666666",
       } as any);
       t.engine.getRegistry().set(reboot.agent_id, reboot);
+      if (retype) {
+        const { runWithCallerContext } = await import("../src/caller-context.js");
+        const deliver = t.context.lifecycleAgentInputDeliverer;
+        if (!deliver) throw new Error("lifecycle relay was not initialized");
+        await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () =>
+          deliver({ agent_id: spawned.agent_id, text: t.pane.state.composer, press_enter: false, source_event: "send_input", allow_busy: true }));
+        expect([...t.context.typedDraftOwners.values()][0]).toMatchObject({ bootAgentId: spawned.agent_id });
+        expect([...t.context.typedDraftOwners.values()][0].bootInstanceId).not.toBe(reboot.boot_instance_id);
+      }
       t.pane.state.rendered = true;
       const refused = await t.keyReturn(LEAD_UUID, spawned.surface_id);
       expect(refused.error_code).toBe("blocked_by_foreign_draft");

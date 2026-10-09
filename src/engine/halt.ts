@@ -12,6 +12,7 @@ import {
   cleanScreenText,
   hasVisibleAgentProgress,
   isBlockingPromptChooserScreen,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "../screen-parser.js";
 import type { ParsedScreenResult } from "../types.js";
@@ -53,6 +54,7 @@ export interface HaltHost {
   readonly promptMotionScreenSignatures: AgentEngine["promptMotionScreenSignatures"];
   readonly registry: AgentEngine["registry"];
   readonly stateMgr: AgentEngine["stateMgr"];
+  listDeliveryReceipts: AgentEngine["listDeliveryReceipts"];
   sweepBackgroundProcessSnapshot: AgentEngine["sweepBackgroundProcessSnapshot"];
   appendHaltEscalationEvent: AgentEngine["appendHaltEscalationEvent"];
   assertSweepInputCurrent: AgentEngine["assertSweepInputCurrent"];
@@ -90,17 +92,26 @@ export function haltDwellMs(this: HaltHost, type: AgentHaltType): number {
     case "wedged":
       return this.haltWedgedDwellMs;
     case "harness_api_error":
+    case "delivery_stalled":
       return 0;
   }
 }
 
-export function haltUnblockAction(this: HaltHost, agent: AgentRecord, type: AgentHaltType): string {
+export function haltUnblockAction(
+  this: HaltHost,
+  agent: AgentRecord,
+  type: AgentHaltType,
+  screenText?: string,
+): string {
   switch (type) {
-    case "awaiting_input":
+    case "awaiting_input": {
+      const overlayKey = isCodexDismissibleOverlay(screenText ?? "") ? "escape" : "return";
+      const overlayHint = overlayKey === "escape" ? "overlay" : "prompt";
       return (
-        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the prompt, ` +
-        `send_to({mode: "key", surface: "${agent.surface_id}", text: "return"})`
+        `read_screen(surface: "${agent.surface_id}", raw: true); after reviewing the ${overlayHint}, ` +
+        `send_to({mode: "key", surface: "${agent.surface_id}", text: "${overlayKey}"})`
       );
+    }
     case "idle_without_done":
       return `send_to({agent_id: "${agent.agent_id}", text: "Continue and report status."})`;
     case "wedged":
@@ -111,6 +122,8 @@ export function haltUnblockAction(this: HaltHost, agent: AgentRecord, type: Agen
         `the child is paused and cannot act — unpause the pane before send_to, ` +
         `or send_to({mode: "key", surface: "${agent.surface_id}", text: "return"}) if the screen says to resume`
       );
+    case "delivery_stalled":
+      return `inspect delivery receipts and the pending section on surface ${agent.surface_id}; verify whether the message has landed before any manual action; do not interrupt or resend automatically`;
     case "harness_api_error":
       return `inspect the harness API error and request ID on surface ${agent.surface_id}, then retry or resume the harness turn`;
   }
@@ -478,6 +491,7 @@ export async function maybeEscalateLiveHalt(
   ctx: SweepAgentContext = {},
 ): Promise<AgentRecord> {
   if (!this.assertSweepInputCurrent(ctx)) return agent;
+  const staleDelivery = this.listDeliveryReceipts().find(receipt => receipt.agent_id === agent.agent_id && !receipt.terminal && receipt.needs_attention === true && ["queued", "steer_pending", "queued_followup"].includes(receipt.delivery_state));
   const nowMs = this.haltNow();
   const nowIso = new Date(nowMs).toISOString();
   const parsed = parseScreen(screenText);
@@ -533,7 +547,7 @@ export async function maybeEscalateLiveHalt(
     hasVisibleProgress &&
     motionObservedAt !== undefined &&
     nowMs - motionObservedAt < PROMPT_MOTION_GRACE_MS;
-  if (hasObservedPromptMotion) {
+  if (hasObservedPromptMotion && !staleDelivery) {
     agent = this.persistPromptBlockedState(agent, false, nowIso);
     return this.clearHaltEpisode(agent, {
       halt_last_active_at: nowIso,
@@ -549,10 +563,12 @@ export async function maybeEscalateLiveHalt(
   agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
   if (agent.halt_escalation === false) return agent;
   const hasHarnessApiError = parsed.errors.some((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   if (
+    !staleDelivery &&
     !hasHarnessApiError &&
+    !isCodexDismissibleOverlay(screenText) &&
     parsed.paused !== true &&
     (parsed.control_state === "shell" ||
       parsed.control_state === "dead" ||
@@ -585,7 +601,9 @@ export async function maybeEscalateLiveHalt(
     parsed.status === "working" || parsed.status === "thinking";
   let haltType: AgentHaltType | null = null;
   let episodeStartedAtMs = nowMs;
-  if (hasHarnessApiError) {
+  if (staleDelivery) {
+    haltType = "delivery_stalled";
+  } else if (hasHarnessApiError) {
     haltType = "harness_api_error";
   } else if (
     parsed.control_state === "permission_prompt" ||
@@ -630,10 +648,12 @@ export async function maybeEscalateLiveHalt(
   }
   if (!haltType) return this.clearHaltEpisode(agent);
   const harnessApiError = parsed.errors.find((error) =>
-    error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
   );
   const haltObservableAction =
-    haltType === "harness_api_error"
+    haltType === "delivery_stalled"
+      ? staleDelivery?.attention_reason ?? `Delivery ${staleDelivery?.delivery_id} remains pending`
+      : haltType === "harness_api_error"
       ? (harnessApiError ?? parsed.current_action ?? haltType)
       : (parsed.current_action ?? harnessApiError ?? haltType);
   const harnessRequestId = (value: string | null | undefined): string | null =>
@@ -652,7 +672,7 @@ export async function maybeEscalateLiveHalt(
       halt_last_observable_action: haltObservableAction,
     });
     this.registry.set(agent.agent_id, episode);
-    if (haltType !== "harness_api_error") return episode;
+    if (haltType !== "harness_api_error" && haltType !== "delivery_stalled") return episode;
     agent = episode;
   }
   if (agent.halt_episode_type !== haltType) {
@@ -667,7 +687,7 @@ export async function maybeEscalateLiveHalt(
       halt_last_observable_action: haltObservableAction,
     });
     this.registry.set(agent.agent_id, episode);
-    if (haltType !== "harness_api_error") return episode;
+    if (haltType !== "harness_api_error" && haltType !== "delivery_stalled") return episode;
     agent = episode;
   }
   if (haltType === "wedged") {
@@ -677,7 +697,7 @@ export async function maybeEscalateLiveHalt(
     });
     this.registry.set(agent.agent_id, episode);
   } else if (
-    haltType === "harness_api_error" &&
+    (haltType === "harness_api_error" || haltType === "delivery_stalled") &&
     agent.halt_last_observable_action !== haltObservableAction
   ) {
     const sameRequestId =
@@ -747,7 +767,7 @@ export async function maybeEscalateLiveHalt(
     0,
     Math.floor((nowMs - startedAtMs) / 1_000),
   );
-  const unblockAction = this.haltUnblockAction(episode, haltType);
+  const unblockAction = this.haltUnblockAction(episode, haltType, screenText);
   try {
     dispatchOnce(
       ancestor.agent_id,

@@ -1,0 +1,76 @@
+name: cmux capability
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  capability:
+    name: ${{ matrix.version }} capability (${{ matrix.purpose }})
+    runs-on: macos-15
+    timeout-minutes: 10
+    continue-on-error: ${{ matrix.early_warning }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: NIGHTLY
+            purpose: early warning
+            early_warning: true
+            app: cmux NIGHTLY.app
+            url: https://github.com/manaflow-ai/cmux/releases/download/nightly/cmux-nightly-macos-arm64-3742448899801.dmg
+            sha256: 93d99db4e384722cde93aeee9121284dcd1766732701084b3a0ddc772b952e1c
+            hosted_release: ''
+          - version: 0.64.22
+            purpose: required gate candidate
+            early_warning: false
+            app: cmux.app
+            url: https://github.com/manaflow-ai/cmux/releases/download/v0.64.22/cmux-macos.dmg
+            sha256: fd148dba3519fe7d308844089ce4d062b17739ba645623f058f67a64798cea25
+            hosted_release: --hosted-release
+    env:
+      CAPABILITY_APP: ${{ matrix.app }}
+      CAPABILITY_URL: ${{ matrix.url }}
+      CAPABILITY_SHA256: ${{ matrix.sha256 }}
+      CAPABILITY_HOSTED_RELEASE: ${{ matrix.hosted_release }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Download and verify pinned cmux
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{"status":"FAIL","stage":"capability prerequisites"}' > "$RUNNER_TEMP/capability.json"
+          printf '%s\n' '| row | status |' '| --- | --- |' '| capability prerequisites | FAIL |' > "$RUNNER_TEMP/capability.md"
+          test "$(uname -m)" = arm64
+          http_status=$(curl --location --retry 2 --write-out '%{http_code}' -o "$RUNNER_TEMP/cmux.dmg" "$CAPABILITY_URL")
+          if [ "$http_status" = 404 ]; then
+            printf '%s\n' '{"status":"FAIL","stage":"asset_gone"}' > "$RUNNER_TEMP/capability.json"
+            printf '%s\n' '| row | status |' '| --- | --- |' '| asset_gone | FAIL |' > "$RUNNER_TEMP/capability.md"
+            exit 1
+          fi
+          test "$http_status" = 200
+          printf '%s  %s\n' "$CAPABILITY_SHA256" "$RUNNER_TEMP/cmux.dmg" | shasum -a 256 -c -
+          hdiutil attach "$RUNNER_TEMP/cmux.dmg" -nobrowse -mountpoint "$RUNNER_TEMP/cmux-mount"
+          trap 'hdiutil detach "$RUNNER_TEMP/cmux-mount"' EXIT
+          ditto "$RUNNER_TEMP/cmux-mount/$CAPABILITY_APP" "$RUNNER_TEMP/$CAPABILITY_APP"
+          bash scripts/verify-cmux-capability-app.sh "$RUNNER_TEMP/$CAPABILITY_APP" "$RUNNER_TEMP/notarization-assessment.txt"
+      - name: Shell capability (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          launchctl print "gui/$(id -u)" > "$RUNNER_TEMP/gui-session.txt"
+          args=(--capability)
+          if [ -n "$CAPABILITY_HOSTED_RELEASE" ]; then args+=("$CAPABILITY_HOSTED_RELEASE"); fi
+          node scripts/ratchet-live.mjs "${args[@]}" --app "$RUNNER_TEMP/$CAPABILITY_APP" --output "$RUNNER_TEMP/capability.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cmux-${{ matrix.version }}-capability
+          path: |
+            ${{ runner.temp }}/capability.json
+            ${{ runner.temp }}/capability.md
+            ${{ runner.temp }}/gui-session.txt
+            ${{ runner.temp }}/notarization-assessment.txt
+          if-no-files-found: error

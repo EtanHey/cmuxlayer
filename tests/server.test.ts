@@ -16,7 +16,6 @@ import {
 import { CmuxClient, type ExecFn } from "../src/cmux-client.js";
 import { StateManager } from "../src/state-manager.js";
 import { AgentRegistry } from "../src/agent-registry.js";
-import { withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { dispatch } from "../src/inbox.js";
 import {
   currentCallerContext,
@@ -3081,6 +3080,9 @@ describe("tool handler integration", () => {
           stderr: "",
         };
       }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:95", text: "Claude Code\n❯ ", lines: 2 }), stderr: "" };
+      }
       return { stdout: "{}", stderr: "" };
     });
     const server = createServer({
@@ -3290,7 +3292,7 @@ describe("tool handler integration", () => {
             text: `${mockExec.mock.calls
               .filter(([, a]: [string, string[]]) => a.includes("send"))
               .map(([, a]: [string, string[]]) => `› ${a.at(-1)}\n`)
-              .join("")}Working (1s • esc to interrupt)\n› \ngpt-5.5 xhigh · 99% left`,
+              .join("")}Working (1s • esc to interrupt)\n› \ngpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`,
             lines: 30,
             scrollback_used: false,
           }),
@@ -3375,7 +3377,8 @@ describe("tool handler integration", () => {
       { surface: "surface:receipt-parity", key: "escape" },
       {} as any,
     );
-    const publicMessageResult = await registeredTools.send_to.handler(
+    vi.useFakeTimers();
+    const publicMessagePromise = registeredTools.send_to.handler(
       {
         mode: "surface",
         surface: "surface:receipt-parity",
@@ -3384,6 +3387,9 @@ describe("tool handler integration", () => {
       },
       {} as any,
     );
+    await vi.advanceTimersByTimeAsync(6_000);
+    vi.useRealTimers();
+    const publicMessageResult = await publicMessagePromise;
     const publicCommandResult = await registeredTools.send_to.handler(
       {
         mode: "command",
@@ -3411,7 +3417,7 @@ describe("tool handler integration", () => {
     };
 
     expect(receiptShape(commandResult)).toEqual(receiptShape(messageResult));
-    expect(receiptShape(publicMessageResult)).toEqual(receiptShape(messageResult));
+    expect(publicMessageResult.structuredContent).toMatchObject({ ok: false, error_code: "submit_unverified", delivery_state: "pending_verify", terminal: false, typed: true });
     expect(receiptShape(publicCommandResult)).toEqual(receiptShape(commandResult));
     expect(receiptShape(publicKeyResult)).toEqual(receiptShape(keyResult));
     expect(receiptShape(commandResult)).toEqual({
@@ -5437,8 +5443,8 @@ describe("tool handler integration", () => {
             text:
               textSent && returnPresses > 0
                 ? // #905: Codex proof is the message above an empty composer.
-                  "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
-                : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+                  "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                : "OpenAI Codex\ncodex> ping codex\ngpt-5 · ~/Gits/cmuxlayer\n",
             lines: 4,
           }),
           stderr: "",
@@ -5520,8 +5526,8 @@ describe("tool handler integration", () => {
               surface_ref: "surface:stale-working",
               text:
                 textSent && returnPresses > 0
-                  ? "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · idle\n"
-                  : "OpenAI Codex\ncodex> ping codex\ngpt-5 · idle\n",
+                  ? "OpenAI Codex\n› ping codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                  : "OpenAI Codex\ncodex> ping codex\ngpt-5 · ~/Gits/cmuxlayer\n",
               lines: 4,
             }),
             stderr: "",
@@ -5598,8 +5604,8 @@ describe("tool handler integration", () => {
             surface_ref: "surface:codex-dropped",
             text:
               textSent && returnPresses >= 2
-                ? "OpenAI Codex\ncodex> \ngpt-5 · idle\n"
-                : "OpenAI Codex\ncodex> retry me\ngpt-5 · idle\n",
+                ? "OpenAI Codex\ncodex> \ngpt-5 · ~/Gits/cmuxlayer\n"
+                : "OpenAI Codex\ncodex> retry me\ngpt-5 · ~/Gits/cmuxlayer\n",
             lines: 4,
           }),
           stderr: "",
@@ -6025,10 +6031,7 @@ describe("tool handler integration", () => {
           string
         >;
       };
-      const workerLauncherCommand = withRaisedNofileSoftLimit("GOLEM_ROLE=worker " + fixture.launcher_command.replace(
-        " -s ",
-        " -s --worker ",
-      ));
+      const workerLauncherCommand = fixture.launcher_command.replace(" -s ", " -s --worker ") + " -E medium";
 
       let launcherSends = 0;
       let promptSent = false;
@@ -6169,10 +6172,10 @@ describe("tool handler integration", () => {
         const result = await runWithFakeTimers(
           () =>
             tool.handler(
-              {
+              { verbose: true,
                 repo: "cmuxlayer",
                 model: "gpt-5.5",
-                cli: "codex",
+                cli: "codex", effort: "medium",
                 boot_prompt_path: promptPath,
                 boot_prompt_timeout_ms: 2_000,
               },
@@ -6361,7 +6364,7 @@ describe("tool handler integration", () => {
       corrupted_command: string;
       screen: string;
     };
-    const workerLauncherCommand = withRaisedNofileSoftLimit(`GOLEM_ROLE=worker ${fixture.launcher_command} --worker`);
+    const workerLauncherCommand = `${fixture.launcher_command} --worker -E medium`;
 
     let composer = "";
     let launcherSendAttempts = 0;
@@ -6472,7 +6475,7 @@ describe("tool handler integration", () => {
           tool.handler(
             {
               repo: "brainlayer",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               workspace: "workspace:1",
             },
             {} as any,
@@ -6540,7 +6543,7 @@ describe("tool handler integration", () => {
         pending_probe_screen: string;
       };
     };
-    const workerLauncherCommand = withRaisedNofileSoftLimit(`GOLEM_ROLE=worker ${fixture.launcher_command} --worker`);
+    const workerLauncherCommand = `${fixture.launcher_command} --worker -E medium`;
     const workerCorruptedCommand =
       workerLauncherCommand + workerLauncherCommand;
     const workerPendingProbeScreen = fixture.replay.pending_probe_screen.replace(
@@ -6657,7 +6660,7 @@ describe("tool handler integration", () => {
           tool.handler(
             {
               repo: "skillcreator",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               workspace: "workspace:2",
             },
             {} as any,
@@ -6956,10 +6959,10 @@ describe("tool handler integration", () => {
       const result = await runWithFakeTimers(
         () =>
           tool.handler(
-            {
+            { verbose: true,
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },
@@ -7196,7 +7199,7 @@ describe("tool handler integration", () => {
             {
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },
@@ -7363,7 +7366,7 @@ describe("tool handler integration", () => {
             {
               repo: "cmuxlayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
               boot_prompt_path: promptPath,
               boot_prompt_timeout_ms: 500,
             },
@@ -8232,7 +8235,7 @@ describe("tool handler integration", () => {
     expect(returnPresses).toBe(1);
   }, 10_000);
 
-  it("boot prompt leaves a long boot prompt pending when only generic Working appears", async () => {
+  it("boot prompt verifies fresh Working after observing the complete long payload before Return", async () => {
     vi.useRealTimers();
     const promptPath = join(CHANNEL_TEST_DIR, "split-long-retry.md");
     const prompt = "long boot prompt ".repeat(40);
@@ -8292,14 +8295,15 @@ describe("tool handler integration", () => {
       result.structuredContent ?? JSON.parse(result.content[0].text);
 
     expect(parsed.ok).toBe(true);
-    expect(parsed.boot_prompt_delivered).toBe(false);
+    expect(parsed.boot_prompt_delivered).toBe(true);
     expect(parsed.boot_prompt_receipt).toMatchObject({
-      delivered: false,
-      terminal: false,
+      delivered: true,
+      terminal: true,
       typed: true,
       submit_attempted: true,
-      submit_verified: null,
-      delivery_state: "pending_verify",
+      submit_verified: true,
+      submit_evidence: "status_only",
+      delivery_state: "submitted",
       retry_count: 0,
     });
     expect(sendCalls).toHaveLength(1);

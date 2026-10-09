@@ -20,7 +20,6 @@ import {
 } from "node:path";
 import { StateManager } from "./state-manager.js";
 import { sanitizeTerminalInput } from "./sanitize.js";
-import { withRaisedNofileSoftLimit } from "./nofile-limit.js";
 import {
   buildRawResumeCommand,
 } from "./agent-command.js";
@@ -29,7 +28,7 @@ import {
   SURFACE_EVICTION_CONFIRMATION_MS,
   type AgentFilter,
 } from "./agent-registry.js";
-import type { AgentDiscovery } from "./agent-discovery.js";
+import { AgentDiscovery, type DiscoveredAgent } from "./agent-discovery.js";
 import {
   INTERACTIVE_AGENT_STATES,
   isLiveActive,
@@ -43,7 +42,6 @@ import {
   toPublicAgent,
 } from "./agent-facade.js";
 import type {
-  CmuxNewSplitResult,
   CmuxReadScreenResult,
   CmuxStatusUpdate,
 } from "./types.js";
@@ -74,15 +72,21 @@ import {
 import {
   ANTIGRAVITY_BANNER_RE,
   cleanScreenText,
+  isCodexDismissibleOverlay,
   parseScreen,
 } from "./screen-parser.js";
+import { dismissAccountSecurityBanner } from "./delivery/account-security.js";
+import { DeliverySafetyGateError } from "./delivery/receipts.js";
+import {
+  codexScreenShowsSubmit,
+  extractComposerInputRegion,
+} from "./delivery/composer-screen.js";
 
 import {
   canonicalRoleColumn,
   chooseSurfaceClosePolicy,
   deriveRoleColumnIndex,
   inferRecordRoleOrNull,
-  topPaneInRoleColumn,
   type RoleSurfaceIds,
 } from "./layout-policy.js";
 import {
@@ -154,11 +158,14 @@ import {
   removePendingChannelMarkerAfterRegistration,
   type InboxOpts,
 } from "./inbox.js";
+import type { ProcessRow, TailOwnerState } from "./inbox-tail-reaper.js";
 import {
   agentProcessLiveness,
   agentProcessMayBeAlive,
   processLiveness,
+  scanSessionProcesses,
   type ProcessLiveness,
+  type SessionProcessScanner,
 } from "./util/pid-alive.js";
 import {
   AgentLaunchError,
@@ -353,12 +360,19 @@ export class AgentEngine {
   private inboxOpts?: InboxOpts;
   private lastChannelMarkerReapAt: number | null = null;
   private lastChannelMarkerReapFailureAt: number | null = null;
+  private lastInboxTailReapAt: number | null = null;
+  private inboxTailReaper: { recordAuthority: boolean } | null = null;
+  private inboxTailReapInFlight = false;
   private sessionIdentityResolver: SessionIdentityResolver;
   private hasCustomSessionIdentityResolver: boolean;
   private selfRegistrationSessionResolver: SessionIdentityResolver | null;
   private selfRegistrationSessionLookup:
     | ((sessionId: string) => SelfRegistrationSessionEntry | null)
     | null;
+  private sessionProcessScanner: SessionProcessScanner;
+  /** The server's discovery, once initialized; resume attributes panes with it. */
+  private resumeDiscovery: AgentDiscovery | null = null;
+  private resumeInProgress = new Set<string>();
   private seatRegistry: SeatRegistry | null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private postSpawnLivenessTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -519,6 +533,7 @@ export class AgentEngine {
     this.roleSurfaceIdsProvider = opts?.roleSurfaceIdsProvider;
     this.launchCommandSender = opts?.launchCommandSender;
     this.inboxOpts = opts?.inboxOpts;
+    this.inboxTailReaper = opts?.inboxTailReaper ?? null;
     this.seatRegistry =
       opts?.seatRegistry !== undefined
         ? opts.seatRegistry
@@ -533,6 +548,8 @@ export class AgentEngine {
       opts?.selfRegistrationSessionResolver ?? null;
     this.selfRegistrationSessionLookup =
       opts?.selfRegistrationSessionLookup ?? null;
+    this.sessionProcessScanner =
+      opts?.sessionProcessScanner ?? scanSessionProcesses;
     const fallbackSessionIdentityResolver = opts?.sessionIdentityResolver;
     this.sessionIdentityResolver = (agent) =>
       this.resolveSessionIdentityWithSelfRegistration(
@@ -1407,9 +1424,9 @@ export class AgentEngine {
       return { agent };
     }
     try {
-      const screen = await this.readAgentScreen(agent, {
+      const screen = await this.dismissBootSecurityBanner(agent, await this.readAgentScreen(agent, {
         lines: BOOT_SESSION_CAPTURE_LINES,
-      });
+      }));
       const evidence = this.readReadyEvidence(agent, screen.text);
       const parsed = parseScreen(screen.text);
       const activeForWait =
@@ -1505,7 +1522,8 @@ export class AgentEngine {
       waitForReadyPatternMatches.delete(agent.agent_id);
       waitForReadyPatternMatches.delete(transitionAgent.agent_id);
       return { agent: updated, source: "screen" };
-    } catch {
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError) return { agent: this.registry.get(agent.agent_id) ?? agent };
       return { agent };
     }
   }
@@ -1585,7 +1603,6 @@ export class AgentEngine {
     timeoutMs?: number,
     bypassLaunchSender = false,
   ): Promise<void> {
-    command = withRaisedNofileSoftLimit(command);
     const expectedRoute = this.resolveAgentRoute(agentId);
     if (surface !== expectedRoute.surface_id) {
       throw new Error(
@@ -1776,9 +1793,30 @@ export class AgentEngine {
   }
 
   private isBootPromptPendingStale(agent: AgentRecord): boolean {
-    const since = Date.parse(agent.updated_at);
+    const since = Date.parse(agent.boot_verify_started_at ?? agent.updated_at);
     if (Number.isNaN(since)) return false;
     return Date.now() - since >= BOOT_PROMPT_PENDING_STALE_MS;
+  }
+
+  private failPendingBoot(
+    agent: AgentRecord,
+    settlement: Partial<AgentRecord> = {},
+  ): AgentRecord {
+    const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
+      ...settlement,
+      boot_prompt_pending: false,
+      prompt_delivered: false,
+      submit_verified: false,
+      boot_pre_type_screen: null,
+      boot_delivery_text: null,
+      boot_resumed_at: null,
+      boot_submit_dispatched: false,
+    });
+    const failed = this.stateMgr.transition(failedSettlement.agent_id, "error", {
+      error: "Boot prompt delivery was not verified before the verification deadline",
+    });
+    this.registry.set(agent.agent_id, failed);
+    return failed;
   }
 
   private readReadyEvidence(
@@ -2418,6 +2456,42 @@ export class AgentEngine {
     }
   }
 
+  private async dismissBootSecurityBanner(agent: AgentRecord, screen: CmuxReadScreenResult, ctx?: SweepAgentContext): Promise<CmuxReadScreenResult> {
+    if (agent.cli !== "codex" || agent.state !== "booting" || !isCodexDismissibleOverlay(screen.text)) return screen;
+    const route = await this.resolveAgentIoRoute(agent.agent_id);
+    const assertCurrent = async () => {
+      if (ctx && !this.assertSweepInputCurrent(ctx)) throw new Error("Security-banner boot observation changed");
+      await this.resolveUnchangedAgentIoRoute(agent.agent_id, route, "security-banner dismissal");
+    };
+    if (!this.client.withSurfaceWrite) throw new Error("Security-banner dismissal requires a shared surface-write transaction");
+    try {
+      return await this.client.withSurfaceWrite(route.surface_id, async sendKey => {
+        const read = async () => {
+          await assertCurrent();
+          const observed = await this.client.readScreen(
+            this.client.supportsStableSurfaceReads && route.surface_uuid ? route.surface_uuid : route.surface_id,
+            { workspace: route.workspace_id ?? undefined, lines: BOOT_SESSION_CAPTURE_LINES },
+          );
+          await assertCurrent();
+          return observed;
+        };
+        // The triggering screen can predate a rebind or another delivery.
+        // Only fresh evidence under the shared UUID lock authorizes Esc.
+        return dismissAccountSecurityBanner(await read(), {
+          escape: async () => { await assertCurrent(); await sendKey("escape"); },
+          read,
+        }, { agent_id: agent.agent_id, surface: route.surface_id, eventLog: this.stateMgr.getEventLog() });
+      }, { workspace: route.workspace_id ?? undefined, stableSurfaceIdentity: route.surface_uuid });
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError) {
+        await assertCurrent();
+        const failed = this.stateMgr.transition(agent.agent_id, "error", { error: error.message });
+        this.registry.set(agent.agent_id, failed);
+      }
+      throw error;
+    }
+  }
+
   private async maybeMarkBootReady(
     agent: AgentRecord,
     ctx: SweepAgentContext,
@@ -2432,11 +2506,12 @@ export class AgentEngine {
     }
 
     try {
-      const screen = await this.readSweepScreen(agent, ctx);
+      const screen = await this.dismissBootSecurityBanner(agent, await this.readSweepScreen(agent, ctx), ctx);
+      ctx.screen = Promise.resolve(screen);
       if (!this.assertSweepInputCurrent(ctx)) return agent;
       const parsed = parseScreen(screen.text);
       const parsedEffort =
-        agent.cli === "codex" ? parseCodexEffort(parsed.model) : null;
+        agent.cli === "codex" ? parseCodexEffort(parsed.model, screen.text) : null;
       const settlement = {
         parsed_model: parsed.model,
         model_mismatch: computeModelMismatch(agent.model, parsed.model),
@@ -2444,6 +2519,40 @@ export class AgentEngine {
         effort_mismatch: computeEffortMismatch(agent.effort, parsedEffort),
       };
       const evidence = this.readReadyEvidence(agent, screen.text);
+      const composerInput = extractComposerInputRegion(screen.text, undefined, agent.cli);
+      const bootEchoed = agent.cli === "codex" &&
+        !!agent.boot_pre_type_screen && !!agent.boot_delivery_text &&
+        codexScreenShowsSubmit(
+          agent.boot_pre_type_screen, screen.text, agent.boot_delivery_text,
+        );
+      const activeBoot =
+        (agent.boot_submit_dispatched === true || !!agent.boot_resumed_at) &&
+        composerInput !== null && composerInput.trim() === "" &&
+        parsed.control_state !== "shell" &&
+        screenHasReadyAgentIdentity(agent.cli, screen.text, parsed) &&
+        screenHasActiveAgentMarker(agent.cli, screen.text, parsed);
+      if (
+        agent.boot_prompt_pending === true &&
+        agent.prompt_delivered !== true &&
+        (bootEchoed || activeBoot)
+      ) {
+        const settled = this.stateMgr.updateRecord(agent.agent_id, {
+          ...settlement,
+          boot_prompt_pending: false,
+          boot_verify_started_at: null,
+          prompt_delivered: true,
+          submit_verified: true,
+          boot_pre_type_screen: null,
+          boot_delivery_text: null,
+          boot_resumed_at: null,
+          boot_submit_dispatched: false,
+        });
+        let updated = this.stateMgr.transition(settled.agent_id, "ready");
+        if (activeBoot) updated = this.stateMgr.transition(updated.agent_id, "working");
+        this.registry.set(agent.agent_id, updated);
+        this.readyPatternMatches.delete(agent.agent_id);
+        return updated;
+      }
       const promptStillPending =
         agent.boot_prompt_pending === true &&
         this.screenShowsPendingBootPrompt(agent, screen.text);
@@ -2454,22 +2563,7 @@ export class AgentEngine {
       if (promptStillPending || awaitingManagedBootPrompt) {
         this.readyPatternMatches.delete(agent.agent_id);
         if (this.isBootPromptPendingStale(agent)) {
-          const failedSettlement = this.stateMgr.updateRecord(agent.agent_id, {
-            ...settlement,
-            boot_prompt_pending: false,
-            prompt_delivered: false,
-            submit_verified: false,
-          });
-          const failed = this.stateMgr.transition(
-            failedSettlement.agent_id,
-            "error",
-            {
-              error:
-                "Boot prompt delivery was not verified before the pending-input timeout",
-            },
-          );
-          this.registry.set(agent.agent_id, failed);
-          return failed;
+          return this.failPendingBoot(agent, settlement);
         }
         if (
           agent.submit_verified !== false ||
@@ -2527,9 +2621,12 @@ export class AgentEngine {
 
       const settled = this.stateMgr.updateRecord(agent.agent_id, {
         ...settlement,
+        boot_resumed_at: null,
+        boot_submit_dispatched: false,
         ...(agent.boot_prompt_pending && agent.prompt_delivered !== false
           ? {
               boot_prompt_pending: false,
+              boot_verify_started_at: null,
               prompt_delivered: true,
               submit_verified: true,
             }
@@ -2551,7 +2648,16 @@ export class AgentEngine {
       this.registry.set(agent.agent_id, updated);
       this.readyPatternMatches.delete(agent.agent_id);
       return updated;
-    } catch {
+    } catch (error) {
+      if (error instanceof DeliverySafetyGateError && error.error_code === "hooks_review_not_dismissed") return this.registry.get(agent.agent_id) ?? agent;
+      if (agent.boot_prompt_pending && this.isBootPromptPendingStale(agent) &&
+          this.assertSweepInputCurrent(ctx)) {
+        try {
+          return this.failPendingBoot(agent);
+        } catch {
+          // A failed state write is retried on the next sweep.
+        }
+      }
       return agent;
     }
   }
@@ -2690,6 +2796,7 @@ export class AgentEngine {
       get promptMotionScreenSignatures() { return engine.promptMotionScreenSignatures; },
       get registry() { return engine.registry; },
       get stateMgr() { return engine.stateMgr; },
+      listDeliveryReceipts: () => engine.listDeliveryReceipts(),
       get sweepBackgroundProcessSnapshot() { return engine.sweepBackgroundProcessSnapshot; },
       set sweepBackgroundProcessSnapshot(value) { engine.sweepBackgroundProcessSnapshot = value; },
       appendHaltEscalationEvent: (...args) => engine.appendHaltEscalationEvent(...args),
@@ -3462,8 +3569,28 @@ export class AgentEngine {
       return { moved: [], skipped: [] };
     }
     const summary: RolePlacementReconcileSummary = { moved: [], skipped: [] };
+    const selfRegistrationId = (agent: AgentRecord): string | null => {
+      if (
+        process.env.CMUXLAYER_RECONCILE_SELF_REGISTERED_PLACEMENT === "0" ||
+        (agent.surface_provenance ?? "unknown") !== "unknown" ||
+        !agent.surface_uuid
+      ) return null;
+      const registration = this.selfRegistrationSessionResolver?.(agent);
+      const sessionId = typeof registration === "string"
+        ? registration
+        : registration?.session_id;
+      if (
+        !sessionId ||
+        (agent.cli_session_id && agent.cli_session_id !== sessionId)
+      ) return null;
+      return `${agent.surface_uuid.toLowerCase()}:${sessionId}`;
+    };
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
-      if (agent.surface_provenance !== "cmuxlayer_spawn") return false;
+      if (agent.surface_provenance !== "cmuxlayer_spawn") {
+        return trigger !== "spawn" &&
+          !TERMINAL_STATES.has(agent.state) &&
+          selfRegistrationId(agent) !== null;
+      }
       if (trigger === "spawn") {
         // Spawn reconciliation runs synchronously after registry persistence
         // and before the launch command is sent, so membership is sufficient:
@@ -3483,6 +3610,7 @@ export class AgentEngine {
     });
 
     for (const agent of candidates) {
+      const registrationId = selfRegistrationId(agent);
       const role = inferRecordRoleOrNull(agent);
       if (!role) continue;
       const targetColumn = canonicalRoleColumn(role);
@@ -3505,10 +3633,64 @@ export class AgentEngine {
         opts.surfaceTopology ?? null,
       );
       if (
+        registrationId &&
+        (agent.placement_reconciled_registration === registrationId ||
+          agent.placement_move_attempted_registration === registrationId)
+      ) {
+        if (agent.placement_override) continue;
+        const currentTopology = opts.surfaceTopology?.complete
+          ? opts.surfaceTopology
+          : await this.collectFreshObservedSurfaceTopology();
+        const currentBinding = currentTopology?.complete
+          ? resolveAgentSurfaceBinding(agent, currentTopology)
+          : null;
+        const currentColumn = currentBinding?.provenance === "uuid" &&
+          currentBinding.workspaceId === agent.workspace_id
+          ? currentTopology?.topologyBySurface.get(currentBinding.surfaceRef)?.column
+          : null;
+        try {
+          if (currentColumn === targetColumn &&
+              agent.placement_reconciled_registration !== registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          } else if (currentColumn !== null && currentColumn !== undefined &&
+              currentColumn !== targetColumn &&
+              agent.placement_reconciled_registration === registrationId) {
+            const overridden = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_override: true,
+            });
+            this.registry.set(agent.agent_id, overridden);
+          }
+        } catch (error) {
+          summary.skipped.push({
+            agent_id: agent.agent_id,
+            surface_id: agent.surface_id,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
+      if (
         sweepBinding?.provenance === "uuid" &&
         opts.surfaceTopology?.topologyBySurface.get(sweepBinding.surfaceRef)
           ?.column === targetColumn
       ) {
+        if (registrationId) {
+          try {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          } catch (error) {
+            summary.skipped.push({
+              agent_id: agent.agent_id,
+              surface_id: agent.surface_id,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
         continue;
       }
 
@@ -3531,6 +3713,7 @@ export class AgentEngine {
             current.surface_uuid?.trim().toLowerCase() !==
               agent.surface_uuid?.trim().toLowerCase() ||
             (current.workspace_id ?? null) !== (agent.workspace_id ?? null)
+            || (registrationId !== null && selfRegistrationId(current) !== registrationId)
           ) {
             throw new Error(
               "agent provenance, state, or stable binding changed before mutation",
@@ -3575,6 +3758,9 @@ export class AgentEngine {
         const panes = await this.client.listPanes({
           workspace: agent.workspace_id,
         });
+        if (panes.workspace_ref && panes.workspace_ref !== agent.workspace_id) {
+          throw new Error("pane enumeration crossed the agent workspace");
+        }
         const rawPaneSurfaces = await Promise.all(
           panes.panes.map(async (pane) => {
             const observed = await this.client.listPaneSurfaces({
@@ -3627,45 +3813,51 @@ export class AgentEngine {
         if (fromColumn === undefined) {
           throw new Error("spawned surface pane is not observable");
         }
-        if (fromColumn === targetColumn) continue;
-
-        let targetPane = topPaneInRoleColumn(panes.panes, role)?.ref ?? null;
-        let seed: CmuxNewSplitResult | null = null;
-        if (!targetPane && role === "worker") {
-          const leadPane = topPaneInRoleColumn(panes.panes, "orchestrator");
-          if (!leadPane) {
-            throw new Error("column 0 anchor is unavailable");
+        if (fromColumn === targetColumn) {
+          if (registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+            });
+            this.registry.set(agent.agent_id, reconciled);
           }
-          const createdSeed = await this.client.newSplit("right", {
-            pane: leadPane.ref,
-            surface: sourceRef,
-            workspace: agent.workspace_id,
-            type: "terminal",
-            stableSurfaceIdentity: agent.surface_uuid,
-            beforeMutation: () =>
-              assertFreshAgentBinding(sourceRef, "worker-column seed"),
-          });
-          this.invalidateSweepTopologyGeneration();
-          this.assertSurfaceObserverEpochCurrent(
-            observerEpoch,
-            "role placement",
-          );
-          if (
-            createdSeed.surface === sourceRef ||
-            (createdSeed.surface_id ?? null) === agent.surface_uuid
-          ) {
-            throw new Error(
-              "worker-column seed collided with the spawned surface binding",
-            );
-          }
-          seed = createdSeed;
-          targetPane = seed.pane;
+          continue;
         }
+
+        const targetPanes = panes.panes
+          .filter((pane) => columnByPane.get(pane.ref) === targetColumn)
+          .sort((a, b) =>
+            (a.pixel_frame?.y ?? a.index) - (b.pixel_frame?.y ?? b.index) ||
+            a.index - b.index,
+          );
+        const target = role === "orchestrator"
+          ? targetPanes.at(-1)
+          : targetPanes[0];
+        const targetPane = target?.ref ?? null;
         if (!targetPane) {
           throw new Error(`canonical column ${targetColumn} is unavailable`);
         }
 
-        try {
+        const assertSafeMove = async (): Promise<void> => {
+          await assertFreshAgentBinding(sourceRef, "role placement move");
+          const freshPanes = await this.client.listPanes({
+            workspace: agent.workspace_id ?? undefined,
+          });
+          if (
+            (freshPanes.workspace_ref && freshPanes.workspace_ref !== agent.workspace_id) ||
+            deriveRoleColumnIndex(freshPanes.panes).get(targetPane) !== targetColumn
+          ) {
+            throw new Error("target pane left the agent workspace or role column");
+          }
+        };
+        {
+          await assertSafeMove();
+          if (registrationId) {
+            const attempted = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_move_attempted_registration: registrationId,
+              placement_override: false,
+            });
+            this.registry.set(agent.agent_id, attempted);
+          }
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
@@ -3673,11 +3865,11 @@ export class AgentEngine {
           await this.client.moveSurface({
             surface: sourceRef,
             pane: targetPane,
+            ...(role === "orchestrator" ? { index: target!.surface_count } : {}),
             workspace: agent.workspace_id,
             focus: false,
             stableSurfaceIdentity: agent.surface_uuid,
-            beforeMutation: () =>
-              assertFreshAgentBinding(sourceRef, "role placement move"),
+            beforeMutation: assertSafeMove,
           });
           this.invalidateSweepTopologyGeneration();
           summary.moved.push({
@@ -3687,73 +3879,21 @@ export class AgentEngine {
             to_column: targetColumn,
             pane: targetPane,
           });
+          if (registrationId) {
+            const reconciled = this.stateMgr.updateRecord(agent.agent_id, {
+              placement_reconciled_registration: registrationId,
+              placement_override: false,
+            });
+            this.registry.set(agent.agent_id, reconciled);
+          }
           this.assertSurfaceObserverEpochCurrent(
             observerEpoch,
             "role placement",
           );
-        } finally {
-          if (seed) {
-            if (!seed.surface_id) {
-              throw new Error(
-                "worker-column seed has no stable UUID; refusing cleanup by mutable ref",
-              );
-            }
-            const seedTopology =
-              await this.collectFreshObservedSurfaceTopology();
-            const seedBinding = seedTopology?.complete
-              ? resolveAgentSurfaceBinding(
-                  {
-                    surface_id: seed.surface,
-                    surface_uuid: seed.surface_id,
-                  },
-                  seedTopology,
-                )
-              : null;
-            if (!seedBinding || seedBinding.provenance !== "uuid") {
-              throw new Error(
-                `worker-column seed UUID ${seed.surface_id} is no longer uniquely bound; refusing cleanup`,
-              );
-            }
-            await this.client.closeSurface(seedBinding.surfaceRef, {
-              workspace: seedBinding.workspaceId ?? seed.workspace,
-              stableSurfaceIdentity: seed.surface_id,
-              beforeMutation: async () => {
-                this.assertSurfaceObserverEpochCurrent(
-                  observerEpoch,
-                  "role placement seed cleanup",
-                );
-                const freshSeedTopology =
-                  await this.collectFreshObservedSurfaceTopology();
-                this.assertSurfaceObserverEpochCurrent(
-                  observerEpoch,
-                  "role placement seed cleanup",
-                );
-                const freshSeedBinding = freshSeedTopology?.complete
-                  ? resolveAgentSurfaceBinding(
-                      {
-                        surface_id: seed.surface,
-                        surface_uuid: seed.surface_id,
-                      },
-                      freshSeedTopology,
-                    )
-                  : null;
-                if (
-                  !freshSeedBinding ||
-                  freshSeedBinding.provenance !== "uuid" ||
-                  freshSeedBinding.surfaceRef !== seedBinding.surfaceRef
-                ) {
-                  throw new Error(
-                    "worker-column seed binding changed before cleanup",
-                  );
-                }
-              },
-            });
-          }
         }
       } catch (error) {
         if (summary.moved.some((moved) => moved.agent_id === agent.agent_id)) {
-          // Seed cleanup is best-effort and must not overwrite a completed move
-          // by counting the same agent as skipped as well.
+          // A successful move still counts when final marker persistence fails.
           continue;
         }
         summary.skipped.push({
@@ -3773,8 +3913,17 @@ export class AgentEngine {
    * reconcile, so a fresh process cannot publish an empty first paint.
    */
   initialize(discovery: AgentDiscovery): Promise<void> {
+    this.resumeDiscovery = discovery;
     if (this.startupInitializePromise === null) {
-      this.startupInitializePromise = this.initializeOnce(discovery);
+      const attempt = this.initializeOnce(discovery);
+      this.startupInitializePromise = attempt;
+      // #938: a failed attempt (e.g. cmux rate_limited during discovery) must
+      // not be cached, or the lifecycle retry loop replays the same rejection.
+      attempt.catch(() => {
+        if (this.startupInitializePromise === attempt) {
+          this.startupInitializePromise = null;
+        }
+      });
     }
     return this.startupInitializePromise;
   }
@@ -3877,6 +4026,11 @@ export class AgentEngine {
       set lastChannelMarkerReapAt(value) { engine.lastChannelMarkerReapAt = value; },
       get lastChannelMarkerReapFailureAt() { return engine.lastChannelMarkerReapFailureAt; },
       set lastChannelMarkerReapFailureAt(value) { engine.lastChannelMarkerReapFailureAt = value; },
+      get lastInboxTailReapAt() { return engine.lastInboxTailReapAt; },
+      set lastInboxTailReapAt(value) { engine.lastInboxTailReapAt = value; },
+      get inboxTailReaper() { return engine.inboxTailReaper; },
+      get inboxTailReapInFlight() { return engine.inboxTailReapInFlight; },
+      set inboxTailReapInFlight(value) { engine.inboxTailReapInFlight = value; },
       get lastSweepSignature() { return engine.lastSweepSignature; },
       set lastSweepSignature(value) { engine.lastSweepSignature = value; },
       get lifecycleLockHolder() { return engine.lifecycleLockHolder; },
@@ -3926,6 +4080,7 @@ export class AgentEngine {
       purgeStartupTerminalAgents: (...args) => engine.purgeStartupTerminalAgents(...args),
       purgeTerminalForSweep: (...args) => engine.purgeTerminalForSweep(...args),
       reapChannelMarkersBestEffort: (...args) => engine.reapChannelMarkersBestEffort(...args),
+      reapInboxTailsBestEffort: (...args) => engine.reapInboxTailsBestEffort(...args),
       reconcileAgents: (...args) => engine.reconcileAgents(...args),
       reconcileRolePlacements: (...args) => engine.reconcileRolePlacements(...args),
       recordSweepStability: (...args) => engine.recordSweepStability(...args),
@@ -4245,6 +4400,24 @@ export class AgentEngine {
   private reapChannelMarkersBestEffort(...args: Parameters<typeof sweepImpl.reapChannelMarkersBestEffort>): ReturnType<typeof sweepImpl.reapChannelMarkersBestEffort> {
     return sweepImpl.reapChannelMarkersBestEffort.call(this.sweepHost(), ...args);
   }
+  private reapInboxTailsBestEffort(...args: Parameters<typeof sweepImpl.reapInboxTailsBestEffort>): ReturnType<typeof sweepImpl.reapInboxTailsBestEffort> {
+    return sweepImpl.reapInboxTailsBestEffort.call(this.sweepHost(), ...args);
+  }
+  /** #911: whether a mailbox tailer's owner is live, proven gone, or unknowable. */
+  inboxTailOwnerState(
+    agentId: string,
+    processes: ReadonlyMap<number, ProcessRow>,
+    probe?: (pid: number) => Promise<ProcessRow | null>,
+  ): Promise<TailOwnerState> {
+    return sweepImpl.inboxTailOwnerState.call(this.sweepHost(), agentId, processes, probe);
+  }
+  /** #911: owner judgement for a reap, rechecked right before each signal. */
+  inboxTailOwnerJudge(
+    processes: ReadonlyMap<number, ProcessRow>,
+    probe?: (pid: number) => Promise<ProcessRow | null>,
+  ): ReturnType<typeof sweepImpl.inboxTailOwnerJudge> {
+    return sweepImpl.inboxTailOwnerJudge.call(this.sweepHost(), processes, probe);
+  }
   private runCloseForensicsBestEffort(...args: Parameters<typeof sweepImpl.runCloseForensicsBestEffort>): ReturnType<typeof sweepImpl.runCloseForensicsBestEffort> {
     return sweepImpl.runCloseForensicsBestEffort.call(this.sweepHost(), ...args);
   }
@@ -4488,11 +4661,54 @@ export class AgentEngine {
   spawnAgent(...args: Parameters<typeof lifecycleImpl.spawnAgent>): ReturnType<typeof lifecycleImpl.spawnAgent> {
     return lifecycleImpl.spawnAgent.call(this.lifecycleHost(), ...args);
   }
-  resumeAgent(...args: Parameters<typeof lifecycleImpl.resumeAgent>): ReturnType<typeof lifecycleImpl.resumeAgent> {
-    return lifecycleImpl.resumeAgent.call(this.lifecycleHost(), ...args);
+  async resumeAgent(...args: Parameters<typeof lifecycleImpl.resumeAgent>): ReturnType<typeof lifecycleImpl.resumeAgent> {
+    const agentId = this.resolveResumeAgent(args[0])?.agent_id ?? args[0];
+    if (this.resumeInProgress.has(agentId)) {
+      throw new Error(`Agent "${agentId}" resume_in_progress`);
+    }
+    this.resumeInProgress.add(agentId);
+    try {
+      return await lifecycleImpl.resumeAgent.call(this.lifecycleHost(), ...args);
+    } finally {
+      this.resumeInProgress.delete(agentId);
+    }
   }
   resolveResumeAgent(...args: Parameters<typeof lifecycleImpl.resolveResumeAgent>): ReturnType<typeof lifecycleImpl.resolveResumeAgent> {
     return lifecycleImpl.resolveResumeAgent.call(this.lifecycleHost(), ...args);
+  }
+  private assertSessionNotRunningElsewhere(...args: Parameters<typeof lifecycleImpl.assertSessionNotRunningElsewhere>): ReturnType<typeof lifecycleImpl.assertSessionNotRunningElsewhere> {
+    return lifecycleImpl.assertSessionNotRunningElsewhere.call(this.lifecycleHost(), ...args);
+  }
+
+  /**
+   * #926: live panes that may run `cli` but that no agent record claims by
+   * UUID (unreadable panes included), or `null` when the topology cannot
+   * support attribution. After a crash these are the restored panes.
+   */
+  private async unattributedAgentPanes(cli: string): Promise<string[] | null> {
+    const snapshot = await this.registry.attributionSnapshot();
+    if (!snapshot) return null;
+    const discovery =
+      this.resumeDiscovery ??
+      new AgentDiscovery({
+        listSurfaces: async () =>
+          (await this.registry.attributionSnapshot())?.surfaces ?? [],
+        readScreen: (surface, opts) => this.client.readScreen(surface, opts),
+      });
+    let rows: DiscoveredAgent[];
+    try {
+      rows = await discovery.scan(true, snapshot.surfaces);
+    } catch {
+      return null;
+    }
+    return rows
+      .filter((row) => {
+        const uuid = row.surface_uuid?.trim().toLowerCase();
+        if (uuid && snapshot.attributedUuids.has(uuid)) return false;
+        if (row.read_error) return true;
+        return row.cli === cli || (row.agent_screen === true && row.cli === "unknown");
+      })
+      .map((row) => row.surface_id);
   }
   cascadeKill(...args: Parameters<typeof lifecycleImpl.cascadeKill>): ReturnType<typeof lifecycleImpl.cascadeKill> {
     return lifecycleImpl.cascadeKill.call(this.lifecycleHost(), ...args);
@@ -4520,6 +4736,8 @@ export class AgentEngine {
       get registry() { return engine.registry; },
       get seatRegistry() { return engine.seatRegistry; },
       get selfRegistrationSessionLookup() { return engine.selfRegistrationSessionLookup; },
+      get sessionProcessScanner() { return engine.sessionProcessScanner; },
+      unattributedAgentPanes: (...args) => engine.unattributedAgentPanes(...args),
       get selfRegistrationSessionResolver() { return engine.selfRegistrationSessionResolver; },
       get spawnGuard() { return engine.spawnGuard; },
       get spawnPreflight() { return engine.spawnPreflight; },
@@ -4550,6 +4768,7 @@ export class AgentEngine {
       resolveAgentRoute: (...args) => engine.resolveAgentRoute(...args),
       resolveAgentStopIoRoute: (...args) => engine.resolveAgentStopIoRoute(...args),
       resolveResumeAgent: (...args) => engine.resolveResumeAgent(...args),
+      assertSessionNotRunningElsewhere: (...args) => engine.assertSessionNotRunningElsewhere(...args),
       resolveStopSurfaceClosePolicy: (...args) => engine.resolveStopSurfaceClosePolicy(...args),
       resolveUnchangedAgentStopIoRoute: (...args) => engine.resolveUnchangedAgentStopIoRoute(...args),
       sameSurfaceRoute: (...args) => engine.sameSurfaceRoute(...args),

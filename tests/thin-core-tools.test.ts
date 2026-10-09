@@ -175,6 +175,19 @@ describe("thin-core tool palette", () => {
     }
   });
 
+  it("advertises compact spawn receipts and the verbose contract escape hatch", () => {
+    const server = createServer({ exec: makeExec(), disableSpawnPreflight: true,
+      controlHealthIntervalMs: 0 }) as any;
+    const tool = server._registeredTools.spawn_agent;
+    expect(tool.inputSchema.parse({}).verbose).toBe(false);
+    expect(tool.inputSchema.parse({ verbose: true }).verbose).toBe(true);
+    expect(tool.description).toContain("at most six fields");
+    for (const field of ["contract_path", "report_path", "done_marker"]) {
+      expect(tool.description).toContain(field);
+    }
+    expect(tool.description).toContain("verbose:true");
+  });
+
   it("accepts the string worktree shorthand in the spawn_agent schema", () => {
     const server = createServer({
       exec: makeExec(),
@@ -185,7 +198,7 @@ describe("thin-core tool palette", () => {
     expect(
       server._registeredTools.spawn_agent.inputSchema.safeParse({
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: "tool-usage",
       }).success,
@@ -308,7 +321,7 @@ describe("send_to consolidated modes", () => {
     );
   });
 
-  it("returns terminal typed truth when raw surface Return was unverified", async () => {
+  it("returns an honest pending error when raw surface Return was unverified", async () => {
     const exec = makeExec();
     const server = createServer({
       exec,
@@ -317,7 +330,8 @@ describe("send_to consolidated modes", () => {
       controlHealthIntervalMs: 0,
     }) as any;
 
-    const result = await server._registeredTools.send_to.handler(
+    vi.useFakeTimers();
+    const resultPromise = server._registeredTools.send_to.handler(
       {
         mode: "surface",
         target: "surface:1",
@@ -326,21 +340,25 @@ describe("send_to consolidated modes", () => {
       },
       {},
     );
+    await vi.advanceTimersByTimeAsync(6_000);
+    vi.useRealTimers();
+    const result = await resultPromise;
     const parsed = parseResult(result);
 
-    expect(result.isError).toBeUndefined();
-    expect(parsed.ok).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
+    expect(parsed.ok).toBe(false);
     expect(parsed.submit_attempted).toBe(true);
     expect(parsed.submit_verified).toBeNull();
-    expect(parsed.delivery).toBe("typed");
-    expect(parsed.delivery_state).toBe("typed");
-    expect(parsed.terminal).toBe(true);
+    expect(parsed.delivery).toBe("pending_verify");
+    expect(parsed.delivery_state).toBe("pending_verify");
+    expect(parsed.terminal).toBe(false);
     expect(parsed.delivered).toBe(false);
     expect(parsed.typed).toBe(true);
     expect(JSON.parse(result.content[0].text)).toEqual(
       result.structuredContent,
     );
-    expect(parsed.WARNING).toMatch(/not verified/i);
+    expect(parsed.WARNING).toMatch(/not delivered/i);
   });
 
   it("routes command mode through atomic raw-surface command delivery", async () => {
@@ -503,6 +521,10 @@ describe("legacy-name drift", () => {
       expect(body, `${relativePath} contains a retired tool name`).not.toMatch(
         legacyName,
       );
+      if (relativePath.endsWith("agent-routing-and-handling.md")) {
+        expect(body).toContain("at most six fields");
+        expect(body).toContain("verbose:true");
+      }
     }
   });
 });

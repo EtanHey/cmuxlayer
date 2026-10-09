@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -39,7 +39,7 @@ describe("spawnDaemonProcess", () => {
         cwd: process.cwd(),
         env: {
           ...process.env,
-          TEST_SOCKET_PATH: join(root, "daemon.sock"),
+          TEST_SOCKET_PATH: join(root, "private", "daemon.sock"),
           DAEMON_SCRIPT_PATH: daemonScriptPath,
           PROOF_PATH: proofPath,
         },
@@ -47,6 +47,7 @@ describe("spawnDaemonProcess", () => {
         timeout: 10_000,
       });
       expect(parent.status, parent.stderr).toBe(0);
+      expect(statSync(join(root, "private")).mode & 0o777).toBe(0o700);
       const softText = readFileSync(proofPath, "utf8").trim();
       expect(softText === "unlimited" || Number(softText) >= Math.min(65_536, hard))
         .toBe(true);

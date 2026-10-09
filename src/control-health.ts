@@ -1,3 +1,4 @@
+import { daemonLogPath } from "./daemon-log.js";
 import { execFile } from "node:child_process";
 import { getTransportHealth } from "./cmux-transport-self-heal.js";
 import {
@@ -34,6 +35,7 @@ export interface ControlHealthExecResult {
 export type ControlHealthExecFile = (
   file: string,
   args: string[],
+  options?: { timeout: number },
 ) => Promise<ControlHealthExecResult>;
 
 export interface ControlHealthOptions {
@@ -60,6 +62,15 @@ export interface ControlHealthOptions {
   daemonLifecycle?: DaemonLifecycleSnapshot;
   lifecycleLock?: LifecycleLockState | null;
   lifecycleStart?: LifecycleStartHealth | null;
+  /** #911: mailbox tailers by owner, from the engine's own classification. */
+  inboxTailers?: () => Promise<InboxTailerCounts | null>;
+}
+
+export interface InboxTailerCounts {
+  /** Owner live, or not provably gone (never reaped). */
+  live: number;
+  /** Owner proven gone: the next reaper pass stops these. */
+  orphaned: number;
 }
 
 export interface ControlHealthSelfHeal {
@@ -103,8 +114,20 @@ export interface CmuxInstanceHealth {
   marker_files: MarkerStatus[];
   socket_path: string | null;
   socket_status: PathStatus | null;
-  processes: Array<{ pid: number | null; command: string }>;
+  processes: Array<{ pid: number | null; command: string; fd_pressure?: CmuxFdPressure }>;
 }
+
+export type CmuxFdPressure =
+  | {
+      pid: number;
+      open_fds: number;
+      udp_fds: number;
+      by_type: Record<"REG" | "PIPE" | "KQUEUE" | "UDP" | "ptmx" | "unix" | "other", number>;
+      warn: boolean;
+      warn_threshold: number;
+      sampled_at: string;
+    }
+  | { pid: number | null; error: string };
 
 /**
  * #529 observability. A dead daemon and a wedged lifecycle lock used to look
@@ -116,6 +139,12 @@ export interface LifecycleStartHealth {
   waiting_for_ms: number | null;
   timeout_ms: number;
   error: string | null;
+  /** #938: initializing | ready | retrying (idle before lifecycle starts). */
+  state?: "idle" | "initializing" | "ready" | "retrying";
+  /** #938: lifecycle initialization attempts so far. */
+  attempt?: number;
+  /** #938: the last failed attempt's error; null once ready. */
+  last_error?: string | null;
   /**
    * #530 review P2-4: how many callers gave up on the bound this PR added.
    * Without it the new timeout was itself silent — the exact defect class.
@@ -127,6 +156,8 @@ export interface LifecycleStartHealth {
 export interface ControlHealthDaemonLifecycle extends DaemonLifecycleSnapshot {
   lifecycle_lock: LifecycleLockState | null;
   lifecycle_start: LifecycleStartHealth | null;
+  /** #938: the persistent daemon log (null outside the daemon process). */
+  log_path: string | null;
 }
 
 export interface ControlHealth {
@@ -166,6 +197,9 @@ export interface ControlHealth {
   };
   self_heal: ControlHealthSelfHeal;
   daemon_lifecycle: ControlHealthDaemonLifecycle;
+  /** #911: inbox tailers, kept out of the cmux production/nightly pid sets. */
+  tailers?: InboxTailerCounts | null;
+  placement_mismatch?: Array<{ agent_id: string; surface_id: string }>;
   warnings: string[];
 }
 
@@ -224,12 +258,13 @@ const ENV_KEYS = [
 function defaultExecFile(
   file: string,
   args: string[],
+  options?: { timeout: number },
 ): Promise<ControlHealthExecResult> {
   return new Promise((resolve, reject) => {
     execFile(
       file,
       args,
-      { timeout: 1500, maxBuffer: 1024 * 1024 },
+      { timeout: options?.timeout ?? 1500, maxBuffer: 4 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           const err = error as Error & { stdout?: string; stderr?: string };
@@ -246,6 +281,95 @@ function defaultExecFile(
       },
     );
   });
+}
+
+const cmuxFdCache = new WeakMap<ControlHealthExecFile, Map<number, {
+  at: number;
+  result: Promise<CmuxFdPressure>;
+}>>();
+
+function fdRows(stdout: string): Map<number, { type: string; name: string }> {
+  const rows = new Map<number, { type: string; name: string }>();
+  let fd: number | null = null;
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^f(\d+)[a-z]*$/.exec(line);
+    if (line.startsWith("f")) {
+      fd = match ? Number(match[1]) : null;
+      if (fd !== null) rows.set(fd, { type: "", name: "" });
+    } else if (fd !== null && line.startsWith("t")) {
+      rows.get(fd)!.type = line.slice(1);
+    } else if (fd !== null && line.startsWith("n")) {
+      rows.get(fd)!.name = line.slice(1);
+    }
+  }
+  return rows;
+}
+
+function fdThreshold(env: NodeJS.ProcessEnv): number {
+  const value = env.CMUXLAYER_CMUX_FD_WARN;
+  if (!value || !/^[1-9]\d*$/.test(value)) return 4096;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : 4096;
+}
+
+async function sampleCmuxFds(
+  pid: number,
+  execFileFn: ControlHealthExecFile,
+  threshold: number,
+  sampledAt: string,
+): Promise<CmuxFdPressure> {
+  try {
+    const args = ["-nP", "-a", "-p", String(pid)];
+    const all = await execFileFn("lsof", [...args, "-F", "ftn"], { timeout: 5000 });
+    const rows = fdRows(all.stdout);
+    if (rows.size === 0) throw new Error("lsof returned no numeric descriptors");
+    let udpOutput: string;
+    try {
+      udpOutput = (await execFileFn("lsof", [...args, "-i", "UDP", "-F", "f"], { timeout: 5000 })).stdout;
+    } catch (error) {
+      // lsof exits 1 when no UDP descriptors match this otherwise live PID.
+      const failure = error as Error & { code?: number; stdout?: string };
+      if (failure.code !== 1 || failure.stdout) throw error;
+      udpOutput = "";
+    }
+    const udpFds = new Set(fdRows(udpOutput).keys());
+    const byType = { REG: 0, PIPE: 0, KQUEUE: 0, UDP: 0, ptmx: 0, unix: 0, other: 0 };
+    for (const [fd, row] of rows) {
+      if (udpFds.has(fd)) byType.UDP++;
+      else if (row.name === "/dev/ptmx") byType.ptmx++;
+      else if (row.type === "REG") byType.REG++;
+      else if (row.type === "PIPE") byType.PIPE++;
+      else if (row.type === "KQUEUE") byType.KQUEUE++;
+      else if (row.type.toLowerCase() === "unix") byType.unix++;
+      else byType.other++;
+    }
+    return {
+      pid, open_fds: rows.size, udp_fds: byType.UDP, by_type: byType,
+      warn: rows.size >= threshold, warn_threshold: threshold, sampled_at: sampledAt,
+    };
+  } catch (error) {
+    return { pid, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function cachedCmuxFds(
+  pid: number,
+  execFileFn: ControlHealthExecFile,
+  threshold: number,
+  now: Date,
+): Promise<CmuxFdPressure> {
+  let entries = cmuxFdCache.get(execFileFn);
+  if (!entries) {
+    entries = new Map();
+    cmuxFdCache.set(execFileFn, entries);
+  }
+  const current = entries.get(pid);
+  if (current && now.getTime() - current.at < 60_000 && now.getTime() >= current.at) {
+    return current.result;
+  }
+  const result = sampleCmuxFds(pid, execFileFn, threshold, now.toISOString());
+  entries.set(pid, { at: now.getTime(), result });
+  return result;
 }
 
 function cleanText(value: string): string {
@@ -451,6 +575,16 @@ const LIFECYCLE_LOCK_TIMEOUT_WARNING_AGE_MS = 5 * 60_000;
 
 function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   const warnings: string[] = [];
+  for (const instance of [health.cmux_instances.production, health.cmux_instances.nightly]) {
+    for (const process of instance.processes) {
+      const pressure = process.fd_pressure;
+      if (pressure && "warn" in pressure && pressure.warn) {
+        warnings.push(
+          `cmux_fd_pressure: cmux.app pid ${pressure.pid} holds ${pressure.open_fds} fds (udp ${pressure.udp_fds}) ≥ ${pressure.warn_threshold}; plan a cmux restart (upstream UDP leak per surface lifecycle)`,
+        );
+      }
+    }
+  }
   const { soft, open_fds } = health.current_process.nofile;
   if (
     typeof soft === "number" &&
@@ -500,7 +634,9 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   }
   if (lifecycle?.lifecycle_start?.error) {
     warnings.push(
-      `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
+      lifecycle.lifecycle_start.state === "retrying"
+        ? `lifecycle initializing: ${lifecycle.lifecycle_start.error}, retrying (attempt ${lifecycle.lifecycle_start.attempt ?? "?"}); lifecycle-gated tools are degraded.`
+        : `lifecycle initialization failed: ${lifecycle.lifecycle_start.error}`,
     );
   }
   // #530 final pass F5: gating on `timeouts > 0` alone latched the warning
@@ -584,6 +720,17 @@ function buildWarnings(health: Omit<ControlHealth, "warnings">): string[] {
   }
 
   return warnings;
+}
+
+export function summarizeCmuxFds(health: ControlHealth): string | undefined {
+  const samples = [
+    ...health.cmux_instances.production.processes,
+    ...health.cmux_instances.nightly.processes,
+  ].flatMap((proc) => proc.fd_pressure && "open_fds" in proc.fd_pressure
+    ? [proc.fd_pressure]
+    : []);
+  if (samples.length === 0) return undefined;
+  return samples.map((sample) => `${samples.length > 1 ? `pid ${sample.pid}: ` : ""}${sample.open_fds} (udp ${sample.udp_fds})`).join(", ");
 }
 
 interface ProcessAncestryRow {
@@ -727,9 +874,21 @@ export async function collectControlHealth(
 
   const prodSocket = selectSocketPath(prodMarkers, prodDefaultSocket);
   const nightlySocket = selectSocketPath(nightlyMarkers, nightlyDefaultSocket);
-  const allProcesses = parsePgrepOutput(processList.stdout).filter((proc) =>
-    /\/Applications\/cmux|cmux NIGHTLY|cmux\.app/.test(proc.command),
+  // #911: a legacy tailer's retitled ps line runs on into its environment,
+  // which names /Applications/cmux.app; it is ours, not a cmux process.
+  const allProcesses = parsePgrepOutput(processList.stdout).filter(
+    (proc) =>
+      !/^cmuxlayer-inbox-tail[:\s]/.test(proc.command) &&
+      /\/Applications\/cmux|cmux NIGHTLY|cmux\.app/.test(proc.command),
   );
+  const sampledAt = (opts.now ?? (() => new Date()))();
+  const threshold = fdThreshold(env);
+  const withFdPressure = await Promise.all(allProcesses.map(async (proc) => ({
+    ...proc,
+    fd_pressure: proc.pid === null
+      ? { pid: null, error: "process PID unavailable" } as CmuxFdPressure
+      : await cachedCmuxFds(proc.pid, deps.execFile, threshold, sampledAt),
+  })));
   const envSnapshot = Object.fromEntries(
     ENV_KEYS.map((key) => [key, redactEnvValue(key, env[key])]),
   ) as Record<string, string | null>;
@@ -739,7 +898,7 @@ export async function collectControlHealth(
   );
 
   const base: Omit<ControlHealth, "warnings"> = {
-    generated_at: (opts.now ?? (() => new Date()))().toISOString(),
+    generated_at: sampledAt.toISOString(),
     current_process: {
       pid: opts.pid ?? process.pid,
       ppid: opts.ppid ?? process.ppid,
@@ -764,7 +923,7 @@ export async function collectControlHealth(
         marker_files: prodMarkers,
         socket_path: prodSocket,
         socket_status: await inspectPath(prodSocket, deps.stat),
-        processes: allProcesses.filter(
+        processes: withFdPressure.filter(
           (proc) =>
             proc.command.includes("/Applications/cmux.app") &&
             !proc.command.includes("cmux NIGHTLY.app"),
@@ -777,7 +936,7 @@ export async function collectControlHealth(
         marker_files: nightlyMarkers,
         socket_path: nightlySocket,
         socket_status: await inspectPath(nightlySocket, deps.stat),
-        processes: allProcesses.filter((proc) =>
+        processes: withFdPressure.filter((proc) =>
           proc.command.includes("cmux NIGHTLY.app"),
         ),
       },
@@ -787,10 +946,14 @@ export async function collectControlHealth(
       surfaceIds: opts.surfaceIds,
       panePtyDeadSince: opts.panePtyDeadSince,
     }),
+    tailers: await (opts.inboxTailers?.() ?? Promise.resolve(null)).catch(
+      () => null,
+    ),
     daemon_lifecycle: {
       ...(opts.daemonLifecycle ?? daemonLifecycleSnapshot()),
       lifecycle_lock: opts.lifecycleLock ?? null,
       lifecycle_start: opts.lifecycleStart ?? null,
+      log_path: daemonLogPath(),
     },
   };
 
@@ -868,10 +1031,13 @@ function formatDaemonLifecycle(
       );
     }
   }
+  if (lifecycle.log_path) {
+    lines.push(`daemon log: ${lifecycle.log_path}`);
+  }
   const start = lifecycle.lifecycle_start;
   if (start) {
     lines.push(
-      `lifecycle start: started=${start.started} settled=${start.settled} timeouts=${start.timeouts}${
+      `lifecycle start: ${start.state ? `state=${start.state} attempt=${start.attempt ?? 0} ` : ""}started=${start.started} settled=${start.settled} timeouts=${start.timeouts}${
         start.waiting_for_ms === null
           ? ""
           : ` waiting_for_ms=${start.waiting_for_ms}`
@@ -908,6 +1074,7 @@ export function formatControlHealth(health: ControlHealth): string {
     `open files: ${health.current_process.nofile.open_fds ?? "unknown"} / ` +
       `soft ${health.current_process.nofile.soft ?? "unknown"} ` +
       `(hard ${health.current_process.nofile.hard ?? "unknown"})`,
+    ...(summarizeCmuxFds(health) ? [`cmux_fds: ${summarizeCmuxFds(health)}`] : []),
     "cmux resolution:",
     ...health.current_process.cmux_resolution
       .slice(0, 5)
@@ -923,7 +1090,13 @@ export function formatControlHealth(health: ControlHealth): string {
       }),
     ...formatInstance(health.cmux_instances.production),
     ...formatInstance(health.cmux_instances.nightly),
+    ...(health.tailers
+      ? [`inbox tailers: live=${health.tailers.live} orphaned=${health.tailers.orphaned}`]
+      : []),
     `pane_pty_dead: ${health.self_heal.pane_pty_dead.count}`,
+    ...(health.placement_mismatch?.length
+      ? [`placement_mismatch: ${health.placement_mismatch.map((row) => row.agent_id).join(", ")}`]
+      : []),
     ...health.self_heal.pane_pty_dead.surfaces.map(
       (surface) =>
         `  ${surface.surface_id} since ${surface.since_at ?? surface.last_attempt_at}`,

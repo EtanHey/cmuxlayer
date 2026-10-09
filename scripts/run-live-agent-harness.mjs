@@ -558,12 +558,14 @@ async function main() {
         {
           repo: config.repo,
           cli: config.cli,
+          ...(config.cli === "codex" ? { effort: "medium" } : {}),
           role: "worker",
           workspace: config.workspace,
           force_new: true,
           boot_prompt_path: spec.goal,
           mcp_profile: config.mcpProfile,
           report_path: spec.coordinationReport,
+          verbose: true,
         },
         config.waitTimeoutMs,
       );

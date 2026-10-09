@@ -15,6 +15,7 @@ import { CLI_READY_PATTERNS } from "../src/pattern-registry.js";
 import { bootContractPointer, coordinationContractPath } from "../src/coordination-paths.js";
 import { withTestSurfaceObserver } from "./helpers/test-surface-observer.js";
 import { engineForTests } from "../src/server.js";
+import { getTool } from "./helpers/mcp-tool-harness.js";
 import { internalToolForTests } from "../src/mcp/registration.js";
 
 let testDir = "";
@@ -34,6 +35,10 @@ async function loadServerModule() {
         opts.context ? opts : withTestSurfaceObserver(opts),
       ),
   };
+}
+
+function withTranscriptEcho(screen: string, text: string): string {
+  const lines = screen.split("\n"); lines.splice(1, 0, text); return lines.join("\n");
 }
 
 function parseToolResult(result: any) {
@@ -68,6 +73,7 @@ function isLauncherSend(args: string[]): boolean {
 async function spawnReadyAgent(
   server: any,
   cli: "claude" | "codex" = "claude",
+  options: { verbose?: boolean } = {},
 ) {
   const spawn = server._registeredTools["spawn_agent"];
   const spawnResult = await spawn.handler(
@@ -75,8 +81,10 @@ async function spawnReadyAgent(
       repo: "brainlayer",
       model: "sonnet",
       cli,
+      ...(cli === "codex" ? { effort: "medium" } : {}),
       workspace: "workspace:1",
       boot_prompt_timeout_ms: 100,
+      ...options,
     },
     {} as any,
   );
@@ -194,6 +202,44 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     vi.resetModules();
   });
 
+  it.each(["surface", "key"].flatMap(mode => ["footer-only", "chrome-input", "unknown-layout", "placeholder", "picker", "human"].map(shape => ({ mode, shape }))))("P0 labels refusals truthfully before mutation (%j)", async ({ mode, shape }) => {
+      const { createServer, createServerContext } = await loadServerModule();
+      let screen = "OpenAI Codex\n› Ask Codex to do anything";
+      const exec = makeLifecycleExec(() => screen);
+      const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      try {
+        const server = createServer({ context });
+        await spawnReadyAgent(server, "codex");
+        const footer = "  Daybreak Blue high · ~/Gits/cmuxlayer\n  ? for shortcuts\n  ⚠ 1 warning · f2 to view";
+        screen = shape === "footer-only" ? footer : shape === "chrome-input" ? "OpenAI Codex\n› Daybreak Blue high · ~/Gits/cmuxlayer" : shape === "unknown-layout" ? "OpenAI Codex loading unknown layout" : shape === "picker" ? "OpenAI Codex\nUpdate available!\n› 1. Update now\n  2. Skip until next version\nPress enter to continue" : `OpenAI Codex\n› ${shape === "human" ? "private human draft" : "Ask Codex to do anything"}\n${footer}`;
+        exec.mockClear();
+        const result = parseToolResult(await getTool(server, "send_to").handler({ mode, surface: "surface:new", text: mode === "key" ? "RETURN" : "new request", press_enter: false }, {}));
+        if (["footer-only", "unknown-layout"].includes(shape)) {
+          expect(result.error_code, JSON.stringify(result)).toBe("composer_unrecognized");
+          expect(result.error).toContain("nothing was typed or submitted");
+        } else if (["human", "chrome-input"].includes(shape)) expect(result.error_code).toBe("blocked_by_foreign_draft");
+        else expect(result.error_code).not.toBe("blocked_by_foreign_draft");
+        if (shape !== "placeholder" && !(shape === "picker" && mode === "key")) {
+          expect(mutatedPane(exec)).toBe(false);
+          expect(result.typed).toBe(false);
+          expect(result.submit_attempted).toBe(false);
+        }
+      } finally { context.dispose(); }
+    });
+
+  it.each(["Enter", "Return", "RETURN"])("P0 submit receipt follows the dispatched lowercase key %s", async key => {
+    const { createServer, createServerContext } = await loadServerModule();
+    const exec = makeLifecycleExec(() => "$ ");
+    const context = createServerContext({ exec, stateDir: testDir, sessionIdentityResolver: () => null });
+    try {
+      const server = createServer({ context });
+      const result = parseToolResult(await getTool(server, "send_to").handler({ mode: "key", surface: "surface:new", text: key, verify_submit: false }, {}));
+      expect(result.submit_attempted).toBe(true);
+      const keys = exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send-key")).map(([, args]: [string, string[]]) => args.at(-1));
+      expect(keys).toEqual([key.toLowerCase()]);
+    } finally { context.dispose(); }
+  });
+
   it("lets key Return confirm a Claude permission menu after key Down", async () => {
     const { createServer, createServerContext, __submitEvidenceTestHooks } = await loadServerModule();
     let screen = "Claude Code\n❯ ";
@@ -228,7 +274,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     }
   });
 
-  it("lets key Return act on an owned Codex queue below scrollback with a wrapped heading", async () => {
+  it("refuses key Return on a Codex queue without caller ownership despite an engine receipt", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screen = "OpenAI Codex\n› Ask Codex to do anything";
     const exec = makeLifecycleExec(() => screen);
@@ -264,14 +310,15 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       ));
 
       expect(result.error_code).not.toBe("nothing_owned_to_submit");
-      expect(mutatedPane(exec), JSON.stringify(result)).toBe(true);
+      expect(result.error_code).toBe("blocked_by_foreign_queue");
+      expect(mutatedPane(exec), JSON.stringify(result)).toBe(false);
       screen = screen.replace("› Ask Codex to do anything", "› human draft");
       exec.mockClear();
       const foreign = parseToolResult(await server._registeredTools.send_to.handler(
         { mode: "key", surface: "surface:new", text: "return", press_enter: false },
         {},
       ));
-      expect(foreign.error_code).toBe("blocked_by_foreign_draft");
+      expect(foreign.error_code).toBe("blocked_by_foreign_queue");
       expect(mutatedPane(exec)).toBe(false);
     } finally {
       context.dispose();
@@ -330,7 +377,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       );
 
       expect(result.error_code).toMatch(
-        /draft_ownership_unverified|nothing_owned_to_submit/,
+        /blocked_by_foreign_queue/,
       );
       expect(mutatedPane(exec)).toBe(false);
     } finally {
@@ -426,7 +473,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       if (args.includes("read-screen") && gateRead) await readBarrier;
       if (args.includes("read-screen") && readUnavailable) throw new Error("read unavailable");
       if (args.includes("send")) screen = render(String(args.at(-1)));
-      if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = render("");
+      if (args.includes("send-key") && args.includes("return") && !["spent", "auto-spent"].includes(kind)) screen = withTranscriptEcho(render(""), "my undelivered message");
       return base(cmd, args);
     });
     const context = createServerContext({ exec, stateDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
@@ -506,7 +553,9 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
       if (kind.startsWith("leading-blank")) screen = render("\nprivate human draft");
       exec.mockClear();
       const result = parseToolResult(await call({ mode: "key", surface: "surface:new", text: "return", engineSubmitProof: "launcher_pending_command" }, (kind === "shared-owner" || kind === "shared-other") ? peer : server));
-      if (kind === "owned" || kind === "unchanged-space" || kind === "prefix-read" || kind === "shared-owner" || (kind === "auto-spent" && cli === "claude") || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
+      if (kind === "spent-ambiguous") {
+        expect(result.ok).toBe(false); expect(result.error_code).not.toBe("blocked_by_foreign_draft"); expect(returnAttempts).toBe(2);
+      } else if (["owned", "unchanged-space", "prefix-read", "shared-owner", "spent", "spent-ambiguous", "auto-spent", "observed-clear", "shared-observed-clear", "shared-inflight"].includes(kind) || kind.endsWith("-control") || kind === "picker" || kind === "permission") {
         expect(result.ok).toBe(true);
         expect(mutatedPane(exec)).toBe(true);
         if (kind === "shared-owner") {
@@ -524,7 +573,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
         expect(retained.ok, JSON.stringify(retained)).toBe(true);
       } else {
         const unknown = ["unreadable", "blank", "unrecognized"].includes(kind);
-        expect(result.error_code).toBe(unknown ? "draft_ownership_unverified" : "blocked_by_foreign_draft");
+        expect(result.error_code).toBe(kind === "unrecognized" ? "composer_unrecognized" : unknown ? "draft_ownership_unverified" : "blocked_by_foreign_draft");
         if (!unknown) expect(result.error).toContain("try again in ~20 s or after your next turn");
         expect(mutatedPane(exec)).toBe(false);
         if (!unknown) expect(screen).toContain(edit ? edit[1] : kind === "changed" ? "human words" : ["other", "spent", "spent-ambiguous", "auto-spent", "observed-clear", "shared-observed-clear", "shared-changed", "shared-other", "shared-inflight", "session-changed"].includes(kind) ? "my undelivered message" : "private human draft");
@@ -945,7 +994,10 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
     const context = createServerContext({ exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     try {
       const server = createServer({ context, inboxBaseDir: testDir }) as any;
-      const agentId = await spawnReadyAgent(server);
+      const bootSpawn = vi.spyOn(server._registeredTools.spawn_agent, "handler");
+      const agentId = await spawnReadyAgent(server, "claude", { verbose: true });
+      expect(parseToolResult(await bootSpawn.mock.results[0].value).boot_prompt_receipt)
+        .toMatchObject({ submit_dispatched: false });
       const engine = engineForTests(server);
       const record = engine.stateMgr.updateRecord(agentId, { boot_prompt_pending: true, submit_verified: null, prompt_delivered: false });
       engine.getRegistry().set(agentId, record);
@@ -1161,7 +1213,7 @@ describe("T2 delivery truth — composer draft safety (#442)", () => {
   it("send_to still delivers when the composer is empty", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n❯ ";
-    const mockExec = makeLifecycleExec(() => screenText);
+    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? withTranscriptEcho(screenText, "fleet message") : screenText);
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,
@@ -1318,7 +1370,7 @@ describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () =>
   it("send_to delivers to a busy Claude pane whose composer is empty", async () => {
     const { createServer, createServerContext } = await loadServerModule();
     let screenText = "Claude Code\n\u276f ";
-    const mockExec = makeLifecycleExec(() => screenText);
+    const mockExec = makeLifecycleExec(() => mockExec.mock.calls.some(([, args]: [string, string[]]) => args.includes("send-key") && args.includes("return")) ? withTranscriptEcho(screenText, "fleet message") : screenText);
     const context = createServerContext({
       exec: mockExec,
       stateDir: testDir,
@@ -1331,8 +1383,8 @@ describe("T2 delivery truth — draft guard must not fire on chrome (B1)", () =>
     screenText = [
       "Claude Code",
       "\u23fa Done.",
-      "> ",
       "Working (2s \u2022 esc to interrupt)",
+      "> ",
     ].join("\n");
     mockExec.mockClear();
 
@@ -1396,9 +1448,31 @@ describe("T2 delivery truth — a blocked composer is a terminal refusal (B1a)",
 });
 
 describe("T2 delivery truth — unmissable non-delivery (#445)", () => {
+  it("P0 STEER real 0.160 captures distinguish pending sections and a committed boundary", async () => {
+    const { codexPendingDeliveryKind, codexScreenShowsSubmit } = await import("../src/delivery/composer-screen.js");
+    const capture = (name: string) => readFileSync(new URL(`./fixtures/codex-0.160-steer/${name}.txt`, import.meta.url), "utf8");
+    const steer = "At the next tool boundary, print SCRATCH_STEER_LANDED_B and continue waiting for the sleep command. Do not interrupt it or edit files.";
+    const queued = "When the turn ends, print SCRATCH_AFTER_TURN_QUEUE_B and stop. Do not edit files or use tools.";
+    const before = capture("busy");
+    const pending = capture("pending-both");
+    expect(codexPendingDeliveryKind(pending, steer, before)).toBe("steer_pending");
+    expect(codexPendingDeliveryKind(pending, queued, before)).toBe("queued");
+    expect(codexScreenShowsSubmit(before, pending, steer)).toBe(false);
+    const boundary = capture("steer-committed");
+    expect(codexScreenShowsSubmit(before, boundary, steer)).toBe(true);
+    expect(codexPendingDeliveryKind(boundary, queued, before)).toBe("queued");
+    expect(codexScreenShowsSubmit(before, capture("submitted-idle"), queued)).toBe(true);
+  });
+
+  it("P0 STEER wrapped headings retain next-tool semantics", async () => {
+    const { codexPendingDeliveryKind } = await import("../src/delivery/composer-screen.js");
+    const screen = "OpenAI Codex\nWorking (1s • esc to interrupt)\n• Messages to be\n  submitted after next tool call (press esc to interrupt and send immediately)\n  ↳ synthetic request\n› Ask Codex to do anything\n  GPT-6-Luna low · ~/scratch";
+    expect(codexPendingDeliveryKind(screen, "synthetic request")).toBe("steer_pending");
+  });
+
   it("attaches a plain-language WARNING to every nonterminal receipt", async () => {
     const { buildPublicDeliveryReceipt } = await loadServerModule();
-    for (const state of ["pending_verify", "queued", "queued_followup"] as const) {
+    for (const state of ["pending_verify", "queued", "steer_pending", "queued_followup"] as const) {
       const receipt = buildPublicDeliveryReceipt({
         delivery_state: state,
         delivery_id: "d-1",

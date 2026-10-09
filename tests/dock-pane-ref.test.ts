@@ -240,7 +240,7 @@ describe("dock pane-ref matching", () => {
 
     await callTool(server, "spawn_agent", {
       repo: "brainlayer",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       role: "worker",
       workspace: "workspace:1",
       boot_prompt_timeout_ms: 100,

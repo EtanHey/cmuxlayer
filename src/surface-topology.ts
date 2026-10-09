@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentRecord } from "./agent-types.js";
 import type { AgentTopologyHealthInput } from "./agent-health.js";
 import type { AgentHealthInputOverrides } from "./agent-health-input.js";
-import { deriveRoleColumnIndex } from "./layout-policy.js";
+import { canonicalRoleColumn, deriveRoleColumnIndex, inferRecordRoleOrNull } from "./layout-policy.js";
 import { partitionPaneSurfacesByMembership } from "./pane-surfaces.js";
 import type {
   CmuxPane,
@@ -31,6 +31,24 @@ export interface SurfaceTopologySnapshot {
   surfaceIdByRef: Map<string, string>;
   /** Current process-local ref keyed by stable cmux surface UUID. */
   surfaceRefById: Map<string, string>;
+}
+
+/** True only when a stable UUID proves this live agent is in the wrong column. */
+export function placementMismatchForAgent(
+  agent: AgentRecord,
+  topology: SurfaceTopologySnapshot | null,
+): boolean {
+  const role = inferRecordRoleOrNull(agent);
+  if (!role || !topology?.complete || !agent.surface_uuid ||
+      !agent.workspace_id || agent.state === "done" || agent.state === "error") {
+    return false;
+  }
+  const binding = resolveAgentSurfaceBinding(agent, topology);
+  if (binding?.provenance !== "uuid" ||
+      binding.workspaceId !== agent.workspace_id) return false;
+  const column = topology.topologyBySurface.get(binding.surfaceRef)?.column;
+  return column !== null && column !== undefined &&
+    column !== canonicalRoleColumn(role);
 }
 
 export interface ResolvedAgentSurfaceBinding {

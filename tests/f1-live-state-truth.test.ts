@@ -122,20 +122,18 @@ class LiveSurfaceClient {
     this.typed[surface] = (this.typed[surface] ?? "") + text;
   }
 
-  /**
-   * #905: Return behaves like Codex 0.157. At a prompt the message becomes a
-   * transcript row; mid-turn it waits in the steer queue above the prompt.
-   */
+  /** Captured Codex behavior: busy Return steers; Tab queues after the turn. */
   async sendKey(surface: string, key: string) {
     if (!(surface in this.screens))
       throw new Error(`Unknown surface: ${surface}`);
     this.sendKeyCalls.push(`${surface}:${key}`);
     const typed = this.typed[surface];
-    if (key !== "return" || !typed) return;
+    const working = /Working/.test(this.screens[surface]);
+    if (!typed || (key !== "return" && (!working || key !== "tab"))) return;
     delete this.typed[surface];
     const lines = this.screens[surface].split("\n");
-    lines.splice(lines.length - 1, 0, /Working/.test(this.screens[surface])
-      ? `• Messages to be submitted after next tool call\n  ↳ ${typed}`
+    lines.splice(lines.length - 1, 0, working
+      ? `${key === "tab" ? "• Queued follow-up inputs" : "• Messages to be submitted after next tool call"}\n  ↳ ${typed}`
       : `› ${typed}`);
     this.screens[surface] = lines.join("\n");
   }
@@ -441,15 +439,14 @@ describe("F1 — live state, not the stale registry record", () => {
     expect(parsed.ok === false || parsed.delivery === "failed").toBe(true);
   });
 
-  it("send_to to a mid-turn agent delivers immediately with queue provenance", async () => {
+  it.each(["steer", "queue"] as const)("send_to to a mid-turn agent accepts %s with pending provenance", async mode => {
     registerAgent(
       server,
       makeAgent({
         agent_id: "cmuxlayerCodex-midturn",
         surface_id: client.workingSurface,
         // Stale-done record on an agent that is demonstrably mid-turn. send_to
-        // must deliver without an idle gate and identify that it landed behind
-        // the active turn.
+        // must accept without an idle gate and identify its pending section.
         state: "done",
       }),
     );
@@ -458,14 +455,16 @@ describe("F1 — live state, not the stale registry record", () => {
       mode: "agent",
       agent_id: "cmuxlayerCodex-midturn",
       text: "status?",
+      ...(mode === "queue" ? { codex_busy_mode: "queue" } : {}),
     });
     const parsed = parseResult(result);
 
-    // #905: queued behind the turn is not submitted.
+    // Neither accepted pending section proves a submitted user turn.
     expect(parsed.terminal, JSON.stringify(parsed)).toBe(false);
-    expect(parsed.delivery_state ?? parsed.delivery).toBe("queued");
+    expect(parsed.delivery_state ?? parsed.delivery).toBe(mode === "queue" ? "queued" : "steer_pending");
     expect(parsed.submitted).toBe(false);
-    expect(parsed.queued_behind_turn).toBe(true);
+    expect(parsed.queued_behind_turn === true).toBe(mode === "queue");
+    expect(client.sendKeyCalls).toContain(`${client.workingSurface}:${mode === "queue" ? "tab" : "return"}`);
   });
 
   it("caller resolution prefers a live record over a stale one on the same surface", async () => {

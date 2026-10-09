@@ -1,0 +1,15 @@
+Last login: Mon Oct  5 06:16:42 on ttys052
+cd -- '/srv/scratch'
+fixture-user ~  $ cursor-agent --workspace /srv/scratch --trust
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Use /debug to instrument and debug complex problems.
+
+
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+  → /999e_no_match_capture
+ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  Auto                                                                             Run Everything
+  ~/scratch · fix/999e-composer-picker-matrix

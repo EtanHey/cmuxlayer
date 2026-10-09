@@ -1,0 +1,34 @@
+
+  >_ OpenAI Codex (v0.160.0)
+     ~/scratch
+  permissions: YOLO mode
+
+  Practical, peculiar, or a little of both?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+
+› /
+
+  GPT-6-Luna low · ~/scratch

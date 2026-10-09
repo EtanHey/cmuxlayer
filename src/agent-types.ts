@@ -29,7 +29,8 @@ export type AgentHaltType =
   | "idle_without_done"
   | "wedged"
   | "paused"
-  | "harness_api_error";
+  | "harness_api_error"
+  | "delivery_stalled";
 
 export interface Observed<T> {
   value: T;
@@ -49,6 +50,12 @@ export interface AgentRecord {
   surface_observer_id?: string | null;
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;
+  /** One automatic move is allowed for this stable surface and registration. */
+  placement_reconciled_registration?: string | null;
+  /** Durable guard written before attempting an automatic move. */
+  placement_move_attempted_registration?: string | null;
+  /** A later mismatch after that move is treated as an operator override. */
+  placement_override?: boolean;
   workspace_id?: string | null;
   state: AgentState;
   repo: string;
@@ -91,6 +98,17 @@ export interface AgentRecord {
    */
   boot_prompt_text?: string | null;
   pid: number | null;
+  /**
+   * #911: the mailbox tailer this agent armed, as the sweep last adopted it
+   * from `inbox-tail.pid` and `ps`. Reaping never trusts this alone; it
+   * re-probes the PID's start time and command line before any signal.
+   */
+  inbox_tail?: {
+    wrapper_pid: number | null;
+    tail_pid: number | null;
+    started_at: string | null;
+    inbox_path: string;
+  } | null;
   /** Hook registration time that binds `pid` to this launch generation. */
   pid_registered_at?: string | null;
   version: number;
@@ -155,6 +173,15 @@ export interface AgentRecord {
   boot_prompt_pending?: boolean;
   /** Changes on each managed boot, including resume under the same agent ID. */
   boot_instance_id?: string;
+  /** Fixed start of a pending boot verification; ordinary updates must not extend it. */
+  boot_verify_started_at?: string | null;
+  /** A resumed session may prove its previous boot by working on the restored turn. */
+  boot_resumed_at?: string | null;
+  /** Exact pre-type frame and wire text for a new Codex user-row proof. */
+  boot_pre_type_screen?: string | null;
+  boot_delivery_text?: string | null;
+  /** A working frame proves a boot only after its submit key was dispatched. */
+  boot_submit_dispatched?: boolean;
   // Spawn settlement evidence (PR #326): a managed agent must not report
   // ready without retaining what was actually observed about prompt delivery
   // and the model shown by the CLI.
@@ -202,6 +229,7 @@ export interface PublicAgent {
 export interface ObservedPublicAgent {
   agent_id: string;
   repo: string;
+  placement_mismatch?: true;
   surface_provenance: SurfaceProvenance;
   model: Observed<string | null>;
   state: Observed<AgentState | null>;
@@ -281,6 +309,84 @@ export function shouldRetainForExplicitResume(
   );
 }
 
+/** How long a terminal row with a captured session stays resumable (#926). */
+export const RESUMABLE_SESSION_RETENTION_DAYS = 14;
+export const RESUMABLE_SESSION_RETENTION_MS =
+  RESUMABLE_SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * How far in the future an `updated_at` may sit and still count (clock steps,
+ * not skewed writers): a later timestamp must not extend retention.
+ */
+export const RESUMABLE_SESSION_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * The surface ref of a retained row that no longer owns a pane (#926).
+ *
+ * AIDEV-NOTE: deliberately NOT "". Both cmux clients drop an empty `surface`
+ * option, so an empty ref would address the focused pane. This ref never
+ * resolves, so any stray write to an unbound row fails instead of landing in
+ * someone else's pane.
+ */
+export const UNBOUND_SURFACE_REF = "surface:unbound";
+
+/**
+ * #926: `done` does not mean gone. An idle lead or a finished worker reads
+ * `done` and still carries the session a lead resumes by id after a crash, so
+ * the purges unbind such a row from its stale surface instead of deleting it.
+ * The window keeps the registry bounded; an explicit delete intent wins.
+ */
+export function isRetainedResumableSession(
+  agent: Pick<
+    AgentRecord,
+    "state" | "cli_session_id" | "updated_at" | "deletion_intent"
+  >,
+  now = Date.now(),
+): boolean {
+  if (agent.state !== "done" && agent.state !== "error") return false;
+  if (!agent.cli_session_id || agent.deletion_intent === true) return false;
+  const updatedAt = Date.parse(agent.updated_at);
+  return (
+    Number.isFinite(updatedAt) &&
+    updatedAt <= now + RESUMABLE_SESSION_CLOCK_SKEW_MS &&
+    now - updatedAt < RESUMABLE_SESSION_RETENTION_MS
+  );
+}
+
+/**
+ * A terminal session row past the retention window (or marked for deletion):
+ * bounded like any other row. Close/crash tombstones keep their own cap.
+ */
+export function isExpiredResumableSession(
+  agent: Pick<
+    AgentRecord,
+    | "state"
+    | "cli_session_id"
+    | "updated_at"
+    | "deletion_intent"
+    | "user_killed"
+    | "error"
+  >,
+  now = Date.now(),
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    !isRetainedResumableSession(agent, now) &&
+    !shouldRetainForExplicitResume(agent)
+  );
+}
+
+/** A retained resumable row that the purges have detached from its pane. */
+export function isUnboundResumableSession(
+  agent: Pick<AgentRecord, "state" | "cli_session_id" | "surface_id">,
+): boolean {
+  return (
+    (agent.state === "done" || agent.state === "error") &&
+    !!agent.cli_session_id &&
+    agent.surface_id === UNBOUND_SURFACE_REF
+  );
+}
+
 export interface StateTransition {
   ts: string;
   agent_id: string;
@@ -319,6 +425,7 @@ export interface DeliveryTelemetryEvent {
     | "typed"
     | "submitted"
     | "queued"
+    | "steer_pending"
     | "queued_followup"
     | "rescued"
     | "failed"
@@ -476,6 +583,16 @@ export interface CloseForensicsEvent {
   client_context: CloseForensicsClientContext;
 }
 
+/** An Esc-only attempt on an observed Codex setup overlay; no screen content. */
+export interface AccountSecurityBannerEvent {
+  ts: string;
+  event_type: "account_security_banner";
+  agent_id: string | null;
+  surface: string;
+  variant: "advanced_account_security" | "daybreak" | "security" | "hooks_review";
+  outcome: "dismissed" | "failed";
+}
+
 export type EventLogEntry =
   | StateTransition
   | DeliveryTelemetryEvent
@@ -484,7 +601,8 @@ export type EventLogEntry =
   | AgentCliExitEvent
   | AgentHaltEscalationEvent
   | CloseTelemetryEvent
-  | CloseForensicsEvent;
+  | CloseForensicsEvent
+  | AccountSecurityBannerEvent;
 
 export interface WaitResult {
   matched: boolean;

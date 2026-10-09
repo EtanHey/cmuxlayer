@@ -37,6 +37,7 @@ import {
 } from "../src/coordination-paths.js";
 import { AgentEngine } from "../src/agent-engine.js";
 import { StateManager } from "../src/state-manager.js";
+import { DEAD_PID } from "./helpers/dead-pid.js";
 import { SurfaceWriteLivenessTracker } from "../src/surface-write-liveness.js";
 import type { CodexRolloutFill } from "../src/codex-rollout-fill.js";
 import { readInbox } from "../src/inbox.js";
@@ -51,7 +52,6 @@ import {
   sweepWatches,
 } from "../src/watch-spec.js";
 import { recordCliFallback } from "../src/transport-retry-context.js";
-import { RAISE_NOFILE_SOFT_LIMIT, withRaisedNofileSoftLimit } from "../src/nofile-limit.js";
 import { engineForTests } from "../src/server.js";
 import { agentStateTool } from "./helpers/mcp-tool-harness.js";
 import { internalToolForTests } from "../src/mcp/registration.js";
@@ -141,7 +141,7 @@ function makeLifecycleExec(opts?: {
   let surfaceLive = true;
   let promptPending = false;
   let pendingText = "";
-  let activeCli: "claude" | "codex" | "cursor" = "claude";
+  let activeCli: "claude" | "codex" | "cursor" | "gemini" | "kiro" = "claude";
   let createdSurfaceCount = 0;
   let bootPromptReturnFailures = 0;
   let promptReturns = 0;
@@ -202,9 +202,9 @@ function makeLifecycleExec(opts?: {
             ? // #905: real Codex keeps the message as a `› ` user row above
               // an empty composer.
               `>_ OpenAI Codex\n${codexUserRows(pendingText)}\n\n${workingText()}\n\n› \n\n  gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer`
-            : activeCli === "cursor"
-              ? `Cursor Agent\n${pendingText}\nWorking (1s • esc to interrupt)\ncursor> `
-              : workingText();
+            : activeCli === "cursor" || activeCli === "kiro"
+              ? `${activeCli === "kiro" ? "Kiro" : "Cursor Agent"}\n${pendingText}\nWorking (1s • esc to interrupt)\n${activeCli}> `
+              : `Claude Code\n${pendingText}\n✻ Working\n❯`;
         promptPending = false;
         pendingText = "";
       }
@@ -212,10 +212,7 @@ function makeLifecycleExec(opts?: {
     }
     if (args.includes("send") || args.includes("set-buffer")) {
       const text = String(args[args.length - 1] ?? "");
-      const nofilePrelude = `${RAISE_NOFILE_SOFT_LIMIT}; `;
-      const launcherText = text.startsWith(nofilePrelude)
-        ? text.slice(nofilePrelude.length)
-        : text;
+      const launcherText = text;
       if (text.includes("Codex")) {
         activeCli = "codex";
         readyText = opts?.codexReadyText ?? "codex> ";
@@ -224,12 +221,22 @@ function makeLifecycleExec(opts?: {
         activeCli = "claude";
         readyText = "Claude Code\nWhat can I help you with?\n>";
       }
+      const isKiroLaunch = /\bkiro-cli(?:\s|$)/.test(text);
+      if (isKiroLaunch) {
+        activeCli = "kiro";
+        readyText = "Kiro\nkiro> ";
+      }
+      if (text.includes("Gemini")) {
+        activeCli = "gemini";
+        readyText = "Gemini CLI\n> ";
+      }
       if (text.includes("Cursor")) {
         activeCli = "cursor";
         readyText = "cursor> ";
       }
       if (
         launcherText.trim() &&
+        !isKiroLaunch &&
         !/^\s*(?:[A-Z_]+=\S+\s+)*[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b.*(?:^|\s)-s(?:\s|$)/.test(
           launcherText,
         )
@@ -243,8 +250,8 @@ function makeLifecycleExec(opts?: {
             codexUserRows(text),
             "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer",
           ].join("\n");
-        } else if (activeCli === "cursor") {
-          readyText = `Cursor Agent\ncursor> ${text}\nAuto`;
+        } else if (activeCli === "cursor" || activeCli === "kiro") {
+          readyText = `${activeCli === "kiro" ? "Kiro" : "Cursor Agent"}\n${activeCli}> ${text}\nAuto`;
         } else {
           readyText = `Claude Code\n❯ ${text}`;
         }
@@ -740,8 +747,9 @@ describe("lean spawn tool responses", () => {
     const description = registered._registeredTools?.spawn_agent?.inputSchema
       ?.shape?.report_path?.description ?? "";
 
+    expect(description).toMatch(/verbose:true-only fields; the default warning contains any required relay instruction/);
     expect(description).toMatch(
-      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*relay contract_path, report_path, and done_marker.*contract_path is absent.*inline mode.*could not be written.*relay report_path and done_marker/,
+      /resume_agent_id.*coordination_footer_note.*lost.*context.*contract_path is present.*queued or unverified.*send_to.*press_enter:true.*contract_path is absent.*inline mode.*could not be written.*relay report_path and done_marker/,
     );
   });
 
@@ -761,7 +769,7 @@ describe("lean spawn tool responses", () => {
         spawn.inputSchema.parse({
           version: 1,
           repo: "cmuxlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           ...(field === "placement" ? { role: "implementor" } : {}),
           [field]: value,
         }),
@@ -803,11 +811,13 @@ describe("lean spawn tool responses", () => {
   });
 
   it.each([
-    { requiredPromptReturns: 2, recovered: true },
-    { requiredPromptReturns: 99, recovered: false },
+    { requiredPromptReturns: 2, recovered: true, verbose: true },
+    { requiredPromptReturns: 99, recovered: false, verbose: true },
+    { requiredPromptReturns: 2, recovered: true, verbose: false },
+    { requiredPromptReturns: 99, recovered: false, verbose: false },
   ])(
-    "#636 D1 Claude boot recovery is bounded (Returns=$requiredPromptReturns)",
-    async ({ requiredPromptReturns, recovered }) => {
+    "#636 D1 Claude boot recovery is bounded (Returns=$requiredPromptReturns, verbose=$verbose)",
+    async ({ requiredPromptReturns, recovered, verbose }) => {
       mkdirSync(TEST_DIR, { recursive: true });
       const promptPath = join(TEST_DIR, `claude-recovery-${requiredPromptReturns}.md`);
       writeFileSync(promptPath, "Claude boot recovery specimen", "utf8");
@@ -818,39 +828,61 @@ describe("lean spawn tool responses", () => {
         disableSpawnPreflight: true,
         sessionIdentityResolver: () => null,
       });
-      const result = parseToolResult(
-        await (server as any)._registeredTools.spawn_agent.handler(
-          {
-            repo: "brainlayer",
-            model: "sonnet",
-            cli: "claude",
-            boot_prompt_path: promptPath,
-            boot_prompt_timeout_ms: 1_000,
-          },
-          {} as any,
-        ),
+      const rawResult = await (server as any)._registeredTools.spawn_agent.handler(
+        { verbose,
+          repo: "brainlayer",
+          model: "sonnet",
+          cli: "claude",
+          boot_prompt_path: promptPath,
+          boot_prompt_timeout_ms: 1_000,
+        },
+        {} as any,
       );
+      const result = parseToolResult(rawResult);
       const returnCount = (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([, args]) => args.includes("send-key") && args.includes("return"),
       ).length;
 
       if (recovered) {
-        expect(result).toMatchObject({
+        expect(result).toMatchObject(verbose ? {
           ok: true,
           boot_prompt_delivered: true,
           boot_prompt_submit_verified: true,
           boot_prompt_receipt: { typed: true, retry_count: 1, submit_verified: true },
-        });
+        } : { ok: true, state: "started", delivered: true });
       } else {
-        expect(result).toMatchObject({
+        expect(result).toMatchObject(verbose ? {
           ok: true,
-          spawn_state: "boot_unsubmitted",
+          spawn_state: "pending_verify",
           boot_prompt_delivered: false,
-          boot_prompt_receipt: { typed: true, submitted: false, terminal: true,
-            retry_count: 1, submit_verified: false },
+          boot_prompt_receipt: { typed: true, submitted: false, terminal: false,
+            retry_count: 1, submit_verified: null, delivery_id: expect.any(String) },
+        } : { ok: true, state: "pending_verify", delivered: false });
+        // Real PR-a producer + registration: guidance is constructed from the
+        // actual unverified boot receipt, not supplied as fixture next_action.
+        const action = result[verbose ? "next_action" : "warning"] as string;
+        const guidance = action.match(/wait_for\(\{delivery_id:"([^"]+)"\}\)/);
+        expect(guidance, action).not.toBeNull();
+        const deliveryId = guidance![1];
+        expect(action).toContain(`wait_for({delivery_id:"${deliveryId}"})`);
+        expect(action).toContain("keep this agent and pane");
+        expect(action).not.toMatch(/never .*manual Return/i);
+        if (verbose) expect(deliveryId).toBe(result.boot_prompt_receipt.delivery_id);
+        expect(engineForTests(server).getDeliveryReceipt(deliveryId)).toMatchObject({
+          delivery_id: deliveryId, agent_id: result.agent_id,
+          delivery_state: "pending_verify", submit_dispatched: true,
         });
-        expect(result.next_action).toMatch(/after 1 automatic Return retry/i);
-        expect(result.next_action).not.toMatch(/never .*manual Return/i);
+        const waited = parseToolResult(await (server as any)._registeredTools.wait_for.handler(
+          { delivery_id: deliveryId, timeout_ms: 1 }, {} as any,
+        ));
+        expect(waited).toMatchObject({ ok: true, delivery_id: deliveryId,
+          delivered: false, submit_dispatched: true });
+      }
+      if (!verbose) {
+        expect(Object.keys(result).sort()).toEqual([
+          "ok", "agent_id", "surface_id", "state", "delivered", ...(!recovered ? ["warning"] : []),
+        ].sort());
+        expect(JSON.parse(rawResult.content[0]!.text)).toEqual(result);
       }
       // One Return launches the CLI; two more are the bounded prompt submit attempts.
       expect(returnCount).toBe(3);
@@ -906,7 +938,7 @@ describe("lean spawn tool responses", () => {
       const prompt = "Verify JRC CLI fallback delivery";
       const spawned = parseToolResult(
         await registeredTestTool(server, "spawn_agent").handler({
-          repo: "jobRadarCoach", cli: "codex", role: "worker", prompt,
+          repo: "jobRadarCoach", cli: "codex", effort: "medium", role: "worker", prompt,
           worktree: { name: "jrc-fallback", branch: "wt/jrc-fallback", create: true },
           boot_prompt_timeout_ms: 2_000, verbose: true,
         }, {}),
@@ -948,7 +980,7 @@ describe("lean spawn tool responses", () => {
       await registeredTestTool(server, "spawn_agent").handler(
         {
           repo: "cmuxlayer",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           prompt,
           boot_prompt_timeout_ms: 2_000,
@@ -982,6 +1014,112 @@ describe("lean spawn tool responses", () => {
     expect(screen.content).toContain(`› ${prompt}`);
     expect(screen.content.split("\n").filter((row: string) => row.startsWith("›")).at(-1)).toBe("› ");
   }, 10_000);
+
+  it.each([
+    ["claude", "lead"], ["codex", "lead"], ["cursor", "lead"],
+    ["gemini", "lead"], ["kiro", "lead"], ["claude", undefined],
+  ] as const)(
+    "PR-e: lead spawning %s authority=%s with omitted role creates a worker on the right",
+    async (cli, authority) => {
+      const exec = makeLifecycleExec();
+      const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+      const engine = engineForTests(server);
+      const lead = makeServerAgentRecord({
+        agent_id: "lead-default-role", surface_id: "surface:lead-caller",
+        workspace_id: "workspace:1", state: "working", role: "orchestrator",
+        authority, repo: "cmuxlayer", cli: "claude", task_done_detected_at: null,
+      });
+      engine.stateMgr.writeState(lead);
+      engine.getRegistry().set(lead.agent_id, lead);
+      const spawn = registeredTestTool(server, "spawn_agent");
+      const result = parseToolResult(await runWithCallerContext(
+        { workspaceId: lead.workspace_id!, surfaceId: lead.surface_id },
+        () => spawn.handler(spawn.inputSchema.parse({
+          repo: "cmuxlayer", cli, ...(cli === "codex" ? { effort: "medium" } : {}), force_new: true,
+          boot_prompt_timeout_ms: 2_000, verbose: true,
+        }), {}),
+      ));
+
+      expect(result, JSON.stringify(result)).toMatchObject({
+        ok: true, role: "implementor", authority: "worker", placement: "right",
+        parent_agent_id: lead.agent_id,
+      });
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        cli, role: "worker", function: "implementor", authority: "worker",
+        placement: "right", parent_agent_id: lead.agent_id, spawn_depth: 1,
+      });
+      expect(exec.mock.calls).toEqual(expect.arrayContaining([
+        expect.arrayContaining([expect.anything(), expect.arrayContaining([
+          "new-split", "right", "--workspace", "workspace:1",
+        ])]),
+      ]));
+    }, 10_000,
+  );
+
+  it.each([
+    ["claude", "reviewer", "reviewer", "worker", "right"],
+    ["codex", "gatherer", "gatherer", "worker", "right"],
+    ["claude", "orchestrator", "implementor", "lead", "left"],
+    ["codex", "orchestrator", "implementor", "lead", "left"],
+  ] as const)(
+    "PR-e: lead spawning %s preserves explicit %s role",
+    async (cli, role, job, authority, placement) => {
+      const exec = makeLifecycleExec();
+      const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+      const engine = engineForTests(server);
+      const lead = makeServerAgentRecord({
+        agent_id: "lead-explicit-role", surface_id: "surface:lead-caller",
+        workspace_id: "workspace:1", state: "working", role: "orchestrator",
+        authority: "lead", repo: "cmuxlayer", cli: "claude", task_done_detected_at: null,
+      });
+      engine.stateMgr.writeState(lead);
+      engine.getRegistry().set(lead.agent_id, lead);
+      const spawn = registeredTestTool(server, "spawn_agent");
+      const result = parseToolResult(await runWithCallerContext(
+        { workspaceId: lead.workspace_id!, surfaceId: lead.surface_id },
+        () => spawn.handler(spawn.inputSchema.parse({
+          repo: "cmuxlayer", cli, role, ...(cli === "codex" ? { effort: "medium" } : {}), force_new: true,
+          boot_prompt_timeout_ms: 2_000, verbose: true,
+        }), {}),
+      ));
+
+      expect(result, JSON.stringify(result)).toMatchObject({
+        ok: true, role: job, authority, placement,
+      });
+      expect(engine.getAgentState(result.agent_id)).toMatchObject({
+        role: authority === "lead" ? "orchestrator" : "worker",
+        function: job, authority, placement, parent_agent_id: lead.agent_id,
+      });
+      const creation = exec.mock.calls.find(([, args]) =>
+        args.includes("new-split") || args.includes("new-surface"));
+      expect(creation?.[1]).toEqual(expect.arrayContaining(
+        placement === "right" ? ["new-split", "right"] : ["new-surface", "--pane", "pane:1"],
+      ));
+    }, 10_000,
+  );
+
+  it("PR-e: an explicit lead parent does not grant an unknown caller the role default", async () => {
+    const exec = makeLifecycleExec();
+    const { server } = createHermeticSpawnServer({ exec, disableSpawnPreflight: true });
+    const engine = engineForTests(server);
+    const lead = makeServerAgentRecord({
+      agent_id: "lead-parent-only", surface_id: "surface:lead-caller",
+      workspace_id: "workspace:1", repo: "cmuxlayer", state: "working",
+      role: "orchestrator", authority: "lead", task_done_detected_at: null,
+    });
+    engine.stateMgr.writeState(lead);
+    engine.getRegistry().set(lead.agent_id, lead);
+    const spawn = registeredTestTool(server, "spawn_agent");
+    const result = parseToolResult(await runWithCallerContext(
+      { workspaceId: "workspace:1", surfaceId: "surface:unknown-caller" },
+      () => spawn.handler(spawn.inputSchema.parse({
+        repo: "cmuxlayer", cli: "claude", parent_agent_id: lead.agent_id,
+      }), {}),
+    ));
+    expect(result).toMatchObject({ ok: false, error_code: "ROLE_REQUIRED" });
+    expect(exec.mock.calls.some(([, args]) =>
+      args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
 
   it("rejects roleless Claude before creating any surface and names both fixes", async () => {
     const exec = makeLifecycleExec();
@@ -1018,7 +1156,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools.spawn_agent;
 
     const result = await spawn.handler({
-      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex",
+      version: 1, type: "agent", repo: "cmuxlayer", cli: "codex", effort: "medium",
       role: "implementor", placement: "right", prompt: "Worker",
     }, {} as any);
 
@@ -1065,7 +1203,7 @@ describe("lean spawn tool responses", () => {
     });
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    const args = spawn.inputSchema.parse({
+    const args = spawn.inputSchema.parse({ verbose: true,
       version: 1,
       type: "agent",
       repo: "cmuxlayer",
@@ -1108,10 +1246,11 @@ describe("lean spawn tool responses", () => {
       });
       const spawn = (server as any)._registeredTools["spawn_agent"];
       return spawn.handler(
-        spawn.inputSchema.parse({
+        spawn.inputSchema.parse({ verbose: true,
           version: 1,
           repo: "cmuxlayer",
           cli,
+          ...(cli === "codex" ? { effort: "medium" } : {}),
           role: "implementor",
           force_new: true,
         }),
@@ -1167,7 +1306,7 @@ describe("lean spawn tool responses", () => {
     const exec = makeLifecycleExec();
     const server = createLifecycleServer(exec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const args = spawn.inputSchema.parse({
+    const args = spawn.inputSchema.parse({ verbose: true,
       version: 1,
       type: "terminal",
       cwd: "/tmp/spawn-spec-terminal",
@@ -1261,7 +1400,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      spawn.inputSchema.parse({
+      spawn.inputSchema.parse({ verbose: true,
         version: 1,
         type: "terminal",
         workspace: "workspace:1",
@@ -1292,7 +1431,7 @@ describe("lean spawn tool responses", () => {
     const exec = makeLifecycleExec({ createdWorkspace: "workspace:created" });
     const server = createLifecycleServer(exec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const args = spawn.inputSchema.parse({
+    const args = spawn.inputSchema.parse({ verbose: true,
       version: 1,
       type: "terminal",
       workspace: "new:Scratch Pad",
@@ -1428,7 +1567,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "sonnet",
         cli: "claude",
@@ -1481,7 +1620,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     await spawn.handler(
-      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      { verbose: true, repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
 
@@ -1497,27 +1636,34 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "codex" },
+      { repo: "cmuxlayer", cli: "codex", effort: "medium" },
       {} as any,
     );
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed).toEqual(result.structuredContent);
-    expect(parsed).toMatchObject({
+    expect(parsed).toEqual({
       ok: true,
       agent_id: expect.any(String),
       surface_id: "surface:new",
-      workspace_id: "workspace:1",
-      state: "booting",
-      model: "codex",
-      role: "worker",
-      boot_prompt_delivered: true,
-      boot_prompt_submit_verified: true,
+      state: "started",
+      delivered: true,
     });
-    expect(parsed).not.toHaveProperty("health");
-    expect(parsed).not.toHaveProperty("model_policy");
-    expect(parsed.retry_count).toBe(0);
-    expect(parsed).not.toHaveProperty("monitor_boot");
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["ok", "agent_id", "surface_id", "state", "delivered"].sort(),
+    );
+  });
+
+  it("spawn_agent terminal defaults to the same five-field receipt", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.spawn_agent.handler(
+      { type: "terminal" }, {},
+    );
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      ok: true, agent_id: null, surface_id: "surface:new",
+      state: "started", delivered: false,
+    });
+    expect(result.structuredContent).toEqual(JSON.parse(result.content[0].text));
   });
 
   it("spawn_agent preserves the full legacy payload with verbose true", async () => {
@@ -1525,7 +1671,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", cli: "codex", verbose: true },
+      { repo: "cmuxlayer", cli: "codex", effort: "medium", verbose: true },
       {} as any,
     );
 
@@ -1563,7 +1709,7 @@ describe("lean spawn tool responses", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", verbose: true },
+      { repo: "cmuxlayer", model: "gpt-5.5", cli: "codex", effort: "medium", verbose: true },
       {} as any,
     );
 
@@ -1575,11 +1721,71 @@ describe("lean spawn tool responses", () => {
     });
   });
 
+  it.each([undefined, "", "   "])("requires Codex effort %j before any allocation", async (effort) => {
+    const exec = makeLifecycleExec();
+    const worktreeExec = vi.fn();
+    const server = createTrackedServer({ exec, stateDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      worktreeHomeDir: join(TEST_DIR, "Gits"), worktreeExec });
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ repo: "cmuxlayer", cli: "codex", effort,
+      worktree: { name: "required-effort", branch: "wt/required-effort" } }), {});
+    expect(result.structuredContent).toMatchObject({ ok: false, error_code: "EFFORT_REQUIRED" });
+    expect(result.structuredContent.error).toContain('effort is required for cli "codex"');
+    expect(worktreeExec).not.toHaveBeenCalled();
+    expect(exec.mock.calls.some(([, args]) => args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
+
+  it("collects missing effort with other spawn problems", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.spawn_agent.handler({ cli: "codex" }, {});
+    expect(result.structuredContent).toMatchObject({ ok: false, error_code: "INVALID_SPAWN_SPEC" });
+    expect(result.structuredContent.error).toContain("repo is required");
+    expect(result.structuredContent.error).toContain('effort is required for cli "codex"');
+  });
+
+  it("terminal focus default preserves parsed legacy background creation", async () => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ type: "terminal" }), {});
+    expect(result.structuredContent).toMatchObject({
+      ok: true, agent_id: null, state: "started", delivered: false,
+    });
+    const creation = exec.mock.calls.find(([, args]) => args.includes("new-split") || args.includes("new-surface"))![1];
+    expect(creation[creation.indexOf("--focus") + 1]).toBe("false");
+  });
+
+  it("exempts terminal spawns even with Codex selected", async () => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const result = await (server as any)._registeredTools.spawn_agent.handler({ verbose: true, type: "terminal", cli: "codex" }, {});
+    expect(result.structuredContent).toMatchObject({ ok: true, type: "terminal" });
+  });
+
+  it.each(["claude", "gemini"])("allows %s without effort", async (cli) => {
+    const server = createLifecycleServer(makeLifecycleExec());
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler({ verbose: true, repo: "cmuxlayer", cli,
+      role: "implementor", authority: "lead" }, {});
+    expect(result.structuredContent.ok, JSON.stringify(result.structuredContent)).toBe(true);
+  });
+
+  it.each(["claude", "gemini"])("rejects supplied blank effort for %s", async (cli) => {
+    const exec = makeLifecycleExec();
+    const server = createLifecycleServer(exec);
+    const spawn = (server as any)._registeredTools.spawn_agent;
+    const result = await spawn.handler(spawn.inputSchema.parse({ repo: "cmuxlayer", cli,
+      role: "implementor", authority: "lead", effort: "   " }), {});
+    expect(result.structuredContent.ok).toBe(false);
+    expect(result.structuredContent.error).toContain("cannot be used with cli");
+    expect(exec.mock.calls.some(([, args]) => args.includes("new-split") || args.includes("new-surface"))).toBe(false);
+  });
+
   it("spawn_agent passes an explicit Codex effort to the launcher", async () => {
     const mockExec = makeLifecycleExec();
     const server = createLifecycleServer(mockExec);
     const spawn = (server as any)._registeredTools["spawn_agent"];
-    const args = spawn.inputSchema.parse({
+    const args = spawn.inputSchema.parse({ verbose: true,
       repo: "cmuxlayer",
       cli: "codex",
       effort: "medium",
@@ -1590,7 +1796,7 @@ describe("lean spawn tool responses", () => {
     expect(result.structuredContent.ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", withRaisedNofileSoftLimit("GOLEM_ROLE=worker cmuxlayerCodex -s --worker -E medium")]),
+      expect.arrayContaining(["send", "cmuxlayerCodex -s --worker -E medium"]),
     );
   });
 
@@ -2745,7 +2951,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toMatch(/^brainlayerClaude-[0-9a-f]{8}$/);
     expect(parsed.surface_id).toBe("surface:new");
-    expect(parsed.state).toBe("ready");
+    expect(parsed.state).toBe("started");
     expect(parsed.health).toBeUndefined();
 
     const stateTool = agentStateTool(server);
@@ -2772,7 +2978,17 @@ describe("agent lifecycle tool handlers", () => {
     expect(exec.mock.calls.some(([, args]) => args.some((arg: string) => ["new-split", "new-surface", "send", "send-key"].includes(arg)))).toBe(false);
   });
 
-  it("spawn_agent resume_agent_id rebinds a captured session without minting a new public id", async () => {
+  it.each([
+    { metadata: "surface", focus: undefined, expected: false },
+    { metadata: "surface", focus: false, expected: false },
+    { metadata: "surface", focus: true, expected: true },
+    { metadata: "terminal", focus: undefined, expected: false },
+    { metadata: "terminal", focus: false, expected: false },
+    { metadata: "terminal", focus: true, expected: true },
+    { metadata: "legacy", focus: undefined, expected: true },
+    { metadata: "legacy", focus: false, expected: false },
+    { metadata: "legacy", focus: true, expected: true },
+  ])("spawn_agent resume focus=$focus metadata=$metadata reaches engine without changing public id", async ({ metadata, focus, expected }) => {
     const agentId = "cmuxlayerCodex-stable-resume";
     const stateMgr = new StateManager(TEST_DIR);
     stateMgr.writeState(
@@ -2781,25 +2997,36 @@ describe("agent lifecycle tool handlers", () => {
         repo: "brainlayer",
         cli: "codex",
         state: "done",
+        pid: DEAD_PID,
         surface_id: "surface:old",
         cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
       }),
     );
     const exec = makeLifecycleExec();
-    const server = createLifecycleServer(exec);
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
+    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [] });
+    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true }] });
+    const server = createTrackedServer({ client, stateDir: TEST_DIR,
+      inboxBaseDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     await serverContexts.at(-1)?.lifecycleStartPromise;
     const spawn = (server as any)._registeredTools["spawn_agent"];
-
-    const result = await spawn.handler({ resume_agent_id: agentId }, {} as any);
+    const engine = engineForTests(server);
+    const resume = vi.spyOn(engine, "resumeAgent");
+    expect(spawn.inputSchema.shape.focus.parse(focus)).toBe(focus);
+    const result = await spawn.handler({ resume_agent_id: agentId, focus }, {} as any);
+    expect(resume).toHaveBeenCalledWith(agentId, expect.objectContaining({ focus: expected }));
+    expect(exec.mock.calls.some(([, args]) => args.includes("surface.focus") && args.some((arg: string) => arg.includes("surface:new")))).toBe(expected);
+    if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
     const parsed = parseToolResult(result) as Record<string, unknown>;
 
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
-    expect(parsed).toMatchObject({
-      ok: true,
-      resumed: true,
-      agent_id: agentId,
-      surface_id: "surface:new",
-    });
+    expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
+      surface_id: "surface:new", state: "started", delivered: false });
+    expect(parsed.warning).toMatch(/refreshed_not_redelivered.*lost context/);
+    expect(parsed.warning).toContain(`Read and follow ${coordinationContractPath(agentId, { baseDir: TEST_DIR })}`);
+    expect(Object.keys(parsed).sort()).toEqual(
+      ["ok", "agent_id", "surface_id", "state", "delivered", "warning"].sort());
+    expect(JSON.parse(result.content[0].text)).toEqual(parsed);
     expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
   });
 
@@ -2842,6 +3069,7 @@ describe("agent lifecycle tool handlers", () => {
         parent_agent_id: parentId,
         spawn_depth: 1,
         report_path: customReportPath,
+        pid: DEAD_PID,
       }),
     );
     const expected = issueCoordinationContract(agentId, {
@@ -2891,7 +3119,7 @@ describe("agent lifecycle tool handlers", () => {
 
     try {
       const result = await spawn.handler(
-        { resume_agent_id: agentId, report_path: customReportPath },
+        { verbose: true, resume_agent_id: agentId, report_path: customReportPath },
         {},
       );
       const parsed = parseToolResult(result);
@@ -3025,7 +3253,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         cli: "claude",
         placement: "worker",
@@ -3219,10 +3447,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "skillcreator",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
       },
       {} as any,
     );
@@ -3341,10 +3569,10 @@ describe("agent lifecycle tool handlers", () => {
         { workspaceId: "caller-workspace-uuid" },
         () =>
           tool.handler(
-            {
+            { verbose: true,
               repo: "voicelayer",
               model: "gpt-5.5",
-              cli: "codex",
+              cli: "codex", effort: "medium",
             },
             {} as any,
           ),
@@ -3403,7 +3631,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "workspace:t3layer",
       },
@@ -3448,10 +3676,10 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
     const result = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "workspace:brainlayer",
       },
@@ -3513,10 +3741,10 @@ describe("agent lifecycle tool handlers", () => {
 
     try {
       const result = await spawn.handler(
-        {
+        { verbose: true,
           repo: "brainlayer",
           model: "gpt-5.5",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           parent_agent_id: parentRecord.agent_id,
         },
@@ -3567,7 +3795,7 @@ describe("agent lifecycle tool handlers", () => {
       { workspaceId: "workspace:1", surfaceId: parent.surface_id },
       () =>
         spawn.handler(
-          {
+          { verbose: true,
             repo: "cmuxlayer",
             cli: "claude",
             role: "orchestrator",
@@ -3633,7 +3861,7 @@ describe("agent lifecycle tool handlers", () => {
       { workspaceId: "workspace:1", surfaceId: "surface:reused" },
       () =>
         spawn.handler(
-          {
+          { verbose: true,
             repo: "cmuxlayer",
             cli: "claude",
             role: "orchestrator",
@@ -3687,7 +3915,7 @@ describe("agent lifecycle tool handlers", () => {
       { workspaceId: "workspace:1", surfaceId: staleLead.surface_id },
       () =>
         spawn.handler(
-          {
+          { verbose: true,
             repo: "cmuxlayer",
             cli: "claude",
             role: "reviewer",
@@ -3732,7 +3960,7 @@ describe("agent lifecycle tool handlers", () => {
       { workspaceId: "workspace:1", surfaceId: staleWorker.surface_id },
       () =>
         spawn.handler(
-          {
+          { verbose: true,
             repo: "cmuxlayer",
             cli: "claude",
             role: "orchestrator",
@@ -3822,7 +4050,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3839,7 +4067,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3850,11 +4078,8 @@ describe("agent lifecycle tool handlers", () => {
       JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
-    expect(second.warnings).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/Existing same-lane agent/),
-      ]),
-    );
+    expect(second.warning).toMatch(/Existing same-lane agent/);
+    expect(Object.keys(second)).toHaveLength(6);
     expect(second.duplicate_spawn_warning).toBeUndefined();
     expect(second.existing_same_lane_agents).toBeUndefined();
   });
@@ -3867,7 +4092,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
       },
@@ -3884,7 +4109,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         workspace: "ws:1",
         force_new: true,
@@ -3896,11 +4121,7 @@ describe("agent lifecycle tool handlers", () => {
       JSON.parse(secondResult.content[0].text);
 
     expect(second.ok).toBe(true);
-    expect(second.warnings).not.toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/Existing same-lane agent/),
-      ]),
-    );
+    expect(second.warning ?? "").not.toMatch(/Existing same-lane agent/);
     expect(second.duplicate_spawn_warning).toBeUndefined();
     expect(second.existing_same_lane_agents).toBeUndefined();
   });
@@ -3910,7 +4131,7 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         cli: "claude",
         prompt: "fix gap F",
@@ -3925,7 +4146,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.requested_model).toBe("");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
-      expect.arrayContaining(["send", withRaisedNofileSoftLimit("brainlayerClaude -s")]),
+      expect.arrayContaining(["send", "brainlayerClaude -s --worker"]),
     );
 
     const stateTool = agentStateTool(server);
@@ -3942,7 +4163,7 @@ describe("agent lifecycle tool handlers", () => {
     const server = createLifecycleServer(mockExec);
     const tool = (server as any)._registeredTools["spawn_agent"];
 
-    const args = tool.inputSchema.parse({
+    const args = tool.inputSchema.parse({ verbose: true,
       repo: "brainlayer",
       model: "sonnet",
       cli: "claude",
@@ -3963,7 +4184,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.warnings.join(" | ")).toMatch(
       /legacy.*ic.*worker|ic.*coerc.*worker/i,
     );
-    expect(parsed.health).toBeUndefined();
+    expect(parsed.health).toHaveProperty("status");
 
     const stateTool = agentStateTool(server);
     const stateResult = await stateTool.handler(
@@ -3980,10 +4201,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "fix prompt delivery",
       },
       {} as any,
@@ -4086,10 +4307,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "UUID-bound boot prompt",
       },
       {} as any,
@@ -4143,7 +4364,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "must not type in manual mode",
       },
       {} as any,
@@ -4165,10 +4386,10 @@ describe("agent lifecycle tool handlers", () => {
     const prompt = "fix placement mismatch prompt delivery";
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
       },
       {} as any,
@@ -4201,10 +4422,10 @@ describe("agent lifecycle tool handlers", () => {
     const prompt = "empty backend workspace fallback";
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
       },
       {} as any,
@@ -4284,10 +4505,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt,
         allow_long_inline: true,
       },
@@ -4332,10 +4553,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "probe renamed state",
       },
       {} as any,
@@ -4382,10 +4603,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "skill eval",
@@ -4406,9 +4627,9 @@ describe("agent lifecycle tool handlers", () => {
       created: true,
       reused: false,
     });
-    expect(parsed.mcp_profile).toBeUndefined();
-    expect(parsed.worktree).not.toHaveProperty("node_modules_bootstrapped");
-    expect(parsed.worktree).not.toHaveProperty("mcp_json_copied");
+    expect(parsed.mcp_profile).toBe("inherit");
+    expect(parsed.worktree).toHaveProperty("node_modules_bootstrapped");
+    expect(parsed.worktree).toHaveProperty("mcp_json_copied");
     expect(worktreeExec).toHaveBeenCalledWith("git", [
       "-C",
       repoRoot,
@@ -4425,7 +4646,7 @@ describe("agent lifecycle tool handlers", () => {
         "send",
         "--surface",
         "surface:new",
-        withRaisedNofileSoftLimit(`GOLEM_ROLE=worker cmuxlayerCodex -s --worker -w '${worktreePath}'`),
+        `cmuxlayerCodex -s --worker -E medium -w '${worktreePath}'`,
       ]),
     );
   });
@@ -4452,9 +4673,9 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "skillcreator",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: { name: "registry-root" },
       },
@@ -4497,9 +4718,9 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "ralph",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: { name: "outside-root" },
       },
@@ -4537,7 +4758,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     const server = createLifecycleServer(exec);
     const result = await (server as any)._registeredTools.spawn_agent.handler({
-      repo: "brainlayer", cli: "codex", role: "worker",
+      repo: "brainlayer", cli: "codex", effort: "medium", role: "worker",
       prompt: "typed before refusal", verbose: true,
     }, {} as any);
     const parsed = parseToolResult(result);
@@ -4569,7 +4790,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "wt-eval-scratch",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: true,
       },
@@ -4629,7 +4850,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "ralph",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "spawn-failure",
@@ -4696,7 +4917,7 @@ describe("agent lifecycle tool handlers", () => {
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
         worktree: {
           name: "recoverable-surface",
@@ -4779,7 +5000,7 @@ describe("agent lifecycle tool handlers", () => {
       const resultPromise = spawn.handler(
         {
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "post-surface-failure",
@@ -4825,7 +5046,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherSentAt: number | null = null;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker -E medium") {
           launcherSentAt = Date.now();
           return { stdout: "{}", stderr: "" };
         }
@@ -4841,7 +5062,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: elapsed < 800 ? `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}` : "codex> ",
+              text: elapsed < 800 ? "$ voicelayerCodex -s --worker -E medium" : "codex> ",
               lines: 20,
               scrollback_used: false,
             }),
@@ -4854,10 +5075,10 @@ describe("agent lifecycle tool handlers", () => {
       const spawn = (server as any)._registeredTools["spawn_agent"];
 
       const resultPromise = spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 2_000,
         },
         {} as any,
@@ -4930,9 +5151,9 @@ describe("agent lifecycle tool handlers", () => {
       const spawn = (server as any)._registeredTools["spawn_agent"];
 
       const resultPromise = spawn.handler(
-        {
+        { verbose: true,
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "boot-progress",
@@ -4978,7 +5199,7 @@ describe("agent lifecycle tool handlers", () => {
       socket.listTerminalMetadata = async () => ({ terminals: [] });
       const wrapped = socketMode ? new CmuxSelfHealingClient({ cli, socket: socket as any, socketPath: "/tmp/636-test.sock" }) : null;
       const server = wrapped ? createTrackedServer({ client: wrapped as any, stateDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null }) : createLifecycleServer(exec);
-      const result = (server as any)._registeredTools.spawn_agent.handler({ repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
+      const result = (server as any)._registeredTools.spawn_agent.handler({ verbose: true, repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
       await vi.advanceTimersByTimeAsync(3_000);
       expect(parseToolResult(await result).ok).toBe(true);
       expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
@@ -5038,7 +5259,7 @@ describe("agent lifecycle tool handlers", () => {
       });
       const server = createTrackedServer({ exec, stateDir: TEST_DIR, sessionIdentityResolver: () => null, worktreeExec });
       const result = (server as any)._registeredTools.spawn_agent.handler({
-        repo: "ralph", cli: "codex", role: "worker",
+        repo: "ralph", cli: "codex", effort: "medium", role: "worker",
         worktree: { name: "unrealized", branch: "wt/unrealized", ...(reuse ? { reuse: true } : {}) },
         boot_prompt_timeout_ms: 20,
       }, {});
@@ -5084,7 +5305,7 @@ describe("agent lifecycle tool handlers", () => {
       const resultPromise = spawn.handler(
         {
           repo: "ralph",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           role: "worker",
           worktree: {
             name: "launch-timeout",
@@ -5125,7 +5346,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const rename = (server as any)._registeredTools["update_surface"];
     const spawnResult = await spawn.handler(
-      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      { verbose: true, repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
     const agentId = (
@@ -5164,7 +5385,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const sendInput = internalToolForTests(server, "send_input");
     await spawn.handler(
-      { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+      { verbose: true, repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
     manifests.length = 0;
@@ -5195,7 +5416,7 @@ describe("agent lifecycle tool handlers", () => {
       const server = createLifecycleServer(mockExec);
       const spawn = (server as any)._registeredTools["spawn_agent"];
       await spawn.handler(
-        { repo: "cmuxlayer", model: "sonnet", cli: "claude" },
+        { verbose: true, repo: "cmuxlayer", model: "sonnet", cli: "claude" },
         {} as any,
       );
 
@@ -5228,7 +5449,7 @@ describe("agent lifecycle tool handlers", () => {
     const stop = internalToolForTests(server, "stop_agent");
 
     const result = await spawn.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "",
         cli: "cursor",
@@ -5291,10 +5512,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
       },
       {} as any,
@@ -5314,10 +5535,119 @@ describe("agent lifecycle tool handlers", () => {
     ).toBe(true);
   });
 
-  it("spawn_agent retries Enter when the launcher command remains pending at the shell", async () => {
+  it.each([600, 2400])("spawn_agent does not insert a leading newline when the CLI paints after %ims", async (paintMs) => {
+    vi.useFakeTimers();
+    try {
+      const capture = JSON.parse(readFileSync(new URL(
+        "./fixtures/spawn/codex-0.160.1-launcher-leading-newline.json", import.meta.url,
+      ), "utf8"));
+      expect(capture.frames.boot_draft).toContain(`›\n  ${capture.prompt}`);
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let launchedAt: number | null = null;
+      let launcherReturns = 0;
+      let draft = "";
+      let submitted = "";
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if (args.includes("send") || args.includes("set-buffer")) {
+          if (text.includes("voicelayerCodex -s")) command = text;
+          else if (text === capture.prompt) draft += text;
+          else return baseExec(cmd, args);
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          if (draft.includes(capture.prompt)) { submitted = draft; draft = ""; }
+          else {
+            launcherReturns += 1;
+            if (launchedAt === null) launchedAt = Date.now();
+            else draft += "\n"; // A queued second launcher Return reaches Codex.
+          }
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          // The accepted first Return has not repainted the terminal yet. The
+          // capture's shell echo is indistinguishable from an unsubmitted line.
+          const text = launchedAt === null || Date.now() - launchedAt < paintMs
+            ? capture.frames.shell_echo.replace(/cd .*$/, command)
+            : submitted
+              ? `OpenAI Codex\n› ${submitted}\nWorking (1s • esc to interrupt)\n› \nGPT-6-Luna low · /tmp/synthetic`
+              : `OpenAI Codex\n› ${draft}\nGPT-6-Luna low · /tmp/synthetic`;
+          return { stdout: JSON.stringify({ surface: "surface:new", text, lines: 80, scrollback_used: false }), stderr: "" };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: capture.prompt, boot_prompt_timeout_ms: 4_000,
+      }, {} as any);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = parseToolResult(await pending);
+      expect(launcherReturns).toBe(1);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(submitted).toBe(capture.prompt);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spawn_agent bounds launch readiness by the remaining budget after a slow screen read", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseExec = makeLifecycleExec();
+      let command = "";
+      let returnedAt = 0;
+      let completedAt = 0;
+      let slowReadDone = false;
+      let launcherReturns = 0;
+      const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
+        const text = String(args.at(-1) ?? "");
+        if ((args.includes("send") || args.includes("set-buffer")) &&
+            text.includes("voicelayerCodex -s")) {
+          command = text;
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("send-key") && args.includes("return")) {
+          launcherReturns += 1;
+          returnedAt ||= Date.now();
+          return { stdout: "{}", stderr: "" };
+        }
+        if (command && args.includes("read-screen")) {
+          if (returnedAt && !slowReadDone) {
+            slowReadDone = true;
+            await new Promise((resolve) => setTimeout(resolve, 750));
+          }
+          return {
+            stdout: JSON.stringify({ surface: "surface:new", text: `$ ${command}`,
+              lines: 80, scrollback_used: false }),
+            stderr: "",
+          };
+        }
+        return baseExec(cmd, args);
+      });
+      const server = createLifecycleServer(exec);
+      const pending = (server as any)._registeredTools.spawn_agent.handler({
+        repo: "voicelayer", cli: "codex", model: "codex", effort: "medium",
+        mcp_profile: "sterile", prompt: "remaining launch budget",
+        boot_prompt_timeout_ms: 1_000,
+      }, {} as any).then((result: unknown) => { completedAt = Date.now(); return result; });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(parseToolResult(await pending).ok).toBe(false);
+      const verification = readFileSync(join(TEST_DIR, "events.jsonl"), "utf8")
+        .trim().split("\n").map((line) => JSON.parse(line))
+        .find((entry) => entry.event_type === "spawn_agent" && entry.press_enter === true);
+      expect(verification).toMatchObject({ submit_verified: false, retry_count: 0 });
+      expect(Date.parse(verification.ts) - returnedAt).toBeGreaterThanOrEqual(750);
+      expect(Date.parse(verification.ts) - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(completedAt - returnedAt).toBeLessThanOrEqual(1_000);
+      expect(launcherReturns).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spawn_agent recovers a lost launcher Return after observing the pending shell", async () => {
     const promptPath = join(TEST_DIR, "mandate.md");
     writeFileSync(promptPath, "file prompt body", "utf8");
     let launcherReturnCount = 0;
+    const launcherReturnTimes: number[] = [];
     let promptDelivered = false;
     let lastSentText = "";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
@@ -5381,8 +5711,9 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
+          launcherReturnTimes.push(Date.now());
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
@@ -5395,7 +5726,7 @@ describe("agent lifecycle tool handlers", () => {
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
-                  ? `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`
+                  ? "$ voicelayerCodex -s --worker -E medium"
                   : "codex> ",
             lines: 20,
             scrollback_used: false,
@@ -5427,10 +5758,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "voicelayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 5_000,
       },
@@ -5442,6 +5773,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.workspace_id).toBe("workspace:voice");
     expect(launcherReturnCount).toBe(2);
+    expect(launcherReturnTimes[1] - launcherReturnTimes[0]).toBeGreaterThanOrEqual(2500);
     expect(promptDelivered).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
@@ -5470,7 +5802,7 @@ describe("agent lifecycle tool handlers", () => {
       let launcherReturns = 0;
       const exec = vi.fn().mockImplementation(async (cmd, args: string[]) => {
         const text = String(args.at(-1) ?? "");
-        if (args.includes("send") && text === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (args.includes("send") && text === "voicelayerCodex -s --worker -E medium") {
           launcherSent = true;
           return { stdout: "{}", stderr: "" };
         }
@@ -5486,7 +5818,7 @@ describe("agent lifecycle tool handlers", () => {
           return {
             stdout: JSON.stringify({
               surface: "surface:new",
-              text: `bash-5.2$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`,
+              text: "bash-5.2$ voicelayerCodex -s --worker -E medium",
               lines: 20,
               scrollback_used: false,
             }),
@@ -5502,12 +5834,12 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "voicelayer",
           model: "codex",
-          cli: "codex",
-          boot_prompt_timeout_ms: 20,
+          cli: "codex", effort: "medium",
+          boot_prompt_timeout_ms: 4_000,
         },
         {} as any,
       );
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       const parsed = parseToolResult(await resultPromise);
 
       expect(parsed.ok).toBe(false);
@@ -5515,16 +5847,16 @@ describe("agent lifecycle tool handlers", () => {
         "launcher command remained pending after Return",
       );
       expect(parsed.last_10_lines).toContain(
-        `bash-5.2$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}`,
+        "bash-5.2$ voicelayerCodex -s --worker -E medium",
       );
-      expect(launcherReturns).toBeGreaterThanOrEqual(1);
+      expect(launcherReturns).toBe(2);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it("spawn_agent recovers a human-prefixed launcher line with ctrl-u then retypes", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let humanPrefix = "ng ";
@@ -5571,7 +5903,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 400,
@@ -5588,7 +5920,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a clean pending launcher line", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -5631,7 +5963,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 5_000,
@@ -5646,7 +5978,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent treats an empty prompt after human Enter as already submitted", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let launched = false;
     let ctrlUCount = 0;
@@ -5678,7 +6010,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 5_000,
@@ -5692,7 +6024,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent errors when launcher-line corruption recovery is exhausted", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec({
       closeKeepsSurface: true,
       surfaceUuid: "11111111-2222-4333-8444-555555555555",
@@ -5840,13 +6172,13 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not ctrl-u a healthy booting pane with echoed launcher output", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let sent = false;
     let ctrlUCount = 0;
     let readyReads = 0;
     const bootScreen = [
-      "etanheyman ~  $ voicelayerCursor -s",
+      "etanheyman ~  $ voicelayerCursor -s --worker",
       "[4] 55084",
       "Starting Cursor Agent...",
     ].join("\n");
@@ -5885,7 +6217,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 5_000,
@@ -5899,7 +6231,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent recovers interleaved human characters inside the launcher command", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -5943,7 +6275,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 400,
@@ -5960,7 +6292,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent clears junk on the shell-readiness prompt before typing the launcher", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "wenfnng";
     let launched = false;
@@ -6004,7 +6336,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6025,7 +6357,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent ctrl-u during readiness prevents human Enter from executing typed garbage", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "sjnfjdnsf";
     let launched = false;
@@ -6085,7 +6417,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6105,7 +6437,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not claim a clean boot after clearing readiness junk", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "";
     let launched = false;
@@ -6141,7 +6473,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6157,7 +6489,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent recovers junk in both the readiness window and the typed launcher line", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "wenfnng";
     let launched = false;
@@ -6203,7 +6535,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6223,7 +6555,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent falls back to ctrl-c when readiness junk survives ctrl-u", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let composer = "gjrbgjbrgjrbgjrbgjrgbjrgbjrgbjrgb";
     let launched = false;
@@ -6270,7 +6602,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const parsed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6338,7 +6670,7 @@ describe("agent lifecycle tool handlers", () => {
   }, 10_000);
 
   it("spawn_agent does not reuse a failed spawn's readiness_recovered on a recycled surface id", async () => {
-    const command = withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCursor -s");
+    const command = "voicelayerCursor -s --worker";
     const baseExec = makeLifecycleExec();
     let spawnCount = 0;
     let composer = "";
@@ -6404,7 +6736,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const failed = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6424,7 +6756,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const reused = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "voicelayer",
           cli: "cursor",
           boot_prompt_timeout_ms: 2_000,
@@ -6507,7 +6839,7 @@ describe("agent lifecycle tool handlers", () => {
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("send-key")) {
-        if (lastSentText === withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")) {
+        if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
@@ -6520,7 +6852,7 @@ describe("agent lifecycle tool handlers", () => {
               ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
               : lastSentText === ""
                 ? "$ "
-                : `$ ${withRaisedNofileSoftLimit("GOLEM_ROLE=worker voicelayerCodex -s --worker")}\ncodex> `,
+                : "$ voicelayerCodex -s --worker -E medium\ncodex> ",
             lines: 20,
             scrollback_used: false,
           }),
@@ -6551,10 +6883,10 @@ describe("agent lifecycle tool handlers", () => {
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "voicelayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
         boot_prompt_timeout_ms: 1_000,
       },
@@ -6577,10 +6909,10 @@ describe("agent lifecycle tool handlers", () => {
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: promptPath,
       },
       {} as any,
@@ -6615,7 +6947,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "inline",
         boot_prompt_path: promptPath,
       },
@@ -6636,7 +6968,7 @@ describe("agent lifecycle tool handlers", () => {
       {
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         boot_prompt_path: join(TEST_DIR, "missing.md"),
       },
       {} as any,
@@ -6663,7 +6995,7 @@ describe("agent lifecycle tool handlers", () => {
       const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "readiness timeout contract",
         boot_prompt_timeout_ms: 90_000,
       });
@@ -6689,10 +7021,10 @@ describe("agent lifecycle tool handlers", () => {
       const spawn = (server as any)._registeredTools["spawn_agent"];
 
       const result = await spawn.handler(
-        {
+        { verbose: true,
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 20,
         },
         {} as any,
@@ -6745,7 +7077,7 @@ describe("agent lifecycle tool handlers", () => {
       const spawnArgs = spawn.inputSchema.parse({
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "default readiness timeout contract",
       });
       const resultPromise = spawn.handler(spawnArgs, {} as any);
@@ -6780,7 +7112,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "readiness failure identity",
           boot_prompt_timeout_ms: 20,
         },
@@ -6850,7 +7182,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "agent-launch timeout contract",
           boot_prompt_timeout_ms: 37,
         },
@@ -6922,7 +7254,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "fresh-shell timeout contract",
           boot_prompt_timeout_ms: 400,
         },
@@ -7108,13 +7440,13 @@ describe("agent lifecycle tool handlers", () => {
     const close = (server as any)._registeredTools["close_surface"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "",
         boot_prompt_path: promptPath,
-        boot_prompt_timeout_ms: 20,
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );
@@ -7165,7 +7497,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(String(closed.error ?? "")).not.toMatch(/Agent not found/i);
 
     const resumeResult = await spawn.handler(
-      { resume_agent_id: parsed.agent_id, force: true },
+      { verbose: true, resume_agent_id: parsed.agent_id, force: true },
       {} as any,
     );
     const resumed = parseToolResult(resumeResult);
@@ -7196,7 +7528,7 @@ describe("agent lifecycle tool handlers", () => {
     const readScreen = (server as any)._registeredTools["read_screen"];
     const getState = agentStateTool(server);
     const result = await spawn.handler(
-      { repo: "brainlayer", model: "codex", cli: "codex",
+      { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium",
         boot_prompt_path: promptPath, boot_prompt_timeout_ms: 20, verbose },
       {} as any,
     );
@@ -7206,23 +7538,30 @@ describe("agent lifecycle tool handlers", () => {
       expect(parsed).toMatchObject({ ok: false, error_code: "pane_died" });
     } else {
       expect(result.isError).not.toBe(true);
-      expect(parsed).toMatchObject({ ok: true, spawn_state: "boot_unsubmitted",
-        next_action: expect.stringContaining("never re-spawn"),
-        delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } });
+      expect(parsed).toMatchObject(verbose
+        ? { ok: true, spawn_state: "boot_unsubmitted",
+            next_action: expect.stringContaining("never re-spawn"),
+            delivered_chars: expect.any(Number), boot_prompt_receipt: { submit_verified: false } }
+        : { ok: true, state: "boot_unsubmitted", delivered: false,
+            warning: expect.stringContaining("never re-spawn") });
+      const action = parsed[verbose ? "next_action" : "warning"] as string;
       // #793: no attributed caller here, so no key Return is advised.
-      expect(parsed.next_action).not.toContain('mode:"key"');
-      expect(parsed.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
-      const call = parsed.next_action.match(/read_screen\((\{.*?\})\)/)?.[1];
+      expect(action).not.toContain('mode:"key"');
+      expect(action).not.toMatch(/retr(?:y|ies).*exhausted/i);
+      const call = action.match(/read_screen\((\{.*?\})\)/)?.[1];
       const sendArgs = JSON.parse(call!.replace(/([{,])(\w+):/g, '$1"$2":'));
       const sendResult = parseToolResult(await readScreen.handler(sendArgs, {} as any));
       expect(sendResult, JSON.stringify(sendResult)).toMatchObject({ ok: true });
-      expect(result.content[0]!.text).toMatch(
-        /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
-      );
+      if (verbose) expect(result.content[0]!.text).toMatch(
+        /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/);
+      else expect(JSON.parse(result.content[0]!.text)).toEqual(parsed);
       expect(manifests[0]?.agent_id).toBe(parsed.agent_id);
       const state = parseToolResult(
         await getState.handler({ agent_id: parsed.agent_id }, {} as any));
-      expect(state).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
+      expect(state).toMatchObject({
+        boot_prompt_pending: true, prompt_delivered: false,
+        boot_verify_started_at: expect.any(String),
+      });
       expect(state.state).not.toBe("error");
     }
   });
@@ -7273,7 +7612,7 @@ describe("agent lifecycle tool handlers", () => {
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_path: promptPath,
           boot_prompt_timeout_ms: 250,
           verbose,
@@ -7283,27 +7622,36 @@ describe("agent lifecycle tool handlers", () => {
     const result = parseToolResult(rawResult);
 
     expect(result.ok).toBe(true);
-    expect(rawResult.content[0]!.text).toMatch(
-      /^\{"ok":true,"spawn_state":"boot_unsubmitted","next_action":/,
+    const action = result[verbose ? "next_action" : "warning"] as string;
+    expect(result[verbose ? "spawn_state" : "state"]).toBe("pending_verify");
+    expect(action).toMatch(/Boot prompt is queued/i);
+    expect(action).not.toMatch(/retr(?:y|ies).*exhausted/i);
+    if (verbose) expect(rawResult.content[0]!.text).toMatch(
+      /^\{"ok":true,"spawn_state":"pending_verify","next_action":/,
     );
-    expect(result.spawn_state).toBe("boot_unsubmitted");
-    expect(result.next_action).toMatch(/Boot prompt submission was not verified/i);
-    expect(result.next_action).not.toMatch(/retr(?:y|ies).*exhausted/i);
     expect(result.surface_id).toBe("surface:new");
-    expect(result.boot_prompt_receipt).toMatchObject({
-      delivery_state: "queued",
-      delivered: false,
-      terminal: false,
-      typed: false,
-      submit_attempted: false,
-      submit_verified: null,
-    });
+    if (verbose) {
+      expect(result.boot_prompt_receipt).toMatchObject({
+        delivery_state: "queued",
+        delivered: false,
+        terminal: false,
+        typed: false,
+        submit_attempted: false,
+        submit_verified: null,
+      });
+    } else {
+      expect(Object.keys(result)).toHaveLength(6);
+      expect(result.delivered).toBe(false);
+      expect(JSON.parse(rawResult.content[0]!.text)).toEqual(result);
+    }
     const state = parseToolResult(
       await getState.handler({ agent_id: result.agent_id }, {} as any),
     );
     expect(state).toMatchObject({
       surface_id: "surface:new",
       boot_prompt_pending: true,
+      boot_verify_started_at: expect.any(String),
+      boot_submit_dispatched: false,
       prompt_delivered: false,
       submit_verified: null,
     });
@@ -7354,10 +7702,10 @@ describe("agent lifecycle tool handlers", () => {
 
     const result = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           boot_prompt_timeout_ms: 250,
         },
         {} as any,
@@ -7380,18 +7728,18 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const getState = agentStateTool(server);
 
-    const defaultArgs = spawn.inputSchema.parse({
+    const defaultArgs = spawn.inputSchema.parse({ verbose: true,
       repo: "cmuxlayer",
       model: "gpt-5.4",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       role: "implementor",
       authority: "worker",
       prompt: "default escalation",
     });
-    const optedOutArgs = spawn.inputSchema.parse({
+    const optedOutArgs = spawn.inputSchema.parse({ verbose: true,
       repo: "cmuxlayer",
       model: "gpt-5.4",
-      cli: "codex",
+      cli: "codex", effort: "medium",
       role: "implementor",
       authority: "worker",
       prompt: "debug CLI death",
@@ -7484,7 +7832,7 @@ describe("agent lifecycle tool handlers", () => {
     const list = (server as any)._registeredTools["list_agents"];
 
     await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -7538,7 +7886,7 @@ describe("agent lifecycle tool handlers", () => {
     const list = (server as any)._registeredTools["list_agents"];
 
     await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -7616,7 +7964,7 @@ describe("agent lifecycle tool handlers", () => {
     });
     expect(agent.state.observed_at_ms).toBeGreaterThanOrEqual(before);
     expect(agent.model).toMatchObject({
-      value: "gpt-5.6-sol xhigh",
+      value: "gpt-5.6-sol",
       source: "screen",
       observed_at_ms: agent.state.observed_at_ms,
     });
@@ -7712,6 +8060,32 @@ describe("agent lifecycle tool handlers", () => {
     await registeredTestTool(server, "list_agents").handler({}, {});
 
     expect(repair).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["security", "capacity", "hooks"])("silent-stall %s reports blocking disposition in list_agents", async kind => {
+    const stableUuid = "51111111-2222-4333-8444-555555555555";
+    const routeClient = makeUuidRouteClient([{ ref: "surface:stall", id: stableUuid, workspace_ref: "workspace:1" }]);
+    routeClient.setScreenText(kind === "security"
+      ? readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8")
+      : kind === "hooks" ? readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8")
+      : "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch");
+    const server = await createUuidRouteServer(routeClient, makeServerAgentRecord({ agent_id: "stall", surface_id: "surface:stall", surface_uuid: stableUuid, workspace_id: "workspace:1", state: "ready", cli: "codex" }));
+    const parsed = parseToolResult(await registeredTestTool(server, "list_agents").handler({ detail: "full" }, {}));
+    const agent = parsed.agents.find((candidate: { agent_id: string }) => candidate.agent_id === "stall");
+    if (kind === "security") {
+      expect(agent.blocked_on_prompt.value).toBe(false);
+      expect(agent.state.value).not.toBe("error");
+      const filtered = parseToolResult(await registeredTestTool(server, "list_agents").handler({ blocked_on_prompt: true }, {}));
+      expect(filtered.agents.map((candidate: { agent_id: string }) => candidate.agent_id)).not.toContain("stall");
+    } else if (kind === "hooks") {
+      expect(agent.blocked_on_prompt).toMatchObject({ value: true, source: "screen" });
+      const filtered = parseToolResult(await registeredTestTool(server, "list_agents").handler({ blocked_on_prompt: true }, {}));
+      expect(filtered.agents.map((candidate: { agent_id: string }) => candidate.agent_id)).toContain("stall");
+    } else {
+      expect(agent.state.value).toBe("error");
+      expect(agent.health.issues.join(" ")).toContain("model_at_capacity");
+    }
+    expect(routeClient.client.sendKey).not.toHaveBeenCalled();
   });
 
   it("list_agents publishes a tracked ready agent fallen back to shell as an unhealthy error", async () => {
@@ -8798,9 +9172,9 @@ describe("agent lifecycle tool handlers", () => {
         terminal: true,
         accepted: true,
         delivered: true,
-        queued_behind_turn: true,
       }),
     ]);
+    expect(parsed.receipts[0]).not.toHaveProperty("queued_behind_turn");
     expect(sendCalls).toHaveLength(1);
   });
 
@@ -8835,7 +9209,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed.receipts).toEqual([
       expect.objectContaining({
         agent_id: record.agent_id,
@@ -8872,7 +9247,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed).toMatchObject({
       target_count: 1,
       submitted_count: 0,
@@ -8889,9 +9265,9 @@ describe("agent lifecycle tool handlers", () => {
         }),
       ],
     });
-    expect(result.content[0].text).toContain("1 failed");
+
     expect(result.structuredContent).toHaveProperty("caller_agent_id", null);
-    expect(result.content[0].text).toBe("send_to targeting: 0 submitted, 0 queued, 1 failed, 0 skipped");
+
   }, 20_000);
 
   it("send_to rejects targeting combined with a singular agent id", async () => {
@@ -8942,7 +9318,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const parsed = parseToolResult(result);
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parsed.error_code).toBe("submit_unverified");
     expect(parsed).toMatchObject({
       target_count: 2,
       delivered_count: 1,
@@ -9062,7 +9439,7 @@ describe("agent lifecycle tool handlers", () => {
     const list = (server as any)._registeredTools["list_agents"];
 
     await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -9105,7 +9482,7 @@ describe("agent lifecycle tool handlers", () => {
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const list = (server as any)._registeredTools["list_agents"];
       const spawned = parseToolResult(await spawn.handler(
-        { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+        { verbose: true, repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
         {} as any,
       ));
       const engine = engineForTests(server) as AgentEngine;
@@ -9155,7 +9532,7 @@ describe("agent lifecycle tool handlers", () => {
           : baseExec(cmd, args));
       const server = createLifecycleServer(exec);
       const spawned = parseToolResult(await (server as any)._registeredTools["spawn_agent"].handler(
-        { repo: "brainlayer", model: "codex", cli: "codex" }, {} as any));
+        { repo: "brainlayer", model: "codex", cli: "codex", effort: "medium" }, {} as any));
       const engine = engineForTests(server) as AgentEngine;
       engine.getRegistry().set(spawned.agent_id, engine.stateMgr.updateRecord(spawned.agent_id, { state: registryState } as any));
       drafted = true;
@@ -9185,7 +9562,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
     const spawned = parseToolResult(await spawn.handler(
-      { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+      { verbose: true, repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
       {} as any,
     ));
     const engine = engineForTests(server) as AgentEngine;
@@ -9207,7 +9584,7 @@ describe("agent lifecycle tool handlers", () => {
     const spawn = (server as any)._registeredTools["spawn_agent"];
     const list = (server as any)._registeredTools["list_agents"];
     const spawned = parseToolResult(await spawn.handler(
-      { repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+      { verbose: true, repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
       {} as any,
     ));
     const engine = engineForTests(server) as AgentEngine;
@@ -9222,6 +9599,37 @@ describe("agent lifecycle tool handlers", () => {
     expect(row.state).toBe("working");
     expect(row).not.toHaveProperty("boot");
   });
+
+  it.each(["submitted", "failed"] as const)(
+    "#950 list_agents exposes a resolved pending boot as %s",
+    async (outcome) => {
+      const server = createLifecycleServer(mockExec);
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const list = (server as any)._registeredTools["list_agents"];
+      const spawned = parseToolResult(await spawn.handler(
+        { verbose: true, repo: "brainlayer", model: "sonnet", cli: "claude", prompt: "begin work" },
+        {} as any,
+      ));
+      const engine = engineForTests(server) as AgentEngine;
+      const reason = "Boot prompt verification deadline elapsed without submission evidence";
+      const resolved = engine.stateMgr.updateRecord(spawned.agent_id, {
+        state: outcome === "submitted" ? "working" : "error",
+        boot_prompt_pending: false,
+        prompt_delivered: outcome === "submitted",
+        submit_verified: outcome === "submitted",
+        boot_verify_started_at: new Date().toISOString(),
+        error: outcome === "failed" ? reason : null,
+      } as any);
+      engine.getRegistry().set(resolved.agent_id, resolved);
+
+      const parsed = parseToolResult(await list.handler({}, {} as any));
+      const row = parsed.agents.find((agent: any) => agent.agent_id === spawned.agent_id);
+      expect(row).toMatchObject(outcome === "failed"
+        ? { boot: "failed", boot_reason: reason }
+        : { state: "working", boot: "submitted" });
+      expect(row.state).not.toBe("booting");
+    },
+  );
 
   it("list_agents does not invert a UUID-backed row from its recycled cached ref", async () => {
     const stableUuid = "11111111-2222-4333-8444-555555555555";
@@ -9388,7 +9796,7 @@ describe("agent lifecycle tool handlers", () => {
     const { server, client } = await createBroadcastServer([record]);
     client.readScreen.mockResolvedValue({
       surface: record.surface_id,
-      text: "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (41s - esc to interrupt)",
+      text: "gpt-5.5 xhigh - 99% left - ~/Gits/cmuxlayer\nWorking (41s - esc to interrupt)\ncodex> ",
       lines: 20,
       scrollback_used: false,
     });
@@ -9430,7 +9838,7 @@ describe("agent lifecycle tool handlers", () => {
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -9468,7 +9876,7 @@ describe("agent lifecycle tool handlers", () => {
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -9503,10 +9911,10 @@ describe("agent lifecycle tool handlers", () => {
     const getState = agentStateTool(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "golems",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "prune skills",
       },
       {} as any,
@@ -9538,10 +9946,10 @@ describe("agent lifecycle tool handlers", () => {
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "golems",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
       },
       {} as any,
@@ -10164,10 +10572,10 @@ describe("agent lifecycle tool handlers", () => {
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "golems",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "worker",
       },
       {} as any,
@@ -10308,10 +10716,10 @@ codex>
     const getState = agentStateTool(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
       },
       {} as any,
     );
@@ -10391,10 +10799,10 @@ codex>
     const engine = engineForTests(server);
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "golems",
         model: "codex",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         prompt: "prune skills",
       },
       {} as any,
@@ -10536,7 +10944,7 @@ codex>
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const sendTo = (server as any)._registeredTools[toolName];
       const spawnResult = await spawn.handler(
-        { repo: "test", model: "sonnet", cli: "claude" },
+        { verbose: true, repo: "test", model: "sonnet", cli: "claude" },
         {} as any,
       );
       const agentId = parseToolResult(spawnResult).agent_id as string;
@@ -10572,7 +10980,7 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -10610,7 +11018,7 @@ codex>
     expect(parsed.ok).toBe(true);
     expect(parsed.agent_id).toBe(agentId);
     expect(parsed.queued_behind_turn).toBe(true);
-    expect(parsed.warnings).toContain("cli_fallback_active");
+    expect(parsed).not.toHaveProperty("warnings");
     expect(deliveredText).toBe("interject while working");
     expect(sendCalls[0]?.[1]).toEqual(
       expect.arrayContaining(["--workspace", "workspace:1"]),
@@ -10797,7 +11205,7 @@ codex>
       },
     ]);
     routeClient.setScreenText(
-      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)",
+      "OpenAI Codex\nModel: gpt-5.5\nWorking (1s - esc to interrupt)\ncodex> ",
     );
     const record = makeServerAgentRecord({
       agent_id: "healthy-target-during-unrelated-churn",
@@ -11156,10 +11564,10 @@ codex>
     });
 
     const result = await registeredTestTool(server, "spawn_agent").handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
         model: "gpt-5.5",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         role: "implementor",
         workspace: "workspace:B",
         force_new: true,
@@ -11232,10 +11640,10 @@ codex>
       { workspaceId: callerWorkspaceId },
       () =>
         registeredTestTool(server, "spawn_agent").handler(
-          {
+          { verbose: true,
             repo: "cmuxlayer",
             model: "gpt-5.5",
-            cli: "codex",
+            cli: "codex", effort: "medium",
             role: "implementor",
             force_new: true,
           },
@@ -12681,7 +13089,7 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -12755,7 +13163,7 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -12810,10 +13218,10 @@ codex>
       const spawn = (server as any)._registeredTools["spawn_agent"];
       const sendTo = (server as any)._registeredTools["send_to"];
       const spawnResult = await spawn.handler(
-        {
+        { verbose: true,
           repo: "cmuxlayer",
           model: "gpt-5.6-sol",
-          cli: "codex",
+          cli: "codex", effort: "medium",
         },
         {} as any,
       );
@@ -13200,7 +13608,7 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -13312,7 +13720,7 @@ codex>
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -13334,7 +13742,8 @@ codex>
     );
 
     expect(result).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivery_state: "rescued",
       terminal: true,
       delivered: false,
@@ -13404,7 +13813,7 @@ codex>
         {
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -13426,7 +13835,8 @@ codex>
     );
 
     expect(result).toMatchObject({
-      ok: true,
+      ok: false,
+      error_code: "submit_unverified",
       delivery_state: "rescued",
       terminal: true,
       delivered: false,
@@ -13494,10 +13904,10 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
     const spawned = parseToolResult(
       await spawn.handler(
-        {
+        { verbose: true,
           repo: "brainlayer",
           model: "codex",
-          cli: "codex",
+          cli: "codex", effort: "medium",
           prompt: "initial work",
         },
         {} as any,
@@ -13550,6 +13960,9 @@ codex>
       if (!collectReceiverInput) {
         return baseExec(cmd, args);
       }
+      if (args.includes("read-screen")) {
+        return { stdout: JSON.stringify({ surface: "surface:1", text: `Claude Code\n${submittedMessages.join("\n")}\n❯ ${composer}`, lines: 30, scrollback_used: false }), stderr: "" };
+      }
       if (args.includes("set-buffer")) {
         const nameIndex = args.indexOf("--name");
         const name = nameIndex >= 0 ? args[nameIndex + 1] : "default";
@@ -13581,7 +13994,7 @@ codex>
     const sendTo = (server as any)._registeredTools["send_to"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -13638,7 +14051,7 @@ codex>
     const waitFor = (server as any)._registeredTools["wait_for"];
 
     const spawnResult = await spawn.handler(
-      {
+      { verbose: true,
         repo: "brainlayer",
         model: "sonnet",
         cli: "claude",
@@ -14432,7 +14845,8 @@ codex>
       {},
     );
 
-    expect(result.isError).toBeFalsy();
+    expect(result.isError).toBe(true);
+    expect(parseToolResult(result).error_code).toBe("submit_unverified");
     expect(get).not.toHaveBeenCalled();
   });
 
@@ -14711,9 +15125,9 @@ describe("auto-focus discipline (focus target before split, restore after render
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -14730,9 +15144,9 @@ describe("auto-focus discipline (focus target before split, restore after render
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:2",
         force_new: true,
       },
@@ -14780,6 +15194,7 @@ describe("auto-focus discipline (focus target before split, restore after render
           {
             repo: "cmuxlayer",
             cli,
+            ...(cli === "codex" ? { effort: "medium" } : {}),
             placement,
             workspace: "workspace:1",
             force_new: true,
@@ -14924,9 +15339,9 @@ describe("auto-focus discipline (focus target before split, restore after render
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -14952,9 +15367,9 @@ describe("auto-focus discipline (focus target before split, restore after render
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
-      {
+      { verbose: true,
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:1",
         force_new: true,
       },
@@ -14998,7 +15413,7 @@ describe("auto-focus discipline (focus target before split, restore after render
     const result = await tool.handler(
       {
         repo: "cmuxlayer",
-        cli: "codex",
+        cli: "codex", effort: "medium",
         workspace: "workspace:2",
         force_new: true,
       },

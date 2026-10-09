@@ -3239,10 +3239,17 @@ describe("Agent reconcile", () => {
         agent_id: "a1",
         state: "working",
         surface_id: "surface:42",
+        // #926: a done row with a session keeps a binding only by UUID.
+        surface_uuid: "c3c3c3c3-1111-4222-8333-444444444444",
         cli_session_id: "session-a1",
       }),
     );
-    liveSurfaces = [makeSurface("surface:42")];
+    liveSurfaces = [
+      {
+        ...makeSurface("surface:42"),
+        id: "c3c3c3c3-1111-4222-8333-444444444444",
+      },
+    ];
     writeHeartbeat("a1", inboxOpts);
     await engine.getRegistry().reconstitute();
 

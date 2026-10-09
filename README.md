@@ -41,6 +41,18 @@ not assume a fixed repository layout. See
 [docs/guides/registry-optional-spawn.md](docs/guides/registry-optional-spawn.md) for how each
 lane behaves.
 
+## Raise the open-files limit for agent CLIs
+
+Agent CLIs open many files, while macOS login shells can start with a low soft
+open-files limit. If you use repoGolem launchers, put this POSIX shell snippet
+in a `global.prelaunch` entry so it runs before each agent CLI. You can also
+put it in your shell rc file. It raises a low soft limit up to the hard limit,
+capped at 65536, and never lowers an existing soft limit.
+
+```sh
+cmux_nf_s=$(ulimit -Sn); cmux_nf_h=$(ulimit -Hn); [ "$cmux_nf_s" = unlimited ] || [ "$cmux_nf_s" -ge 65536 ] || { [ "$cmux_nf_h" = unlimited ] && cmux_nf_h=65536; [ "$cmux_nf_h" -gt 65536 ] && cmux_nf_h=65536; ulimit -Sn "$cmux_nf_h"; }
+```
+
 Add to your MCP config:
 
 **Codex CLI / T3 Code**
@@ -80,7 +92,13 @@ cmuxlayer never answers a prompt chooser on an agent's behalf. It detects the
 chooser, marks the agent `blocked_on_prompt`, and escalates without sending a
 key.
 
+`CMUXLAYER_FILE_DELIVERY_TICKETS=1` opts into public delivery-failure auto-filing with allowlisted bodies; full evidence stays in local tickets by default.
+
 > **Config locations:** Codex CLI / T3 Code `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) | Claude Code `.mcp.json` or `claude mcp add cmuxlayer -s user -- cmuxlayer` | Cursor `.cursor/mcp.json` | VS Code `.vscode/mcp.json` | Claude Desktop — see [MCP docs](https://modelcontextprotocol.io/quickstart/user) for platform-specific paths
+
+## Drive panes through the MCP, not the raw `cmux` CLI
+
+Use cmuxlayer's MCP tools for pane operations. Calling the raw `cmux` CLI yourself bypasses stable-UUID guards, draft ownership, delivery receipts, tailer reaping, and placement. After a cmux restart, reconnect cmuxlayer before any pane operation: run `/mcp reconnect cmuxlayer` in Claude Code, restart Codex CLI or T3 Code, or use **MCP: List Servers → Restart Server** in VS Code. Use the equivalent MCP reconnect control in other clients.
 
 ## What you can do
 
@@ -97,6 +115,8 @@ By default cmuxLayer registers exactly 10 tools, and all 10 are callable through
 
 For managed agents, use the agent-first path: `list_agents` to find the target, `send_to` to deliver work by `agent_id`, then `wait_for` when you need completion. `send_to` also preserves the registry-independent escape hatch: use `mode:"surface"`, `mode:"command"`, or `mode:"key"` with a raw surface ref for shells, launch/resume commands, and stuck-pane recovery.
 
+Busy Codex messages use Return to steer at the next tool boundary. Pass `codex_busy_mode:"queue"` to `send_to` only for deliberate Tab delivery after the turn. `steer_pending` and `queued` both mean `delivered:false`; use `wait_for({delivery_id})` for confirmation. After 10 minutes, unresolved pending deliveries raise `needs_attention` and a parent alert without interruption or replay. Set `CMUXLAYER_DELIVERY_ATTENTION_MS` to a positive integer in milliseconds to change that threshold.
+
 See [Agent Routing and Handling Workflow](docs/guides/agent-routing-and-handling.md) for the full operator playbook, including stuck surface recovery and safe `/mcp` menu reconnects.
 
 ## MCP tools (10 registered and callable)
@@ -107,7 +127,7 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 
 | Tool | What it does |
 |------|-------------|
-| `spawn_agent` | Spawn a CLI agent and return an `agent_id` for routing |
+| `spawn_agent` | Spawn or resume; default receipt: `ok`, `agent_id`, `surface_id`, `state`, `delivered`, optional `warning` (at most six fields). Use `verbose:true` for contract and diagnostics; failures keep full detail |
 | `report_to_parent` | Raise a short blocker to the managed agent's registry parent |
 | `send_to` | Send by agent ID or raw surface using `mode:"agent"\|"surface"\|"command"\|"key"` |
 | `read_screen` | Read terminal output with parsed agent status |
@@ -117,6 +137,8 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `close_surface` | Close one surface, managed agent, or workspace, with live-agent guards |
 | `update_surface` | Move or rename one terminal surface |
 | `list_surfaces` | List all surfaces across workspaces |
+
+`control_health` reports `cmux_fds` for detected cmux.app processes and warns when open descriptors reach 4096; set `CMUXLAYER_CMUX_FD_WARN` to a positive integer to change that threshold.
 
 These 10 are the whole surface by default: setting `CMUXLAYER_DEFAULT_PALETTE` restricts the initially registered tools to the ones it names and adds `expand_palette`, which registers the rest on demand.
 

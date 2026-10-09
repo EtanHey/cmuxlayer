@@ -30,6 +30,7 @@ import {
   SendToArgsSchema,
 } from "../schemas.js";
 import {
+  type SubmitVerificationFailureReason,
   deliveryRpcMethodsFromError,
   deliveryTypedFromError,
   deliverySubmitDispatchedFromError,
@@ -501,8 +502,9 @@ export interface SendToToolDeps {
   canonicalWorkspaceRef: (candidate?: string) => Promise<string | undefined>;
   collectDeliveryEvidence: (agentId: string) => Promise<{ registry_state: null; screen: null; state_conflict: boolean; health: undefined; } | { registry_state: AgentState; screen: { status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; model: string | null; done_signal: string | null; actions: string[]; } | null; state_conflict: boolean; health: { screen_observation?: { observed_at_ms: number; status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; control_state: ParsedControlPlaneState; model: string | null; } | undefined; status: AgentHealthStatus; issue_codes: AgentHealthIssueCode[]; issues: string[]; issue_severities?: Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>>; reconciled_state?: AgentState; screen_confirmed_state?: AgentState; recommended_actions?: string[]; }; }>;
   collectTargetRecords: () => Promise<AgentRecord[]>;
-  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | null; }>;
+  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; codex_busy_mode?: "steer" | "queue"; retry_owned_draft?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ retry_settled?: boolean; queue_verified?: boolean; queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null; }>;
   engine: AgentEngine;
+  callerOwnsTypedDraft: (opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null; text?: string; deliveryId?: string }) => boolean;
   observePausedTarget: (agent: AgentRecord | null | undefined) => Promise<{ paused: boolean; source: string; }>;
   /** send_input / send_command / send_key as plain functions (CX-3 S7). */
   rawSend: {
@@ -525,6 +527,7 @@ export function registerSendToTool(
     collectDeliveryEvidence,
     collectTargetRecords,
     deliverAgentInput,
+    callerOwnsTypedDraft,
     engine,
     observePausedTarget,
     rawSend,
@@ -533,7 +536,7 @@ export function registerSendToTool(
   // 17. send_to
   server.tool(
     "send_to",
-    "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode. A clean verified success returns up to six mode-specific core fields by default: text/command mode returns ok, retry_count, target identity, delivery_state, submitted, and delivery_id when available; key mode returns ok, retry_count, surface, key, submit_verified, and submit_verification_reason. A degraded transport, queued-behind-turn landing, or deduplicated send adds its warning or status field. Pass verbose=true for the full legacy receipt; non-success keeps full diagnostics automatically.",
+    "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode; for shell commands use mode:command. Text success requires a verified submit or new matching queue proof. Otherwise ok=false with submit_unverified retains pending verification and ownership for retries without retyping. Verified text success returns only ok, target identity, delivery_id, delivery_state, submitted, caller_agent_id, and queued_behind_turn when applicable. Key success returns its key verification fields. Pass verbose=true for full diagnostics; failures always retain them.",
     {
       ...SendToArgsSchema.shape,
       text: SendToArgsSchema.shape.text.describe(
@@ -615,6 +618,7 @@ export function registerSendToTool(
               chunk_size: args.chunk_size,
               background: args.background,
               press_enter: args.press_enter,
+              codex_busy_mode: args.codex_busy_mode,
               rename_to_task: args.rename_to_task,
               allow_long_inline: args.allow_long_inline,
               _cmuxlayer_source_event: "send_to",
@@ -830,7 +834,7 @@ export function registerSendToTool(
               text: args.text,
               press_enter: args.press_enter,
             });
-            if (duplicate) {
+            if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: agent.surface_id, workspace: agent.workspace_id ?? undefined, stableSurfaceIdentity: agent.surface_uuid, text: args.text, deliveryId: duplicate.delivery_id }))) {
               mutableReceipts.push({
                 ...resolutionMetadata,
                 agent_id: agent.agent_id,
@@ -842,6 +846,7 @@ export function registerSendToTool(
                   submit_attempted: duplicate.press_enter,
                   submit_dispatched: duplicate.submit_dispatched,
                   submit_verified: duplicate.submit_verified,
+                  queue_verified: duplicate.composer_accepted === true,
                   retry_count: duplicate.retry_count,
                   rpc_methods: duplicate.rpc_methods ?? [],
                   needs_attention: duplicate.needs_attention,
@@ -851,12 +856,13 @@ export function registerSendToTool(
               });
               continue;
             }
-            const deliveryId = randomUUID();
-            engine.acceptPendingVerify({
+            const deliveryId = duplicate?.delivery_state === "pending_verify" ? duplicate.delivery_id : randomUUID();
+            if (!duplicate) engine.acceptPendingVerify({
               delivery_id: deliveryId,
               agent_id: agent.agent_id,
               text: args.text,
               press_enter: args.press_enter,
+              codex_busy_mode: args.codex_busy_mode,
               source_event: "send_to",
               retry_count: 0,
             });
@@ -867,6 +873,7 @@ export function registerSendToTool(
                 agent_id: agent.agent_id,
                 text: args.text,
                 press_enter: args.press_enter,
+                codex_busy_mode: args.codex_busy_mode,
                 source_event: "send_to",
               });
               mutableReceipts.push({
@@ -890,18 +897,22 @@ export function registerSendToTool(
                 agent_id: agent.agent_id,
                 text: args.text,
                 press_enter: args.press_enter,
+                codex_busy_mode: args.codex_busy_mode,
                 allow_busy: args.allow_busy,
+                retry_owned_draft: Boolean(duplicate),
                 source_event: "send_to",
                 delivery_id: deliveryId,
               });
-              const accepted =
+              const accepted = delivery.retry_settled ? engine.getDeliveryReceipt(deliveryId) :
                 delivery.delivery === "queued" ||
+                delivery.delivery === "steer_pending" ||
                 delivery.delivery === "queued_followup"
                   ? engine.acceptComposerQueue({
                       delivery_id: deliveryId,
                       agent_id: agent.agent_id,
                       text: args.text,
                       press_enter: args.press_enter,
+                      codex_busy_mode: args.codex_busy_mode,
                       source_event: "send_to",
                       retry_count: delivery.retry_count,
                       rpc_methods: delivery.rpc_methods,
@@ -915,6 +926,7 @@ export function registerSendToTool(
                         agent_id: agent.agent_id,
                         text: args.text,
                         press_enter: args.press_enter,
+                        codex_busy_mode: args.codex_busy_mode,
                         source_event: "send_to",
                         retry_count: delivery.retry_count,
                         rpc_methods: delivery.rpc_methods,
@@ -927,6 +939,7 @@ export function registerSendToTool(
                           agent_id: agent.agent_id,
                           text: args.text,
                           press_enter: args.press_enter,
+                          codex_busy_mode: args.codex_busy_mode,
                           source_event: "send_to",
                           delivery_state: "rescued",
                           terminal: true,
@@ -944,6 +957,7 @@ export function registerSendToTool(
                             agent_id: agent.agent_id,
                             text: args.text,
                             press_enter: args.press_enter,
+                            codex_busy_mode: args.codex_busy_mode,
                             source_event: "send_to",
                             delivery_state: "submitted",
                             terminal: true,
@@ -969,6 +983,8 @@ export function registerSendToTool(
                   rpc_methods: delivery.rpc_methods,
                   submit_dispatched: delivery.submit_dispatched,
                   queued_behind_turn: delivery.queued_behind_turn,
+                  queue_verified: delivery.queue_verified,
+                  submit_verification_reason: delivery.submit_verification_reason,
                 }),
                 accepted: true,
               });
@@ -998,6 +1014,7 @@ export function registerSendToTool(
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
+                  codex_busy_mode: args.codex_busy_mode,
                   source_event: "send_to",
                 });
                 mutableReceipts.push({
@@ -1022,6 +1039,7 @@ export function registerSendToTool(
                   agent_id: agent.agent_id,
                   text: args.text,
                   press_enter: args.press_enter,
+                  codex_busy_mode: args.codex_busy_mode,
                   source_event: "send_to",
                   delivery_state: "failed",
                   terminal: true,
@@ -1076,6 +1094,7 @@ export function registerSendToTool(
           const queuedCount = receipts.filter(
             (receipt) => receipt.delivery_state === "queued",
           ).length;
+          const steerPendingCount = receipts.filter(receipt => receipt.delivery_state === "steer_pending").length;
           const pendingVerifyCount = receipts.filter(
             (receipt) => receipt.delivery_state === "pending_verify",
           ).length;
@@ -1093,6 +1112,7 @@ export function registerSendToTool(
             resolved_target_count: resolvedTargets.length,
             submitted_count: submittedCount,
             queued_count: queuedCount,
+            steer_pending_count: steerPendingCount,
             pending_verify_count: pendingVerifyCount,
             delivered_count: submittedCount,
             failed_count: failedCount,
@@ -1108,7 +1128,7 @@ export function registerSendToTool(
             );
           }
           return okFormatted(
-            `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued${pendingVerifyCount ? `, ${pendingVerifyCount} pending verify` : ""}, ${failedCount} failed, ${skippedCount} skipped`,
+            `send_to targeting: ${submittedCount} submitted, ${queuedCount} queued, ${steerPendingCount} steer pending${pendingVerifyCount ? `, ${pendingVerifyCount} pending verify` : ""}, ${failedCount} failed, ${skippedCount} skipped`,
             data,
           );
         }
@@ -1132,7 +1152,7 @@ export function registerSendToTool(
           text: args.text,
           press_enter: args.press_enter,
         });
-        if (duplicate) {
+        if (duplicate && (duplicate.delivery_state !== "pending_verify" || !callerOwnsTypedDraft({ surface: targetAgent?.surface_id ?? "", workspace: targetAgent?.workspace_id ?? undefined, stableSurfaceIdentity: targetAgent?.surface_uuid, text: args.text, deliveryId: duplicate.delivery_id }))) {
           const data = {
             accepted: true,
             agent_id: agentId,
@@ -1144,6 +1164,7 @@ export function registerSendToTool(
               submit_attempted: duplicate.press_enter,
               submit_dispatched: duplicate.submit_dispatched,
               submit_verified: duplicate.submit_verified,
+              queue_verified: duplicate.composer_accepted === true,
               retry_count: duplicate.retry_count,
               rpc_methods: duplicate.rpc_methods ?? [],
               needs_attention: duplicate.needs_attention,
@@ -1156,12 +1177,13 @@ export function registerSendToTool(
             data,
           );
         }
-        const deliveryId = randomUUID();
-        engine.acceptPendingVerify({
+        const deliveryId = duplicate?.delivery_state === "pending_verify" ? duplicate.delivery_id : randomUUID();
+        if (!duplicate) engine.acceptPendingVerify({
           delivery_id: deliveryId,
           agent_id: agentId,
           text: args.text,
           press_enter: args.press_enter,
+          codex_busy_mode: args.codex_busy_mode,
           source_event: "send_to",
           retry_count: 0,
         });
@@ -1172,6 +1194,7 @@ export function registerSendToTool(
             agent_id: agentId,
             text: args.text,
             press_enter: args.press_enter,
+            codex_busy_mode: args.codex_busy_mode,
             source_event: "send_to",
           });
           const data = {
@@ -1213,7 +1236,9 @@ export function registerSendToTool(
             agent_id: agentId,
             text: args.text,
             press_enter: args.press_enter,
+            codex_busy_mode: args.codex_busy_mode,
             allow_busy: args.allow_busy,
+            retry_owned_draft: Boolean(duplicate),
             source_event: "send_to",
             delivery_id: deliveryId,
             timings,
@@ -1245,6 +1270,7 @@ export function registerSendToTool(
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
+              codex_busy_mode: args.codex_busy_mode,
               source_event: "send_to",
             });
             const data = {
@@ -1272,6 +1298,7 @@ export function registerSendToTool(
               agent_id: agentId,
               text: args.text,
               press_enter: args.press_enter,
+              codex_busy_mode: args.codex_busy_mode,
               source_event: "send_to",
               delivery_state: "failed",
               terminal: true,
@@ -1319,14 +1346,16 @@ export function registerSendToTool(
         } finally {
           finishEventLoopDelay();
         }
-        const receipt =
+        const receipt = delivery.retry_settled ? engine.getDeliveryReceipt(deliveryId) :
           delivery.delivery === "queued" ||
+          delivery.delivery === "steer_pending" ||
           delivery.delivery === "queued_followup"
             ? engine.acceptComposerQueue({
                 delivery_id: deliveryId,
                 agent_id: agentId,
                 text: args.text,
                 press_enter: args.press_enter,
+                codex_busy_mode: args.codex_busy_mode,
                 source_event: "send_to",
                 retry_count: delivery.retry_count,
                 rpc_methods: delivery.rpc_methods,
@@ -1340,6 +1369,7 @@ export function registerSendToTool(
                   agent_id: agentId,
                   text: args.text,
                   press_enter: args.press_enter,
+                  codex_busy_mode: args.codex_busy_mode,
                   source_event: "send_to",
                   retry_count: delivery.retry_count,
                   rpc_methods: delivery.rpc_methods,
@@ -1352,6 +1382,7 @@ export function registerSendToTool(
                     agent_id: agentId,
                     text: args.text,
                     press_enter: args.press_enter,
+                    codex_busy_mode: args.codex_busy_mode,
                     source_event: "send_to",
                     delivery_state: "rescued",
                     terminal: true,
@@ -1368,6 +1399,7 @@ export function registerSendToTool(
                       agent_id: agentId,
                       text: args.text,
                       press_enter: args.press_enter,
+                      codex_busy_mode: args.codex_busy_mode,
                       source_event: "send_to",
                       delivery_state: "typed",
                       terminal: true,
@@ -1384,6 +1416,7 @@ export function registerSendToTool(
                         agent_id: agentId,
                         text: args.text,
                         press_enter: args.press_enter,
+                        codex_busy_mode: args.codex_busy_mode,
                         source_event: "send_to",
                         delivery_state: "submitted",
                         terminal: true,
@@ -1408,6 +1441,8 @@ export function registerSendToTool(
           rpc_methods: delivery.rpc_methods,
           submit_dispatched: delivery.submit_dispatched,
           queued_behind_turn: delivery.queued_behind_turn,
+          queue_verified: delivery.queue_verified,
+          submit_verification_reason: delivery.submit_verification_reason,
           timings_ms: timings,
         });
         failedReceiptPayload = { ...publicReceipt };

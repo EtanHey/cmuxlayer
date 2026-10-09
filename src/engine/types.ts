@@ -44,6 +44,7 @@ import type {
 } from "../surface-topology.js";
 import type { TransportHealthSignal } from "../cmux-transport-self-heal.js";
 import type { InboxOpts } from "../inbox.js";
+import type { SessionProcessScanner } from "../util/pid-alive.js";
 
 /** Live-derived state for a record, injected by the server (F1). */
 export type LiveStateResolver = (agent: AgentRecord) => LiveAgentState | null;
@@ -68,6 +69,7 @@ export type AgentDeliveryState =
   | "typed"
   | "submitted"
   | "queued"
+  | "steer_pending"
   | "queued_followup"
   | "rescued"
   | "failed"
@@ -81,6 +83,7 @@ export interface AgentDeliveryReceipt {
   text: string;
   press_enter: boolean;
   source_event: DeliveryEventType;
+  codex_busy_mode?: "steer" | "queue";
   delivery_state: AgentDeliveryState;
   terminal: boolean;
   created_at: string;
@@ -94,6 +97,7 @@ export interface AgentDeliveryReceipt {
   typed?: boolean;
   /** A submit key reached the target through either socket or CLI transport. */
   submit_dispatched?: boolean;
+  submit_evidence?: import("../delivery/receipts.js").SubmitEvidence | null;
   /** An uncertain recovered boot Return; passive confirmation completes boot. */
   boot_recovery?: boolean;
   /** The exact boot generation whose pointer the receipt verifies. */
@@ -165,6 +169,7 @@ export type DeliveryVerifyObservation = {
   outcome: "pending" | "delivered" | "failed_confirmed";
   submit_verified?: boolean | null;
   reason?: string;
+  delivery_state?: "queued" | "steer_pending";
   evidence?: Record<string, unknown>;
 };
 
@@ -196,6 +201,7 @@ export type DeliverySubmitter = (receipt: AgentDeliveryReceipt) => Promise<{
   delivery?:
     | "submitted"
     | "queued"
+    | "steer_pending"
     | "queued_followup"
     | "rescued"
     | "pending_verify";
@@ -400,6 +406,8 @@ export interface AgentEngineOptions {
   selfRegistrationSessionLookup?: (
     sessionId: string,
   ) => SelfRegistrationSessionEntry | null;
+  /** #926: resume's process-table proof; defaults to a `ps` argv scan. */
+  sessionProcessScanner?: SessionProcessScanner;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -414,6 +422,15 @@ export interface AgentEngineOptions {
     assertSurfaceBindingCurrent: () => Promise<void>;
   }) => Promise<void>;
   inboxOpts?: InboxOpts;
+  /**
+   * #911: reap the mailbox tailers of gone agents from the sweep. Unset (bare
+   * and test construction) runs no reaper and no `ps`. `recordAuthority`: this
+   * registry is the fleet's registry for `inboxOpts`, so a tailer whose agent
+   * has no record at all is an orphan. False where the state dir and inbox dir
+   * are not a pair (a bench daemon on a scratch state dir must never read the
+   * real fleet's tailers as orphans).
+   */
+  inboxTailReaper?: { recordAuthority: boolean };
   seatRegistry?: SeatRegistry | null;
   seatRegistryPath?: string;
   /**
@@ -458,6 +475,8 @@ export interface AgentEngineOptions {
   /** How long a pending_verify delivery may stay nonterminal before failed_confirmed. */
   deliveryVerifyDeadlineMs?: number;
   deliveryQueueDeadlineMs?: number;
+  /** Alert on queued/steer-pending age, default 10min; CMUXLAYER_DELIVERY_ATTENTION_MS. */
+  deliveryAttentionMs?: number;
   /**
    * Local evidence-ticket directory. Omitted/null disables tickets so bare
    * construction never writes ~/.cmuxlayer/tickets or calls gh. Production
@@ -549,6 +568,9 @@ export const SPAWN_SESSION_CAPTURE_POLL_MS = 50;
 export const CHANNEL_MARKER_REAP_INTERVAL_MS = 60 * 60 * 1_000;
 
 export const CHANNEL_MARKER_REAP_RETRY_MS = 60 * 1_000;
+
+/** #911: one `ps` per minute, plus the first sweep after a daemon start. */
+export const INBOX_TAIL_REAP_INTERVAL_MS = 60 * 1_000;
 
 export const STOP_POST_CONDITION_POLL_MS = 50;
 
@@ -764,6 +786,12 @@ export interface AgentEngineClient {
   getTransportHealth?(): TransportHealthSignal | null;
   /** Native and CLI clients accept a stable UUID as the read-screen target. */
   supportsStableSurfaceReads?: boolean;
+  /** One shared input transaction; its bound key writer avoids nested locks. */
+  withSurfaceWrite?<T>(
+    surface: string,
+    run: (sendKey: (key: string) => Promise<void>) => Promise<T>,
+    opts: { workspace?: string; stableSurfaceIdentity?: string | null },
+  ): Promise<T>;
   listWindows?(): Promise<{ windows: CmuxWindow[] }>;
   listAllWorkspaces?(): Promise<AllWindowWorkspaceEnumeration>;
   listWorkspaces(opts?: {

@@ -118,6 +118,11 @@ function baseDirOf(opts: InboxOpts | undefined): string {
   return opts?.baseDir ?? join(homedir(), ".cmux", "agents");
 }
 
+/** The directory that holds one subdirectory per agent's mailbox. */
+export function inboxBaseDir(opts?: InboxOpts): string {
+  return baseDirOf(opts);
+}
+
 function nowOf(opts: InboxOpts | undefined): number {
   return (opts?.now ?? Date.now)();
 }
@@ -197,9 +202,13 @@ export async function reapInboxTail(
   if (!match || !Number.isSafeInteger(pid) || pid <= 1) {
     return { tail_reaped: false, tail_error: "tail_invalid" };
   }
-  const marker = `cmuxlayer-inbox-tail:${match[2]}`;
+  const token = match[2];
+  const legacy = `cmuxlayer-inbox-tail:${token}`;
+  const titled = `cmuxlayer-inbox-tail ${agentId} ${token}`;
   const belongsToTail = (command: string | null) =>
-    command === marker || command?.startsWith(`${marker} `) === true;
+    [legacy, titled].some(
+      (marker) => command === marker || command?.startsWith(`${marker} `) === true,
+    );
   let command: string | null;
   try {
     command = await processCommand(pid);

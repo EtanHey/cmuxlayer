@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { installToolRegistration } from "../src/mcp/registration.js";
+import { ok } from "../src/mcp/tool-result.js";
 
 const text = (value: string) => ({
   content: [{ type: "text" as const, text: value }],
 });
 
-function install() {
+function install(client: Record<string, unknown> = {}) {
   const server = new McpServer({ name: "registration-test", version: "0.0.0" });
   const registration = installToolRegistration(server, {
-    client: {},
+    client,
     palette: null,
     resolveCallerAgentId: () => null,
   });
@@ -19,10 +20,35 @@ function install() {
   const registered = (
     server as unknown as { _registeredTools: Record<string, unknown> }
   )._registeredTools;
-  return { registration, registered };
+  return { server, registration, registered };
 }
 
 describe("installToolRegistration (mcp/registration.ts)", () => {
+  it("round 1 a mixed skipped batch stays lean on the registered MCP path", async () => {
+    const { server, registration } = install();
+    const skipped = { agent_id: "paused", skipped: "paused" };
+    server.tool("send_to", "synthetic send", async () => ok({ receipts: [{ agent_id: "delivered", delivery_state: "submitted", submitted: true }, skipped] }));
+    const handler = registration.toolHandlersByName.get("send_to");
+    if (!handler) throw new Error("send handler missing");
+    const result = await handler({ mode: "agent", text: "synthetic" }, {});
+    expect(result.structuredContent?.receipts).toEqual([expect.objectContaining({ agent_id: "delivered", submitted: true }), skipped]);
+    expect(result.structuredContent).not.toHaveProperty("transport");
+  });
+  it.each(["cli", "socket"])("compact spawn reserves %s transport diagnostics for verbose", async mode => {
+    const { server, registration } = install({ getTransportHealth: () => ({ mode, degraded: true, current_socket_path: "/tmp/synthetic.sock" }) });
+    server.tool("spawn_agent", "synthetic spawn", async () => ok({ agent_id: "synthetic", surface_id: "surface:test", warnings: ["existing"] }));
+    const handler = registration.toolHandlersByName.get("spawn_agent");
+    if (!handler) throw new Error("spawn handler missing");
+    const result = await handler({}, {});
+    expect(result.structuredContent).toEqual({ ok: true, agent_id: "synthetic",
+      surface_id: "surface:test", state: "started", delivered: false, warning: "existing" });
+    const verbose = await handler({ verbose: true }, {});
+    expect(verbose.structuredContent?.warnings).toEqual(
+      ["existing", mode === "cli" ? "cli_fallback_active" : "socket_degraded"]);
+    expect(verbose.structuredContent).toHaveProperty("transport", mode);
+    expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+    expect(result.structuredContent).not.toHaveProperty("transport");
+  });
   it("registers a tool on the MCP surface", () => {
     const { registered } = install();
     expect(Object.keys(registered)).toEqual(["read_screen"]);
