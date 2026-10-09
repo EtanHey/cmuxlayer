@@ -9410,6 +9410,37 @@ describe("tool handler integration", () => {
     } finally { await client.close(); await server.close(); context.dispose(); }
   });
 
+  it("update_surface reports pending adoption as non-success while preserving uncertainty", async () => {
+    const context = createServerContext({ exec: mockExec, skipAgentLifecycle: true, controlHealthIntervalMs: 0 });
+    const pending = { status: "pending_verify", agent_id: "retained-lead",
+      error: "Error: primary adoption routing-index failure", evidence_sha256: "a".repeat(64) };
+    const adopted = { status: "adopted", agent_id: "retained-lead", placement: "not_attempted" };
+    const adopt = vi.fn().mockResolvedValueOnce(pending).mockResolvedValueOnce(adopted);
+    const server = createServer({ context, skipAgentLifecycle: true });
+    context.lifecycleSweepEngine = { adoptResumedSession: adopt, dispose() {} } as any;
+    const client = new Client({ name: "adoption-pending-contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const request = { action: "adopt_session", surface: "046E9CEC-E253-4870-9BB8-942DCE7CC0EC",
+        workspace: "19F83CA8-2598-4BB3-AC57-2D6C4460A22E", managed_agent_id: "retained-lead",
+        session_id: "retained-session", expected_agent_version: 0,
+        observer_transition: { historical_owner_id: "historical", current_owner_id: "current" },
+        binding_evidence_path: "/synthetic/history.json", binding_evidence_sha256: "a".repeat(64) };
+      const uncertain = await client.callTool({ name: "update_surface", arguments: request });
+      expect(uncertain.isError, JSON.stringify(uncertain)).toBe(true);
+      expect(uncertain.structuredContent).toEqual({ ok: false, retry_count: 0, action: "adopt_session", ...pending });
+      expect(uncertain.content).toEqual([{ type: "text", text: JSON.stringify(uncertain.structuredContent) }]);
+      const completed = await client.callTool({ name: "update_surface", arguments: request });
+      expect(completed.isError, JSON.stringify(completed)).not.toBe(true);
+      expect(completed.structuredContent).toEqual({ ok: true, retry_count: 0, action: "adopt_session", ...adopted });
+      expect(completed.content).toEqual([{ type: "text", text: JSON.stringify(completed.structuredContent) }]);
+      const { action, ...input } = request;
+      expect(adopt.mock.calls).toEqual([[input], [input]]);
+      expect(mockExec).not.toHaveBeenCalled();
+    } finally { await client.close(); await server.close(); context.dispose(); }
+  });
+
   it("update_surface is a superset adapter for both move_surface and rename_tab", async () => {
     mockExec = vi.fn().mockImplementation(async (_cmd, args: string[]) => ({
       stdout: args.includes("move-surface")

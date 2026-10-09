@@ -823,6 +823,9 @@ export function registerUpdateSurfaceTool(
           const engine = deps.context.lifecycleSweepEngine;
           if (!engine || deps.context.lifecycleStartError) throw new Error("Managed lifecycle is unavailable; adoption refused");
           const result = await engine.adoptResumedSession(request);
+          if (result.status === "pending_verify") {
+            return err(result.error, { action: args.action, ...result });
+          }
           return ok({ action: args.action, ...result });
         }
         if (args.action === "rename" && !args.title) {
