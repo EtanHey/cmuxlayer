@@ -4387,6 +4387,18 @@ export class AgentEngine {
     return this.deliveryQueue.acceptPendingVerify(...args);
   }
 
+  rollbackBootRecoveryPreparation(
+    ...args: Parameters<DeliveryQueue["rollbackBootRecoveryPreparation"]>
+  ): void {
+    this.deliveryQueue.rollbackBootRecoveryPreparation(...args);
+  }
+
+  markBootRecoveryDispatched(
+    ...args: Parameters<DeliveryQueue["markBootRecoveryDispatched"]>
+  ): void {
+    this.deliveryQueue.markBootRecoveryDispatched(...args);
+  }
+
   waitForDelivery(
     ...args: Parameters<DeliveryQueue["waitForDelivery"]>
   ): Promise<AgentDeliveryReceipt & { timed_out?: boolean }> {

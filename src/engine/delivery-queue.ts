@@ -66,6 +66,7 @@ function snapshotDeliveryReceipt(
   const { rpc_methods: rpcMethods, ...snapshot } = receipt;
   return {
     ...snapshot,
+    ...(receipt.boot_recovery_context ? { boot_recovery_context: { ...receipt.boot_recovery_context } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -381,6 +382,46 @@ export class DeliveryQueue {
     return receipt ? snapshotDeliveryReceipt(receipt) : null;
   }
 
+  /** Undo only the synchronous preparation which aborted before transport. */
+  rollbackBootRecoveryPreparation(originals: AgentDeliveryReceipt[]): void {
+    if (!originals.length) return;
+    for (const original of originals) {
+      const current = this.deliveryReceipts.get(original.delivery_id);
+      // Never recreate an evicted receipt or overwrite another owner.
+      if (!current?.boot_recovery || current.agent_id !== original.agent_id ||
+          current.text !== original.text || current.created_at !== original.created_at ||
+          current.boot_instance_id !== original.boot_instance_id) continue;
+      this.deliveryReceipts.set(original.delivery_id, snapshotDeliveryReceipt(original));
+    }
+    // Restore every in-memory entry first, including acceptPendingVerify's
+    // failing entry (it mutates the map before its atomic write). A secondary
+    // persistence failure must not leave later entries passively verifiable.
+    this.persistDeliveryReceipts();
+  }
+
+  /** Last, non-throwing hook immediately before the transport is invoked. */
+  markBootRecoveryDispatched(prepared: AgentDeliveryReceipt[]): void {
+    const dispatched: AgentDeliveryReceipt[] = [];
+    for (const original of prepared) {
+      const current = this.deliveryReceipts.get(original.delivery_id);
+      if (!current?.boot_recovery || current.agent_id !== original.agent_id ||
+          current.text !== original.text || current.created_at !== original.created_at ||
+          current.boot_instance_id !== original.boot_instance_id) continue;
+      current.submit_dispatched = true;
+      dispatched.push(current);
+    }
+    if (!dispatched.length) return;
+    try { this.persistDeliveryReceipts(); } catch {
+      // Preparation already succeeded. Do not turn this final dispatch marker
+      // into a new refusal: the caller must now invoke the transport, retaining
+      // live uncertainty even when storage cannot record the admitted Return.
+      for (const receipt of dispatched) {
+        receipt.needs_attention = true;
+        receipt.attention_reason = "Boot recovery dispatch marker could not be persisted; inspect the original delivery before restarting.";
+      }
+    }
+  }
+
   listDeliveryReceipts(): AgentDeliveryReceipt[] {
     return [...this.deliveryReceipts.values()].map(snapshotDeliveryReceipt);
   }
@@ -422,6 +463,7 @@ export class DeliveryQueue {
     submit_dispatched?: boolean;
     boot_recovery?: boolean;
     boot_instance_id?: string;
+    boot_recovery_context?: AgentDeliveryReceipt["boot_recovery_context"];
     created_at?: string;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
@@ -513,6 +555,10 @@ export class DeliveryQueue {
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
+        // An explicitly undispatched boot receipt is preparation, not ACK
+        // uncertainty. This also protects a persisted intent after rollback
+        // storage failure/restart. Undefined remains legacy uncertainty.
+        if (receipt.boot_recovery && receipt.submit_dispatched === false) continue;
         const deadlineApplies = receipt.delivery_state === "pending_verify";
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
@@ -565,6 +611,7 @@ export class DeliveryQueue {
           receipt.terminal = true;
           receipt.resolved_at = new Date().toISOString();
           receipt.submit_verified = observation.submit_verified ?? true;
+          if (receipt.boot_recovery_context && receipt.submit_verified === true) receipt.submit_dispatched = true;
           receipt.error = null;
           receipt.needs_attention = false;
           receipt.attention_reason = null;
