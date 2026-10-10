@@ -174,6 +174,7 @@ export function isLiveInteractive(live: LiveAgentState): boolean {
  * bare-shell and picker/overlay guards run before this decision.
  */
 export function isLiveDeliverable(live: LiveAgentState): boolean {
+  if (live.screen_state === "error") return false;
   if (INTERACTIVE_AGENT_STATES.has(live.registry_state)) return true;
   return live.registry_state !== "booting" && live.screen_state === "ready";
 }
