@@ -71,6 +71,12 @@ not identities.
 
 ## Stuck Surface Recovery
 
+A current Claude usage-limit refusal reports `error` and blocks new text and
+submit keys with `blocked_by_usage_limit`. Preserve any existing draft and
+inspect with `read_screen`; do not hammer Return, replay the task, or replace
+the seat merely because its quota is exhausted. A later model response or
+active tool work clears the refusal; a finished banner or typed retry does not.
+
 If a terminal surface is frozen, remote control is lost, or the screen no
 longer accepts input:
 

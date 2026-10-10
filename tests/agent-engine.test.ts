@@ -11970,6 +11970,7 @@ Session ID: ${sessionId}`,
       ["security", readFileSync(new URL("./fixtures/composer-overlays/codex-daybreak-synthetic.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
       ["hooks", readFileSync(new URL("./fixtures/composer-overlays/codex-hooks-review.txt", import.meta.url), "utf8"), "agent_halt_awaiting_input"],
       ["capacity", "■ Selected model is at capacity. Please try a different model.\n› Ask Codex to do anything\nGPT-6-Luna low · ~/scratch", "agent_halt_harness_api_error"],
+      ["quota", "Claude Code\n❯ previous task\n  ⎿ You've hit your weekly limit · resets 5am\n✻ Cooked for 1s · done 9:08 PM\n❯ \n", "agent_halt_harness_api_error"],
     ])("silent-stall %s escalates only blockers despite prior done evidence", async (kind, screen, tag) => {
       engine.dispose();
       engine = new AgentEngine(stateMgr, new AgentRegistry(stateMgr, async () => liveSurfaces), mockClient, {
@@ -11997,6 +11998,7 @@ Session ID: ${sessionId}`,
         expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain('text: "escape"');
         expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).not.toContain('text: "return"');
       } else if (kind === "capacity") expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("model_at_capacity");
+      else if (kind === "quota") expect(readInbox(parent.agent_id, { baseDir: TEST_DIR })[0]?.task).toContain("claude_usage_limit");
       expect(mockClient.sendKey).not.toHaveBeenCalled();
     });
 

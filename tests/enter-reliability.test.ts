@@ -699,6 +699,50 @@ describe("enter reliability", () => {
     expect(parsed.error).toMatch(/press_enter|allow_busy|boolean/i);
   });
 
+  it.each(["agent", "surface", "command", "key"])("refuses %s input on the captured Claude quota frame without mutating it", async mode => {
+    const client = new FakeClaudeSurfaceClient();
+    client.preReturnScreenText = readFileSync(new URL("./fixtures/live/claude-weekly-limit.txt", import.meta.url), "utf8");
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const result = parseResult(await callTool(server, "send_to", mode === "agent"
+      ? { agent_id: target.agent_id, text: "Read and follow /scratch/task.md" }
+      : { mode, surface: target.surface_id, text: mode === "key" ? "return" : "Read and follow /scratch/task.md" }));
+    // submit_attempted can describe caller intent; transport calls prove
+    // that a refused submit never dispatched a key.
+    expect(result).toMatchObject({ ok: false, error_code: "blocked_by_usage_limit", typed: false, submit_verified: false });
+    expect(result.submit_dispatched).not.toBe(true);
+    expect(client.sendCalls).toEqual([]);
+    expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("preserves typed delivery evidence if Claude quota appears before Return", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    const read = client.readScreen.bind(client);
+    client.readScreen = (...args) => {
+      if (client.sendCalls.length > 0) client.preReturnScreenText = readFileSync(new URL("./fixtures/live/claude-weekly-limit.txt", import.meta.url), "utf8")
+        .replace("❯ \n", "❯ Read and follow /scratch/task.md\n");
+      return read(...args);
+    };
+    server = createReliabilityServer(client);
+    const target = registerAgent(server);
+    const result = parseResult(await callTool(server, "send_to", { agent_id: target.agent_id, text: "Read and follow /scratch/task.md" }));
+    expect(result).toMatchObject({ ok: false, error_code: "blocked_by_usage_limit", typed: true, submit_dispatched: false });
+    expect(client.sendCalls).toEqual(["Read and follow /scratch/task.md"]);
+    expect(client.sendKeyCalls).toEqual([]);
+  });
+
+  it("does not expose a quota-blocked Claude seat as ready in list_agents", async () => {
+    const client = new FakeClaudeSurfaceClient();
+    client.preReturnScreenText = readFileSync(new URL("./fixtures/live/claude-weekly-limit.txt", import.meta.url), "utf8");
+    server = createReliabilityServer(client);
+    registerAgent(server);
+    const result = parseResult(await callTool(server, "list_agents", { agent_ids: ["agent-1"] }));
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0].state).toBe("error");
+    expect(client.sendCalls).toEqual([]);
+    expect(client.sendKeyCalls).toEqual([]);
+  });
+
   it.each([
     ["short pointer", "Read and follow /tmp/run5-pointer.md"],
     ["long inline", "x".repeat(2000)],
@@ -838,7 +882,7 @@ describe("enter reliability", () => {
     if (mode !== "key") expect(recovered.delivery_id).toBe(first.delivery_id);
   });
 
-  it.each(["owned", "anonymous", "exhausted", "foreign", "empty", "transcript", "session", "collapsed"])("#1021 pending sweep retries only its exact idle Claude draft (%s)", async shape => {
+  it.each(["owned", "anonymous", "exhausted", "foreign", "empty", "transcript", "session", "collapsed", "quota"])("#1021 pending sweep retries only its exact idle Claude draft (%s)", async shape => {
     const client = new FakeClaudeSurfaceClient();
     client.requiredReturns = 100;
     client.preReturnScreenText = deadlockReady;
@@ -859,7 +903,8 @@ describe("enter reliability", () => {
     client.postReturnPendingScreenText = shape === "foreign" ? deadlockDraft.replace("contract.md", "contract.md HUMAN_WORDS") :
       shape === "empty" ? deadlockReady :
       shape === "transcript" ? deadlockDraft.replace("\n❯", `\n${deadlockTranscript}\n❯`) :
-      shape === "collapsed" ? deadlockReady.replace("❯ ", "❯ [Pasted text #1 +2 lines]") : deadlockDraft;
+      shape === "collapsed" ? deadlockReady.replace("❯ ", "❯ [Pasted text #1 +2 lines]") :
+      shape === "quota" ? `❯ earlier request\n  ⎿ You've hit your weekly limit · resets 5am\n${deadlockDraft}` : deadlockDraft;
     if (shape === "session") {
       const engine = engineForTests(server);
       const changed = { ...target, cli_session_id: "restarted-session" };

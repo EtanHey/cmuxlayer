@@ -1,0 +1,21 @@
+❯ [report] changed — read /scratch/agent/report.md
+  ⎿  You've hit your weekly limit · resets Oct 11 at 5am (Asia/Jerusalem)
+     /usage-credits to finish what you’re working on.
+
+✻ Sautéed for 1s · done 2:02 PM
+
+❯ Previous request
+  ⎿  You've hit your weekly limit · resets 5am (Asia/Jerusalem)
+     /usage-credits to finish what you’re working on.
+
+✻ Cooked for 1s · done 9:08 PM
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+                 current: 2.1.292 · latest: 2.1.293 ✔ Update installed · Restart to update
+────────────────────────────────────────────────────────────────────────────────────── orc ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────
+  ⎇ master | +16899,-500 | 🔧 9
+  🤖 Opus 5.5 (1M context) | 💰 $2430.02 | ⏱️  867hr 39m | 🧠 17.9%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents

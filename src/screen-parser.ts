@@ -1892,9 +1892,37 @@ export function isPickerOrMenuScreen(text: string, cli?: CliType): boolean {
   );
 }
 
-function parseErrors(text: string): string[] {
+function hasCurrentClaudeUsageLimit(frame: ClaudeFrame): boolean {
+  const { lines, glyphs } = frame;
+  // Only the harness-owned refusal shape counts. A quoted tool result or
+  // model explanation must not freeze an otherwise usable seat.
+  let refusal = -1;
+  let turnStart = -1;
+  let composer = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^❯(?:\s|$)/u.test(lines[index])) { composer = index; break; }
+  }
+  let latestOutput = -1;
+  const outputRows = new Set(glyphs.filter(glyph =>
+    ["reply", "action", "call"].includes(glyph.kind) &&
+    !/^How is Claude doing this session\?/.test(glyph.value)).map(glyph => glyph.lineIndex));
+  for (let index = 0; index < composer; index += 1) {
+    if (/^❯(?:\s|$)/u.test(lines[index])) turnStart = index;
+    if (/^\s*⎿\s+You['’]ve hit your (?:weekly )?limit\b/i.test(lines[index]) &&
+        latestOutput <= turnStart) refusal = index;
+    if (outputRows.has(index)) latestOutput = index;
+  }
+  if (refusal < 0) return false;
+  // A dirty composer can contain reply-looking text. Stop at the final
+  // composer, not at its continuation rows; completion banners and the
+  // optional session survey do not prove quota recovery.
+  return latestOutput <= refusal;
+}
+
+function parseErrors(text: string, claudeFrame?: ClaudeFrame): string[] {
   const errors: string[] = [];
   if (isCodexModelAtCapacity(text)) errors.push("model_at_capacity");
+  if (claudeFrame && hasCurrentClaudeUsageLimit(claudeFrame)) errors.push("claude_usage_limit");
 
   const rawLines = text.split("\n");
   const lines = rawLines.map((line) => line.trim());
@@ -2333,7 +2361,8 @@ function inferStatus(
     .filter(Boolean);
   const joined = lines.join("\n");
 
-  if (isCodexDismissibleOverlay(text) || errors.includes("model_at_capacity")) return "frozen";
+  if (isCodexDismissibleOverlay(text) || errors.includes("model_at_capacity") ||
+      errors.includes("claude_usage_limit")) return "frozen";
 
   if (doneSignal) {
     if (doneSignal.startsWith("CLAUDE_COUNTER:")) {
@@ -2478,7 +2507,7 @@ export function parseScreen(text: string): ParsedScreenResult {
   if (agentType === "cursor" && doneSignal === null) {
     doneSignal = parseCursorDoneSignal(normalized);
   }
-  const errors = parseErrors(normalized);
+  const errors = parseErrors(normalized, claudeFrame);
   const { model, cost } = parseModelAndCost(normalized, agentType);
   let tokenCount = parseTokenCount(normalized);
   if (agentType === "cursor") {

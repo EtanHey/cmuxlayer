@@ -932,7 +932,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     surface: string; workspace?: string; stableSurfaceIdentity?: string | null;
     text: string; delivery_id?: string;
   }, snapshot: { text: string; parsed: ParsedScreenResult } | null, requireIdle = true): boolean => {
-    if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
+    if (!snapshot || snapshot.parsed.errors.includes("claude_usage_limit") || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
         snapshot.parsed.control_state === "permission_prompt" ||
         (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
         isPickerOrMenuScreen(snapshot.text, "claude") || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
@@ -1885,11 +1885,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const assertBinding = opts.beforeMutation;
       let securityDismissed = false;
       let securityCapable = true;
+      let quotaCapable = true;
       let inputSafetyObserved = false;
       const readSafeInput = async () => {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
+        quotaCapable = snapshot.parsed.agent_type === "claude";
+        if (snapshot.parsed.errors.includes("claude_usage_limit")) {
+          throw new DeliverySafetyGateError("blocked_by_usage_limit", snapshot.parsed);
+        }
         const hadBanner = isCodexDismissibleOverlay(snapshot.text);
         securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
           (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
@@ -1910,13 +1915,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         inputSafetyObserved = true;
         return safe;
       };
-      // Every input mutation, including a retry or launcher Return, rechecks
-      // Hooks review. Account-security notices do not own composer input.
+      // Every input mutation, including a retry or Return, rechecks Claude
+      // quota and Hooks review. Account-security notices do not own input.
       opts = { ...opts, beforeMutation: async () => {
         await assertBinding?.();
         // The existing pre-type/key baseline is already a safe observation.
         // Consume it once; subsequent input batches need a fresh overlay check.
-        if (!inputSafetyObserved && securityCapable) await readSafeInput();
+        if (!inputSafetyObserved && (securityCapable || quotaCapable)) await readSafeInput();
         inputSafetyObserved = false;
       } };
       await assertBinding?.();

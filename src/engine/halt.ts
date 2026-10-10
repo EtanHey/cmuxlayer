@@ -563,7 +563,7 @@ export async function maybeEscalateLiveHalt(
   agent = this.persistPausedState(agent, parsed.paused === true, nowIso);
   if (agent.halt_escalation === false) return agent;
   const hasHarnessApiError = parsed.errors.some((error) =>
-    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error === "claude_usage_limit" || error.startsWith("harness_api_error:"),
   );
   if (
     !staleDelivery &&
@@ -648,7 +648,7 @@ export async function maybeEscalateLiveHalt(
   }
   if (!haltType) return this.clearHaltEpisode(agent);
   const harnessApiError = parsed.errors.find((error) =>
-    error === "model_at_capacity" || error.startsWith("harness_api_error:"),
+    error === "model_at_capacity" || error === "claude_usage_limit" || error.startsWith("harness_api_error:"),
   );
   const haltObservableAction =
     haltType === "delivery_stalled"

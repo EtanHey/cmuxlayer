@@ -62,6 +62,38 @@ describe("codexScreenHasActiveTurn", () => {
 });
 
 describe("parseScreen", () => {
+  it.each(["", "Read and follow /scratch/task.md"])("keeps the captured Claude weekly refusal blocked with composer %j", draft => {
+    const screen = readFixture("live/claude-weekly-limit.txt").replace("❯ \n", `❯ ${draft}\n`);
+    const parsed = parseScreen(screen);
+    expect(parsed.errors).toContain("claude_usage_limit");
+    expect(parsed.status).toBe("frozen");
+    expect(parsed.control_state).not.toBe("ready");
+  });
+
+  it.each(["⏺ Recovery completed successfully", "✻ Thinking…", "⏺ Read(/scratch/task.md)"])("clears a Claude usage refusal after actual recovery: %s", recovery => {
+    const screen = readFixture("live/claude-weekly-limit.txt").replace("● How is Claude", `❯ retry\n${recovery}\n● How is Claude`);
+    expect(parseScreen(screen).errors).not.toContain("claude_usage_limit");
+  });
+
+  it("does not clear a Claude refusal for recovery text typed inside the composer", () => {
+    const screen = readFixture("live/claude-weekly-limit.txt").replace("❯ \n", "❯ retry\n  ⏺ Recovery completed successfully\n");
+    expect(parseScreen(screen).errors).toContain("claude_usage_limit");
+  });
+
+  it("keeps quota frozen despite a stale completion counter", () => {
+    const screen = `${readFixture("live/claude-weekly-limit.txt")}\nCLAUDE_COUNTER:1\n`;
+    expect(parseScreen(screen).status).toBe("frozen");
+  });
+
+  it.each([
+    "❯ Explain the limit\n⏺ Quoting the captured error\n  ⎿ You've hit your weekly limit · resets 5am\n❯ ",
+    "❯ You've hit your weekly limit · resets 5am\n❯ ",
+    "❯ Explain the limit\n⏺ You've hit your weekly limit is the error text\n❯ ",
+    "❯ Draft quoting the harness\n  ⎿ You've hit your weekly limit · resets 5am\n",
+  ])("ignores quoted or user-authored quota text", screen => {
+    expect(parseScreen(`Claude Code\n${screen}`).errors).not.toContain("claude_usage_limit");
+  });
+
   it("treats the finished 0.4.81 Claude proof pane as ready and extracts its reply", () => {
     // Reconstructed from the installed read_screen preview and the proof
     // worker's final transcript; the old surface ref is now stale.

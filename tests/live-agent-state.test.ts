@@ -10,6 +10,14 @@ import {
   screenConfirmedAgentState,
 } from "../src/live-agent-state.js";
 
+it("makes a quota-refused Claude non-deliverable and accepts visible recovery", () => {
+  const blocked = resolveLiveAgentState(record({ state: "ready" }), { status: "frozen", agent_type: "claude", control_state: "unknown", errors: ["claude_usage_limit"] });
+  expect(blocked.state).toBe("error");
+  expect(isLiveDeliverable(blocked)).toBe(false);
+  const recovered = resolveLiveAgentState(record({ state: "error" }), { status: "idle", agent_type: "claude", control_state: "ready", errors: [] });
+  expect(isLiveDeliverable(recovered)).toBe(true);
+});
+
 function record(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     agent_id: "cmuxlayerClaude-f1",
