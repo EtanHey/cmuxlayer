@@ -44,5 +44,5 @@ try{
  test('changed receipt values reject',()=>assert.throws(()=>readFocusReceipt({...plan,session:null},c,now,query)));
  fs.chmodSync(path,0o644);test('public receipt mode rejects',()=>assert.throws(()=>readFocusReceipt(plan,c,now,query)));
 }finally{console.log(JSON.stringify({controlOnlyReceipts:scratch,retained:true}));}
-test('unsupported socket readiness stops before any input',()=>assert.throws(executorReadiness,/EXECUTOR_READINESS_UNAVAILABLE/));
+test('missing terminal gate evidence stops before any CASE',()=>assert.throws(executorReadiness,/EXECUTOR_GATE_UNBOUND/));
 console.log(JSON.stringify({status:'PASS',executed:count,passed:count,failed:0,cancelled:0,skipped:0,nativeCases:0,nativeAcceptance:'UNPROVED',scope:'IMPORTED_ADMISSION_ONLY'}));

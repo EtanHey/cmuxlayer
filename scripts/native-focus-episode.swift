@@ -99,10 +99,20 @@ final class Token {
     }
 }
 var tokens: [String: Token] = [:]
+var attachAttempted = false
 func unchanged(_ token: Token) throws {
     try require(try metadata(token.running) == token.metadata, "TARGET_METADATA_CHANGED")
     try require(try process(token.running.processIdentifier) == token.process, "TARGET_PROCESS_CHANGED")
     try validWindow(token.window, token.running.processIdentifier)
+}
+func singleNativeWindow(_ token: Token) throws {
+    let raw = try attribute(token.app, kAXWindowsAttribute)
+    try require(CFGetTypeID(raw) == CFArrayGetTypeID(), "AX_WINDOWS_TYPE_MISMATCH")
+    let array = raw as! [CFTypeRef]
+    event("AXWindows", ["count": array.count]); try require(array.count == 1, "MULTIPLE_OR_MISSING_NATIVE_WINDOWS")
+    let only = try element(array[0]); try validWindow(only, token.running.processIdentifier)
+    let equal = CFEqual(only, token.window); event("AXWindows.CFEqual", ["equal": equal])
+    try require(equal, "NATIVE_WINDOW_BINDING_CHANGED")
 }
 func check(_ token: Token) throws {
     try unchanged(token)
@@ -112,6 +122,7 @@ func check(_ token: Token) throws {
     let second = try window(AXUIElementCreateApplication(token.running.processIdentifier), token.running.processIdentifier)
     let equal = CFEqual(first, second) && CFEqual(second, token.window)
     event("CFEqual", ["sameFocusedWindow": equal, "token": token.id])
+    if token.metadata["bundle"] == "/Applications/cmux.app" { try singleNativeWindow(token) }
     let (_, after, processAfter) = try foreground()
     try require(equal && after == meta && processAfter == binding, "FOCUSED_WINDOW_CHANGED")
 }
@@ -133,16 +144,7 @@ func capture(_ kind: String) throws -> Token {
     let token = Token(running, app, first, meta, binding)
     // Keep the token even on later failure, but never expose a failed token as admitted.
     tokens[kind] = token; try check(token); try capability(token)
-    if kind == "cmux" {
-        try require(meta["bundle"] == "/Applications/cmux.app", "CMUX_BUNDLE_MISMATCH")
-        let raw = try attribute(app, kAXWindowsAttribute)
-        try require(CFGetTypeID(raw) == CFArrayGetTypeID(), "AX_WINDOWS_TYPE_MISMATCH")
-        let array = raw as! [CFTypeRef]
-        event("AXWindows", ["count": array.count]); try require(array.count == 1, "MULTIPLE_OR_MISSING_NATIVE_WINDOWS")
-        let only = try element(array[0]); try validWindow(only, running.processIdentifier)
-        let equal = CFEqual(only, first); event("AXWindows.CFEqual", ["equal": equal])
-        try require(equal, "NATIVE_WINDOW_BINDING_CHANGED")
-    }
+    if kind == "cmux" { try require(meta["bundle"] == "/Applications/cmux.app", "CMUX_BUNDLE_MISMATCH") }
     try check(token); return token
 }
 func restore(_ target: Token, _ expected: Token) throws {
@@ -184,12 +186,28 @@ do {
         let verb = command["command"] as? String ?? "", kind = command["kind"] as? String ?? ""
         var result: [String: Any] = ["observer": observer, "session": sessionID, "sequence": sequence, "runId": runID, "dispatchId": dispatchID, "threadId": threadID, "deadlineUTC": args[4], "observedUTC": utc(), "helperPID": Int(getpid()), "uiActions": actionCount, "keyboardFocusPreserved": "UNMEASURED"]
         do {
-            if verb == "capture-original" || verb == "capture-cmux" {
+            if verb == "attach-cmux" {
+                try require(!attachAttempted && tokens["cmux"] == nil, "NO_ATTACH_REPLAY"); attachAttempted = true
+                guard let original = tokens["original"], let targetPID = command["pid"] as? Int,
+                      let running = NSRunningApplication(processIdentifier: pid_t(targetPID)),
+                      let expected = command["process"] as? [String: String] else { throw Stop(reason: "CMUX_ATTACH_IDENTITY_MISSING") }
+                try check(original)
+                let meta = try metadata(running)
+                let actualProcess = try process(running.processIdentifier)
+                try require(meta["bundle"] == "/Applications/cmux.app" && actualProcess == expected, "CMUX_ATTACH_PROCESS_CHANGED")
+                try budget(10); actionCount += 1
+                let ack = running.activate(options: [])
+                event("attachExistingCmux.activate", ["requestAccepted": ack]); try require(ack, "CMUX_ATTACH_UNPROVED")
+                let token = try capture("cmux")
+                try require(token.metadata == meta && token.process == expected, "CMUX_ATTACH_TARGET_CHANGED")
+                result["token"] = token.id; result["kind"] = "cmux"; result["app"] = token.metadata; result["process"] = token.process; result["capabilities"] = token.capabilities
+                result["sameFocusedWindow"] = true; result["nativeWindowCount"] = 1; result["nativeWindowsEqual"] = true
+            } else if verb == "capture-original" || verb == "capture-cmux" {
                 let name = verb == "capture-original" ? "original" : "cmux"
                 try require(tokens[name] == nil, "NO_CAPTURE_REPLAY")
                 let token = try capture(name)
                 result["token"] = token.id; result["kind"] = name; result["app"] = token.metadata; result["process"] = token.process; result["capabilities"] = token.capabilities
-                result["sameFocusedWindow"] = true; if name == "cmux" { result["nativeWindowCount"] = 1 }
+                result["sameFocusedWindow"] = true; if name == "cmux" { result["nativeWindowCount"] = 1; result["nativeWindowsEqual"] = true }
             } else if verb == "check-token" || verb == "restore-token" {
                 guard let target = tokens[kind], command["token"] as? String == target.id else { throw Stop(reason: "TOKEN_LOST_OR_FOREIGN") }
                 if verb == "restore-token" {
@@ -197,6 +215,7 @@ do {
                     try restore(target, expected); result["restorationProved"] = true
                 } else { try check(target) }
                 result["token"] = target.id; result["sameFocusedWindow"] = true
+                if target.metadata["bundle"] == "/Applications/cmux.app" { result["nativeWindowCount"] = 1; result["nativeWindowsEqual"] = true }
             } else { try require(verb == "finish", "UNSUPPORTED_COMMAND") }
             result["status"] = "OBSERVED"; result["events"] = events; result["uiActions"] = actionCount; result["completedUTC"] = utc(); try send(result)
             if verb == "finish" { exit(0) }

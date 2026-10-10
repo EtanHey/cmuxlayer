@@ -5,6 +5,8 @@ import {createHash} from 'node:crypto';
 import {join, dirname} from 'node:path';
 import {sameProcess} from './original-roots-first-case.mjs';
 import {queryProcess} from './original-roots-first-case.proxy.mjs';
+import {validateExecutor} from './bootstrap-gate.mjs';
+import {StringDecoder} from 'node:string_decoder';
 export const OBSERVER='NSWORKSPACE_FOREGROUND_DIRECT_PID_AX';
 export const RECIPE='ACTIVATE_EXISTING_RAISE_SET_FOCUSED_WINDOW';
 const check=(ok,why)=>{if(!ok)throw Error(why);};
@@ -53,13 +55,9 @@ export function readFocusReceipt(plan,c,now=Date.now(),query=queryProcess) {
  check(sameProcess(w.controllerIdentity,query(w.controllerIdentity.pid,1000)),'controller exited or changed');
  return validateFocusWitness(w,c,now,query(w.helperIdentity.pid,1000));
 }
-export function executorReadiness() {
- // The accepted socket-only transport has no shell PID/input-buffer witness.
- // Ownership, screen text and selected=true do not supply these facts.
- throw Error('EXECUTOR_READINESS_UNAVAILABLE: socket-only local-shell/empty-input proof has no supported source; stop before input');
-}
+export function executorReadiness(w,c,proof){return validateExecutor(w,c,proof);}
 export class Episode {
- constructor(config){this.c=config;this.sequence=0;this.tokens={};this.pending=null;this.ended=false;this.buffer='';this.restorations={cmux:{status:'UNATTEMPTED'},original:{status:'UNATTEMPTED'}};}
+ constructor(config){this.c=config;this.sequence=0;this.tokens={};this.pending=null;this.ended=false;this.buffer='';this.decoder=new StringDecoder('utf8');this.restorations={cmux:{status:'UNATTEMPTED'},original:{status:'UNATTEMPTED'}};}
  remaining(){const n=Date.parse(this.c.deadlineUTC)-Date.now();check(n>0,'absolute episode deadline');return n;}
  record(name,value){fs.writeFileSync(join(this.c.receiptDir,name+'.json'),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});}
  identity(){return queryProcess(this.child.pid,Math.min(1000,this.remaining()));}
@@ -80,7 +78,7 @@ export class Episode {
   const ready=this.awaitRow();
   this.child=spawn(c.helper,this.argv.slice(1),{stdio:['pipe','pipe',errorFD],env:{HOME:'/Users/happycampr',PATH:'/usr/bin:/bin'},cwd:dirname(c.helper)});fs.closeSync(errorFD);
   this.child.stdout.on('data',bytes=>{
-   fs.writeSync(this.stdoutFD,bytes);this.buffer+=bytes.toString('utf8');
+   fs.writeSync(this.stdoutFD,bytes);this.buffer+=this.decoder.write(bytes);
    if(this.buffer.length>65536){this.reject(Error('helper output bound exceeded'));return;}
    while(this.buffer.includes('\n')){const n=this.buffer.indexOf('\n'),line=this.buffer.slice(0,n);this.buffer=this.buffer.slice(n+1);try{this.deliver(JSON.parse(line));}catch(e){this.reject(e);}}
   });
@@ -102,9 +100,10 @@ export class Episode {
   check(row.status==='OBSERVED','actual helper observation/action failed: '+row.status);if(command!=='finish')this.alive();return row;
  }
  async capture(kind){check(['original','cmux'].includes(kind)&&!this.tokens[kind],'two captures only, no replay');const row=await this.command('capture-'+kind);this.tokens[kind]=row;return row;}
+ async attachCmux(app){check(!this.tokens.cmux,'one attach only');const row=await this.command('attach-cmux',{pid:app.pid,process:{pid:String(app.pid),uid:String(app.uid),lstart:app.start,comm:app.executable,args:app.argv}});this.tokens.cmux=row;return row;}
  async check(kind){const row=this.tokens[kind];check(row,'retained token unavailable');return this.command('check-token',{kind,token:row.token});}
  async witness(c,observeTopology,path){
-  const capture=this.tokens.cmux;check(capture?.nativeWindowCount===1&&capture.events.some(e=>e.operation==='AXWindows.CFEqual'&&e.equal===true),'live native cardinality not captured');
+  const capture=this.tokens.cmux;check(capture?.nativeWindowCount===1&&capture.nativeWindowsEqual===true,'live native cardinality not captured');
   await this.check('cmux');const topology=await observeTopology();const latest=await this.check('cmux');
   const p=capture.process;const appProcess={pid:Number(p.pid),uid:Number(p.uid),start:p.lstart,executable:p.comm,argv:p.args};
   const w={...capture,nativeWindowsEqual:true,observedUTC:capture.observedUTC,completedUTC:latest.completedUTC,identityKind:'RETAINED_AX_ELEMENT_REFERENCE',helperPath:this.c.helper,helperArgv:this.argv.join(' '),helperSHA256:this.c.helperSHA256,helperIdentity:this.baseline,controllerIdentity:this.controller,appProcess,topology,protocolWindowId:topology.windowId,workspaceId:topology.workspaceId,surfaceId:topology.surfaceId,paneRef:topology.paneRef};

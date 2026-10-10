@@ -23,7 +23,7 @@ const c = {executionApproved:true, coordinationReceipt:{status:'ACCEPTED', dispa
   socket:'/observed/native.sock', socketIdentity:{uid:501, dev:1, ino:2}, appProcess:app,
   runnerSha256:PINS.runner, proxyRunnerSha256:PINS.proxy, nodeSha256:PINS.node, cmuxSha256:PINS.cmux,
   notBeforeUTC:stamp(-1000), mutationEndUTC:stamp(180000), deadlineUTC:stamp(240000)};
-const p = {sourceApproved:true, executionApproved:true, bootstrapSha256:hash('./inside-cmux-bootstrap.mjs'),episodeControllerSha256:hash('./native-focus-episode.mjs'), runner:c,
+const p = {sourceApproved:true, executionApproved:true, bootstrapSha256:hash('./inside-cmux-bootstrap.mjs'),episodeControllerSha256:hash('./native-focus-episode.mjs'),bridgeSha256:hash('./native-focus-bridge.mjs'),bridge:{session:id,nonce:id},executorWitness:{contract:'TERMINAL_INITIAL_COMMAND_GATE',ack:{nonce:id}}, runner:c,
   bootstrap:{workspaceId:id, anchorSurfaceId:id, anchorPaneRef:'pane:1', marker:'INSIDE_BBE_'+id, createdUTC:stamp(-100)},
   beforeBootstrapFocus:{observer:'NSWORKSPACE_FOREGROUND_DIRECT_PID_AX',status:'OBSERVED',kind:'cmux',identityKind:'RETAINED_AX_ELEMENT_REFERENCE',token:id,session:id,
     runId:id,dispatchId:c.coordinationReceipt.dispatchId,threadId:current,deadlineUTC:c.deadlineUTC,sameFocusedWindow:true,nativeWindowCount:1,nativeWindowsEqual:true,
