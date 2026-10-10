@@ -127,6 +127,38 @@ const AGENT_TOOLS = [
 const codexUserRows = (text: string): string =>
   text.split("\n").map((line, i) => (i === 0 ? `› ${line}` : line ? `  ${line}` : " ")).join("\n");
 
+/** Short Codex boot input must contain the task and contract on its routed surface. */
+function expectCombinedCodexBoot(
+  exec: ExecFn,
+  parsed: Record<string, unknown>,
+  prompt: string,
+  workspace: string,
+  surface = "surface:new",
+) {
+  const payload = `${prompt} ; cmuxlayer contract for ${parsed.agent_id}: Read and follow ${parsed.contract_path}`;
+  const calls = (exec as ReturnType<typeof vi.fn>).mock.calls;
+  const inputs = calls.filter(([, args]) =>
+    (args.includes("send") || args.includes("set-buffer")) &&
+    String(args.at(-1)).includes(prompt),
+  );
+  expect(inputs.map(([, args]) => args.at(-1))).toEqual([payload]);
+  const input = inputs[0];
+  expect(input[1]).toEqual(expect.arrayContaining([
+    "send", "--workspace", workspace, "--surface", surface,
+  ]));
+  const returns = calls.slice(calls.indexOf(input) + 1).filter(([, args]) =>
+    args.includes("send-key") && args.includes("return"),
+  );
+  expect(returns).toHaveLength(1);
+  expect(returns[0][1]).toEqual(expect.arrayContaining([
+    "--workspace", workspace, "--surface", surface,
+  ]));
+  expect(parsed.boot_prompt_delivered).toBe(true);
+  expect(parsed.boot_prompt_receipt).toMatchObject({
+    typed: true, submit_dispatched: true, submit_verified: true,
+  });
+}
+
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
@@ -4217,13 +4249,7 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:new"]),
     );
-    expect(
-      mockExec.mock.calls.some(
-        ([, args]) =>
-          args.includes("set-buffer") &&
-          String(args.at(-1) ?? "").includes("fix prompt delivery"),
-      ),
-    ).toBe(true);
+    expectCombinedCodexBoot(mockExec, parsed, "fix prompt delivery", "workspace:1");
     expect(mockExec).toHaveBeenCalledWith(
       "cmux",
       expect.arrayContaining([
@@ -4318,17 +4344,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
 
     expect(parsed.ok).toBe(true);
-    expect(
-      mockExec.mock.calls.some(
-        ([, args]) =>
-          args.includes("set-buffer") &&
-          String(args.at(-1) ?? "").includes("UUID-bound boot prompt"),
-      ),
-    ).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining(["paste-buffer", "--surface", "surface:moved"]),
-    );
+    expectCombinedCodexBoot(mockExec, parsed, "UUID-bound boot prompt", "workspace:1", "surface:moved");
   });
 
   it("spawn_agent blocks the internal boot_prompt mutation when control becomes manual", async () => {
@@ -4401,18 +4417,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.workspace_id).toBe("workspace:1");
     expect(parsed.actual_workspace_id).toBeUndefined();
 
-    const promptBufferCall = mockExec.mock.calls.find(([, args]) => {
-      const argv = args as string[];
-      return (
-        argv.includes("set-buffer") &&
-        String(argv.at(-1) ?? "").includes(prompt)
-      );
-    });
-    expect(promptBufferCall).toBeDefined();
-    expect(mockExec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
-    );
+    expectCombinedCodexBoot(mockExec, parsed, prompt, "workspace:1");
   });
 
   it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
@@ -4433,20 +4438,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
-    const promptBufferCall = (exec as ReturnType<typeof vi.fn>).mock.calls.find(
-      ([, args]) => {
-        const argv = args as string[];
-        return (
-          argv.includes("set-buffer") &&
-          String(argv.at(-1) ?? "").includes(prompt)
-        );
-      },
-    );
-    expect(promptBufferCall).toBeDefined();
-    expect(exec).toHaveBeenCalledWith(
-      "cmux",
-      expect.arrayContaining(["paste-buffer", "--workspace", "workspace:1"]),
-    );
+    expectCombinedCodexBoot(exec, parsed, prompt, "workspace:1");
   });
 
   it("spawn_agent deliberately allowed inline prompts preserve blank lines without empty chunks", async () => {
@@ -4541,7 +4533,7 @@ describe("agent lifecycle tool handlers", () => {
     mockExec = vi.fn().mockImplementation(async (cmd, args) => {
       if (
         !renamed &&
-        args.includes("set-buffer") &&
+        (args.includes("send") || args.includes("set-buffer")) &&
         String(args.at(-1) ?? "").includes("probe renamed state")
       ) {
         renamed = true;
@@ -5526,13 +5518,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.spawn_state).toBe("started");
     expect(parsed).not.toHaveProperty("next_action");
-    expect(
-      mockExec.mock.calls.some(
-        ([, args]) =>
-          args.includes("set-buffer") &&
-          String(args.at(-1) ?? "").includes("file prompt body"),
-      ),
-    ).toBe(true);
+    expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:1");
   });
 
   it.each([600, 2400])("spawn_agent does not insert a leading newline when the CLI paints after %ims", async (paintMs) => {
@@ -5649,6 +5635,7 @@ describe("agent lifecycle tool handlers", () => {
     let launcherReturnCount = 0;
     const launcherReturnTimes: number[] = [];
     let promptDelivered = false;
+    let promptSubmitted = false;
     let lastSentText = "";
     mockExec = vi.fn().mockImplementation(async (_cmd, args) => {
       if (args.includes("list-workspaces")) {
@@ -5715,6 +5702,9 @@ describe("agent lifecycle tool handlers", () => {
           launcherReturnCount += 1;
           launcherReturnTimes.push(Date.now());
         }
+        if (lastSentText.includes("file prompt body") && args.includes("return")) {
+          promptSubmitted = true;
+        }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -5722,7 +5712,9 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text: lastSentText.includes("file prompt body")
-              ? "gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer\nWorking (1s • esc to interrupt)"
+              ? promptSubmitted
+                ? `>_ OpenAI Codex\n${codexUserRows(lastSentText)}\nWorking (1s • esc to interrupt)\n› `
+                : `>_ OpenAI Codex\n${codexUserRows(lastSentText)}\ngpt-5.5 xhigh · 99% left · ~/Gits/voicelayer`
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
@@ -5785,13 +5777,7 @@ describe("agent lifecycle tool handlers", () => {
         "surface:new",
       ]),
     );
-    expect(
-      mockExec.mock.calls.some(
-        ([, args]) =>
-          args.includes("set-buffer") &&
-          String(args.at(-1) ?? "").includes("file prompt body"),
-      ),
-    ).toBe(true);
+    expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:voice");
   }, 10_000);
 
   it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {
