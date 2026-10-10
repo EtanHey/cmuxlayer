@@ -64,7 +64,7 @@ async function runGate(){
   const release=privateJSON(releasePath),plan=privateJSON(join(stage,'bootstrap.reviewed.json'));
   const expected={gateACKSHA256:digest(fs.readFileSync(join(receipts,'start.json'))),creationACKSHA256:plan.value.executorWitness.expected.creationACKSHA256,topologySHA256:plan.value.executorWitness.expected.topologySHA256};
   validateRelease(release.value,c,ack,expected,plan.sha256,queryProcess(process.pid,1000));ancestry(c,process.pid,queryProcess);windowBudget(c,120000);
-  check(sameProcess(plan.value.bridge.controllerIdentity,queryProcess(plan.value.bridge.controllerIdentity.pid,1000))&&sameProcess(plan.value.bridge.helperIdentity,queryProcess(plan.value.bridge.helperIdentity.pid,1000)),'live release controller/helper identity lost');
+  check(sameProcess(plan.value.bridge.serverIdentity??plan.value.bridge.controllerIdentity,queryProcess((plan.value.bridge.serverIdentity??plan.value.bridge.controllerIdentity).pid,1000))&&sameProcess(plan.value.bridge.controllerIdentity,queryProcess(plan.value.bridge.controllerIdentity.pid,1000))&&sameProcess(plan.value.bridge.helperIdentity,queryProcess(plan.value.bridge.helperIdentity.pid,1000)),'live release controller/helper identity lost');
   out.bootSpawnAttempts=1;record('release-accepted',{releaseSHA256:release.sha256,gateIdentity:identity,bootSpawnAttempts:1,observedUTC:new Date().toISOString()});
   child=spawn(c.node,[join(stage,'boot.mjs')],{stdio:'inherit',cwd:stage,env:{HOME:'/Users/happycampr',PATH:'/usr/bin:/bin',CMUX_WORKSPACE_ID:scope.workspaceId,CMUX_SURFACE_ID:scope.surfaceId,CMUX_TERMINAL_LIFECYCLE_ID:scope.lifecycleId}});
   exited=new Promise((r,j)=>{child.once('close',(code,signal)=>{ended=true;r({code,signal});});child.once('error',j);});

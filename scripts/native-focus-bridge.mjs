@@ -12,7 +12,7 @@ const fields=['dev','ino','uid'];
 export function validateBridgeEnvelope(row,b,sequence,now=Date.now()) {
  check(row?.nonce===b.nonce&&row.session===b.session&&row.runId===b.runId&&row.dispatchId===b.dispatchId&&row.threadId===b.threadId&&row.sequence===sequence,'bridge provenance/sequence mismatch');
  check(row.deadlineUTC===b.deadlineUTC&&now<Date.parse(b.deadlineUTC)&&now-Date.parse(row.sentUTC)>=0&&now-Date.parse(row.sentUTC)<=30000,'bridge expired/stale frame');
- check(['before-create','before-runner','after-runner','result'].includes(row.phase),'unsupported bridge command');
+ check((b.protocol==='RETAINED_ENTRY_EPISODE'?['entry-admit','setup-complete','cmux-check','cmux-witness','cmux-restore','original-restore','case-finish']:['before-create','before-runner','after-runner','result']).includes(row.phase),'unsupported bridge command');
  return row;
 }
 function endpoint(path,expected) {
@@ -28,12 +28,12 @@ export class Frames {
  close(){if(this.fd!==undefined){fs.closeSync(this.fd);this.fd=undefined;}}
 }
 export function createBridge(episode) {
- episode.alive();const c=episode.c,b={nonce:randomUUID(),session:episode.session,runId:c.runId,dispatchId:c.dispatchId,threadId:c.threadId,deadlineUTC:c.deadlineUTC,helperIdentity:episode.baseline,helperSHA256:c.helperSHA256,controllerIdentity:episode.controller};
+ episode.alive();const c=episode.c,b={nonce:randomUUID(),session:episode.session,runId:c.runId,dispatchId:c.dispatchId,threadId:c.threadId,deadlineUTC:c.deadlineUTC,helperIdentity:episode.baseline,helperSHA256:c.helperSHA256,controllerIdentity:episode.controller,serverIdentity:episode.serverIdentity??episode.controller};
  for(const side of ['request','response']){const path=join(c.receiptDir,side+'.fifo');execFileSync('/usr/bin/mkfifo',['-m','600',path],{timeout:1000});const s=fs.lstatSync(path);b[side]={path,identity:Object.fromEntries(fields.map(k=>[k,s[k]]))};endpoint(path,b[side].identity);}
  episode.record('bridge',b);return b;
 }
 export class BridgeClient {
- constructor(b,c){this.b=b;this.c=c;this.sequence=0;check(sameProcess(b.controllerIdentity,queryProcess(b.controllerIdentity.pid,1000))&&sameProcess(b.helperIdentity,queryProcess(b.helperIdentity.pid,1000)),'live bridge controller/helper required');this.request=new Frames(b.request.path,b.request.identity,Date.parse(b.deadlineUTC));try{this.response=new Frames(b.response.path,b.response.identity,Date.parse(b.deadlineUTC));}catch(error){this.request.close();throw error;}}
+ constructor(b,c){this.b=b;this.c=c;this.sequence=0;check(sameProcess(b.serverIdentity??b.controllerIdentity,queryProcess((b.serverIdentity??b.controllerIdentity).pid,1000))&&sameProcess(b.controllerIdentity,queryProcess(b.controllerIdentity.pid,1000))&&sameProcess(b.helperIdentity,queryProcess(b.helperIdentity.pid,1000)),'live bridge controller/helper required');this.request=new Frames(b.request.path,b.request.identity,Date.parse(b.deadlineUTC));try{this.response=new Frames(b.response.path,b.response.identity,Date.parse(b.deadlineUTC));}catch(error){this.request.close();throw error;}}
  async call(phase,detail={}) {
   check(!this.failed,'bridge uncertainty retained; no further frame');
   try {
@@ -42,7 +42,7 @@ export class BridgeClient {
   const end=Math.min(Date.parse(b.deadlineUTC),Date.now()+30000);this.request.deadline=end;this.response.deadline=end;
   await this.request.write({...b,request:undefined,response:undefined,phase,sequence,sentUTC:new Date().toISOString(),peer,detail});
   const row=await this.response.read();validateBridgeEnvelope(row,b,sequence);check(row.phase===phase&&row.status==='OBSERVED','live checkpoint unavailable: '+(row.error??row.status));
-  check(sameProcess(b.controllerIdentity,queryProcess(b.controllerIdentity.pid,1000))&&sameProcess(b.helperIdentity,queryProcess(b.helperIdentity.pid,1000)),'bridge identity lost after reply');return row;
+  check(sameProcess(b.serverIdentity??b.controllerIdentity,queryProcess((b.serverIdentity??b.controllerIdentity).pid,1000))&&sameProcess(b.controllerIdentity,queryProcess(b.controllerIdentity.pid,1000))&&sameProcess(b.helperIdentity,queryProcess(b.helperIdentity.pid,1000)),'bridge identity lost after reply');return row;
   }catch(error){this.failed=true;throw error;}
  }
  close(){this.request.close();this.response.close();}
