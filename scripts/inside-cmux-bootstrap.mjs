@@ -8,6 +8,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {hostname,userInfo} from 'node:os';
 import {validateConfig,windowBudget,withinWindow,verifyCandidate,sameProcess} from './original-roots-first-case.mjs';
 import {ancestry,queryProcess} from './original-roots-first-case.proxy.mjs';
+import {validateFocusWitness,readFocusReceipt,validateTopology,executorReadiness} from './native-focus-episode.mjs';
 const self=fileURLToPath(import.meta.url), stage=dirname(self);
 export const PINS={runner:'2d6178fee8bda45eb3c683e98c2fcca940858c9e0c74de600164a14cd86740ab',proxy:'355dd758b5fabec25da4950c7de64340bdae4afdb7f42037e35c6697879c104f',node:'832eaf52cafa7ff1364c2ca378451db14fb043d8d23a5cfd18a0a103d66226fc',cmux:'855ae2b7e14132402979e5b0e202ce85dc1ae7e6c840884530930bd3bc3adbc1'};
 const check=(ok,why)=>{if(!ok)throw Error(why);};
@@ -21,12 +22,14 @@ export function validatePlan(p,now=Date.now()) {
  check(c.candidate==='/Users/happycampr/Library/Caches/cmuxlayer-original-roots-d539fbef','exact staged candidate required');
  check(p.bootstrap.workspaceId===c.workspaceId && p.bootstrap.anchorSurfaceId===c.anchorSurfaceId && p.bootstrap.anchorPaneRef===c.anchorPaneRef,'admission identities must be observed bootstrap anchor');
  const focus=p.beforeBootstrapFocus;
- check(focus?.observer==='NATIVE_CUA' && focus.windowId && focus.workspaceId && focus.surfaceId && focus.artifactPath?.startsWith('/Users/happycampr/'),'native pre-bootstrap focus witness required');
+ validateFocusWitness(focus,c,now);
+ check(focus.artifactPath?.startsWith('/Users/happycampr/'),'private compound focus artifact required');
  check(/^[a-f0-9]{64}$/.test(focus.sha256 ?? ''),'native focus artifact hash required');
  check(Date.parse(focus.observedUTC)>=Date.parse(c.notBeforeUTC) && Date.parse(focus.observedUTC)<=Date.parse(p.bootstrap.createdUTC) && Date.parse(p.bootstrap.createdUTC)<=now,'fresh ordered native focus/creation observations required');
  check(typeof p.bootstrap.marker==='string' && p.bootstrap.marker.startsWith('INSIDE_BBE_') && p.bootstrap.marker!==c.marker,'distinct bootstrap marker required');
  check(p.retainedBaseline.path===socketWitnessPath(c) && /^[a-f0-9]{64}$/.test(p.retainedBaseline.sha256),'fresh named private socket witness in owned stage required');
  check(/^[a-f0-9]{64}$/.test(p.bootstrapSha256 ?? ''),'bootstrap hash required');
+ check(/^[a-f0-9]{64}$/.test(p.episodeControllerSha256 ?? ''),'episode controller hash required');
  check(Date.parse(c.mutationEndUTC)-now>=120000,'bootstrap needs120seconds mutation plus retained restoration reserve');
  return c;
 }
@@ -56,7 +59,7 @@ async function execute(p) {
  check(process.platform==='darwin' && process.arch==='arm64' && process.getuid()===501 && fs.lstatSync('/dev/console').uid===501 && hostname()===c.host && userInfo().homedir==='/Users/happycampr' && fs.realpathSync(process.execPath)===c.node,'normal501 M1/pinned Node context required');
  const stageStat=fs.lstatSync(stage);
  check(stageStat.isDirectory() && !stageStat.isSymbolicLink() && stageStat.uid===501 && (stageStat.mode&0o777)===0o700,'private501 bootstrap stage required');
- for(const [file,pin] of [[self,p.bootstrapSha256],[join(stage,'original-roots-first-case.mjs'),PINS.runner],[join(stage,'original-roots-first-case.proxy.mjs'),PINS.proxy],[c.node,PINS.node],[c.cmux,PINS.cmux]])check(hash(file)===pin,'staged executable hash mismatch');
+ for(const [file,pin] of [[join(stage,'native-focus-episode.mjs'),p.episodeControllerSha256],[self,p.bootstrapSha256],[join(stage,'original-roots-first-case.mjs'),PINS.runner],[join(stage,'original-roots-first-case.proxy.mjs'),PINS.proxy],[c.node,PINS.node],[c.cmux,PINS.cmux]])check(hash(file)===pin,'staged executable hash mismatch');
  verifyCandidate(c.candidate,c.manifestPath);
  const provenance=fs.lstatSync(p.retainedBaseline.path);
  check(provenance.isFile() && !provenance.isSymbolicLink() && fs.realpathSync(p.retainedBaseline.path)===p.retainedBaseline.path && provenance.uid===501 && (provenance.mode&0o777)===0o600 && hash(p.retainedBaseline.path)===p.retainedBaseline.sha256,'private provenance identity changed');
@@ -67,7 +70,9 @@ async function execute(p) {
  const focusStat=fs.lstatSync(p.beforeBootstrapFocus.artifactPath);
  check(focusStat.isFile() && !focusStat.isSymbolicLink() && focusStat.uid===501 && (focusStat.mode&0o777)===0o600 && hash(p.beforeBootstrapFocus.artifactPath)===p.beforeBootstrapFocus.sha256,'native focus artifact identity changed');
  const focusWitness=JSON.parse(fs.readFileSync(p.beforeBootstrapFocus.artifactPath,'utf8'));
- for(const key of ['observer','observedUTC','windowId','workspaceId','surfaceId'])check(focusWitness[key]===p.beforeBootstrapFocus[key],'native focus witness differs from plan');
+ readFocusReceipt(p.beforeBootstrapFocus,c);
+ // No native input or creation until a supported local-empty-shell source exists.
+ executorReadiness();
  const fresh=()=>{
   validateConfig(c);const socket=fs.lstatSync(c.socket);
   check(socket.isSocket() && !socket.isSymbolicLink() && ['uid','dev','ino'].every(k=>socket[k]===c.socketIdentity[k]),'socket identity changed');
@@ -93,6 +98,7 @@ async function execute(p) {
   const bootWorkspace=workspaces.workspaces.find(w=>w.id===p.bootstrap.workspaceId);
   check([bootWorkspace.id,bootWorkspace.ref].filter(Boolean).includes(identify.focused?.workspace_ref),'native bootstrap focus no longer matches observed empty terminal');
   check(bootstrapPanes.panes.length===1 && bootstrapPanes.panes[0].ref===p.bootstrap.anchorPaneRef && bootstrapSurfaces.surfaces.length===1 && bootstrapSurfaces.surfaces[0].id===p.bootstrap.anchorSurfaceId,'bootstrap anchor changed');
+  validateTopology(windows,workspaces,current,identify,bootstrapPanes,bootstrapSurfaces,{windowId:p.beforeBootstrapFocus.protocolWindowId,workspaceId:p.bootstrap.workspaceId,surfaceId:p.bootstrap.anchorSurfaceId,paneRef:p.bootstrap.anchorPaneRef});
   check(!workspaces.workspaces.some(w=>w.title===c.marker),'case marker already exists; no replay');
   record('pre-case-baseline',{identify,workspaces,current,windows,bootstrapPanes,bootstrapSurfaces,beforeBootstrapFocus:p.beforeBootstrapFocus});
   windowBudget(c,60000);const created=await rpc('create-case',()=>backend.createWorkspace(c.marker));outcome.status='PENDING_UNKNOWN_CASE_IDENTITY';record('case-creation-ack',created);
@@ -122,7 +128,7 @@ async function execute(p) {
  }catch(error){outcome.error=String(error);}
  finally {
   backend?.disconnect();
-  outcome.restoreProposal={caseWorkspace:outcome.case,bootstrapWorkspace:p.bootstrap,beforeBootstrapFocus:p.beforeBootstrapFocus,runnerResources:'Use independent runner result identities/absence readback; never unknown PID cleanup',sequence:['Verify runner-owned children absent or mark uncertainty',outcome.case?'Revalidate/close only ACK-bound created case workspace':'Case ownership UNKNOWN; no case closure or creation replay','Restore current validated pre-bootstrap focus via native executor','Close only bootstrap workspace LAST after foreground jobs confirmed absent'],artifactDeletion:'NOT_AUTHORIZED_Q2_UNANSWERED',overallAcceptance:'REQUIRES_PARENT_READBACK'};
+  outcome.restoreProposal={nativeToken:p.beforeBootstrapFocus.token,restorationReceipts:{cmux:'UNATTEMPTED_REQUIRES_LIVE_RETAINED_EPISODE',original:'UNATTEMPTED_REQUIRES_LIVE_RETAINED_EPISODE'},caseWorkspace:outcome.case,bootstrapWorkspace:p.bootstrap,beforeBootstrapFocus:p.beforeBootstrapFocus,runnerResources:'Use independent runner result identities/absence readback; never unknown PID cleanup',sequence:['Verify runner-owned children absent or mark uncertainty',outcome.case?'Revalidate/close only ACK-bound created case workspace':'Case ownership UNKNOWN; no case closure or creation replay','Restore current validated pre-bootstrap focus via native executor','Close only bootstrap workspace LAST after foreground jobs confirmed absent'],artifactDeletion:'NOT_AUTHORIZED_Q2_UNANSWERED',overallAcceptance:'REQUIRES_PARENT_READBACK'};
   record('result',outcome);console.log(JSON.stringify({status:outcome.status,receipt:join(receipts,'result.json'),overallAcceptance:'UNPROVED'}));
  }
  if(outcome.status==='FAIL' || outcome.runnerExit?.code!==0 || outcome.deadlineExpired)process.exitCode=1;

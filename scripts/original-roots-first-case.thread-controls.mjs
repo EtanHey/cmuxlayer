@@ -23,10 +23,16 @@ const c = {executionApproved:true, coordinationReceipt:{status:'ACCEPTED', dispa
   socket:'/observed/native.sock', socketIdentity:{uid:501, dev:1, ino:2}, appProcess:app,
   runnerSha256:PINS.runner, proxyRunnerSha256:PINS.proxy, nodeSha256:PINS.node, cmuxSha256:PINS.cmux,
   notBeforeUTC:stamp(-1000), mutationEndUTC:stamp(180000), deadlineUTC:stamp(240000)};
-const p = {sourceApproved:true, executionApproved:true, bootstrapSha256:hash('./inside-cmux-bootstrap.mjs'), runner:c,
+const p = {sourceApproved:true, executionApproved:true, bootstrapSha256:hash('./inside-cmux-bootstrap.mjs'),episodeControllerSha256:hash('./native-focus-episode.mjs'), runner:c,
   bootstrap:{workspaceId:id, anchorSurfaceId:id, anchorPaneRef:'pane:1', marker:'INSIDE_BBE_'+id, createdUTC:stamp(-100)},
-  beforeBootstrapFocus:{observer:'NATIVE_CUA', windowId:'synthetic-window', workspaceId:id, surfaceId:id,
-    artifactPath:'/Users/happycampr/Library/Caches/synthetic-focus.json', sha256:'a'.repeat(64), observedUTC:stamp(-500)},
+  beforeBootstrapFocus:{observer:'NSWORKSPACE_FOREGROUND_DIRECT_PID_AX',status:'OBSERVED',kind:'cmux',identityKind:'RETAINED_AX_ELEMENT_REFERENCE',token:id,session:id,
+    runId:id,dispatchId:c.coordinationReceipt.dispatchId,threadId:current,deadlineUTC:c.deadlineUTC,sameFocusedWindow:true,nativeWindowCount:1,nativeWindowsEqual:true,
+    helperIdentity:{pid:88,ppid:89,uid:501,start:'synthetic-helper-start',executable:'/synthetic/helper',argv:'synthetic-helper'},
+    controllerIdentity:{pid:89,uid:501,start:'synthetic-controller-start',argv:'synthetic-controller'},helperSHA256:'a'.repeat(64),helperPath:'/synthetic/helper',helperArgv:'synthetic-helper',appProcess:app,
+    app:{pid:'44',bundle:'/Applications/cmux.app',executable:app.executable},capabilities:{recipe:'ACTIVATE_EXISTING_RAISE_SET_FOCUSED_WINDOW',raiseError:0,raiseSupported:true,setterError:0,focusedWindowSettable:true},
+    topology:{binding:'SINGLE_NATIVE_SINGLE_PROTOCOL_WINDOW',windowCount:1,key:true,selectedWorkspaceCount:1,selectedSurfaceCount:1,windowId:'synthetic-protocol-window',workspaceId:id,surfaceId:id,paneRef:'pane:1'},
+    protocolWindowId:'synthetic-protocol-window',workspaceId:id,surfaceId:id,paneRef:'pane:1',
+    artifactPath:'/Users/happycampr/Library/Caches/synthetic-focus.json',sha256:'a'.repeat(64),observedUTC:stamp(-500),completedUTC:stamp(-400)},
   retainedBaseline:{path:socketWitnessPath(c), sha256:'b'.repeat(64)}};
 let passed = 0;
 const test = (name, run) => {run(); passed++; console.log('PASS '+name);};
