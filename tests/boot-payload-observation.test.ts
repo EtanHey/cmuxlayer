@@ -14,11 +14,20 @@ let directory: string;
 const contexts: ReturnType<typeof createServerContext>[] = [];
 
 function setup(options: { paintAfter?: number; timeout?: number; edited?: string; readError?: boolean; lateRead?: boolean; changeRoute?: boolean; changeUuid?: boolean; editAtReturn?: boolean;
-  accept?: "late" | "pending"; finalRead?: "expired" | "error" | "foreign-expired"; recoveryError?: "read" | "surface-gone" | "uuid"; managed?: boolean } = {}) {
+  accept?: "late" | "pending"; finalRead?: "expired" | "error" | "foreign-expired"; recoveryError?: "read" | "surface-gone" | "uuid"; managed?: boolean; readiness?: "update" | "relaunch"; expireBeforeText?: "binding" | "baseline" | "route"; changeReadyRoute?: boolean } = {}) {
   const state = { typedAt: null as number | null, text: "", returns: 0, writes: 0, afterTypeReads: 0, completeReads: 0, routeChanged: false, uuidChanged: false,
-    accepted: false, firstPostReturnRead: null as number | null, recoveryArmed: false };
+    accepted: false, firstPostReturnRead: null as number | null, recoveryArmed: false, readinessReads: 0, relaunches: 0, readyFrameSeen: false, deliveryPhaseStarted: false, expiredBeforeText: false };
+  const expire = () => { if (!state.expiredBeforeText) { state.expiredBeforeText = true; vi.setSystemTime(Date.now() + 1000); } };
   const client = {
     readScreen: vi.fn(async () => {
+      if (state.typedAt === null) {
+        state.readinessReads++;
+        if (options.expireBeforeText === "baseline" && state.deliveryPhaseStarted) expire();
+        if (options.readiness === "update" && state.readinessReads <= 4) return { text: "Updating Claude CLI from 2.1.295 → 2.1.296 …" };
+        if (options.readiness === "relaunch" && state.relaunches === 0) return { text: state.readinessReads === 1
+          ? "Updating Claude CLI from 2.1.295 → 2.1.296 …" : "Update ran successfully! Please restart Claude.\netan@mac % " };
+        state.readyFrameSeen = true;
+      }
       if (state.returns) {
         if (options.recoveryError === "read" && state.recoveryArmed) throw Error("post-Return transport read failure");
         if (options.recoveryError === "surface-gone" && state.recoveryArmed) throw Error("surface_not_found: surface:2");
@@ -43,7 +52,7 @@ function setup(options: { paintAfter?: number; timeout?: number; edited?: string
       }
       return { text: screen() };
     }),
-    send: vi.fn(async (_surface: string, text: string) => { state.text = text; state.typedAt = Date.now(); state.writes++; state.routeChanged = Boolean(options.changeRoute); state.uuidChanged = Boolean(options.changeUuid); }),
+    send: vi.fn(async (_surface: string, text: string) => { state.text = text; state.typedAt = Date.now(); state.writes++; state.routeChanged ||= Boolean(options.changeRoute); state.uuidChanged = Boolean(options.changeUuid); }),
     sendKey: vi.fn(async (_surface: string, key: string) => { if (key === "return") { state.returns++; state.accepted = !options.accept; } }),
     getTransportHealth: () => ({ transport: "socket", socket_path: "/tmp/p0fixture.sock", socket_path_state: "active", fallback_count: 0 }),
     currentObserverTransportEpoch: () => 0,
@@ -57,13 +66,22 @@ function setup(options: { paintAfter?: number; timeout?: number; edited?: string
     created_at: new Date().toISOString(), updated_at: new Date().toISOString(), boot_instance_id: "boot-instance", boot_prompt_pending: true, prompt_delivered: false } as any);
   const delivery = createDeliveryEngine({ context, client: context.client, inboxOpts: {}, resolveCurrentCallerAgent: () => caller,
     assertSurfaceMutationAllowed: async () => {
+      state.deliveryPhaseStarted = true;
+      if (options.expireBeforeText === "binding" && state.typedAt === null) expire();
       if (options.editAtReturn && state.completeReads >= 2) state.text += " edited";
       if (options.accept === "late" && state.recoveryArmed && state.returns === 1) state.accepted = true;
     },
     successfulDispatchRpcMethod: createSuccessfulDispatchRpcMethod(context.client), lifecycleSeatManifestPublisher: async () => {} });
   const run = () => withTransportRetryTracking(() => delivery.deliverBootPrompt({ surface: "surface:2", workspace: "workspace:1", stableSurfaceIdentity: UUID,
     cli: "claude", prompt: payload, delivery_id: "original-boot-delivery", timeout_ms: options.timeout ?? 3000,
-    resolveRoute: async () => ({ surface: state.routeChanged ? "surface:other" : "surface:2", workspace: "workspace:1" }),
+    resolveRoute: async () => {
+      if (state.readyFrameSeen && !state.deliveryPhaseStarted) {
+        if (options.expireBeforeText === "route") expire();
+        if (options.changeReadyRoute || options.expireBeforeText === "route") state.routeChanged = true;
+      }
+      return { surface: state.routeChanged ? "surface:other" : "surface:2", workspace: "workspace:1" };
+    },
+    onUpdateShellRelaunch: async () => { await new Promise(resolve => setTimeout(resolve, 1000)); state.relaunches++; },
     assertStableSurfaceIdentity: async () => { if (state.uuidChanged || (options.recoveryError === "uuid" && state.recoveryArmed)) throw Error("surface UUID changed"); },
   }));
   return { state, run, client, context };
@@ -78,6 +96,37 @@ async function settle(run: () => Promise<unknown>) {
 describe("Claude boot payload observation deadline", () => {
   beforeEach(() => { directory = mkdtempSync(join(tmpdir(), "cmuxlayer-boot-observe-")); });
   afterEach(() => { for (const c of contexts.splice(0)) c.dispose(); vi.useRealTimers(); rmSync(directory, { recursive: true, force: true }); });
+  it.each(["update", "relaunch"] as const)("uses the extended readiness deadline after %s", async readiness => {
+    const h = setup({ readiness, timeout: 300, paintAfter: 0, managed: true }); vi.useFakeTimers();
+    const startedAt = Date.now();
+    const r = await settle(h.run);
+    expect(Date.now() - startedAt).toBeGreaterThan(300);
+    expect(r).not.toHaveProperty("error");
+    expect(r.value).toMatchObject({ delivery_id: "original-boot-delivery", delivery_state: "submitted", typed: true, submit_dispatched: true, submit_verified: true, retry_count: 0 });
+    expect(h.state.writes).toBe(1); expect(h.state.returns).toBe(1);
+    expect(h.state.relaunches).toBe(readiness === "relaunch" ? 1 : 0);
+  });
+  it("keeps the extended remaining budget when the ready route changes", async () => {
+    const h = setup({ readiness: "update", changeReadyRoute: true, timeout: 300, paintAfter: 0 }); vi.useFakeTimers();
+    const r = await settle(h.run);
+    expect(r).not.toHaveProperty("error"); expect(r.value).toMatchObject({ submit_dispatched: true, submit_verified: true });
+    expect(h.client.send).toHaveBeenCalledWith("surface:other", payload, expect.anything());
+    expect(h.state.writes).toBe(1); expect(h.state.returns).toBe(1);
+  });
+  it.each(["binding", "baseline"] as const)("sends no input when the boot deadline expires at pre-text %s", async expireBeforeText => {
+    const h = setup({ expireBeforeText, timeout: 300, paintAfter: 0 }); vi.useFakeTimers();
+    const r = await settle(h.run);
+    expect(h.state.expiredBeforeText).toBe(true);
+    expect(r).toHaveProperty("error"); expect(r.error).toMatchObject({ typed: false, submit_dispatched: false, delivered_chars: 0 });
+    expect(h.client.send).not.toHaveBeenCalled(); expect(h.client.sendKey).not.toHaveBeenCalled();
+    expect(h.context.typedDraftOwners.size).toBe(0);
+  });
+  it("does not restart readiness with a zero budget after route-time expiry", async () => {
+    const h = setup({ expireBeforeText: "route", timeout: 300, paintAfter: 0 }); vi.useFakeTimers();
+    const r = await settle(h.run);
+    expect(r).toHaveProperty("error"); expect(h.state.expiredBeforeText).toBe(true);
+    expect(h.client.send).not.toHaveBeenCalled(); expect(h.client.sendKey).not.toHaveBeenCalled();
+  });
   it("submits once when repaint occurs after the old three-read window", async () => {
     const h = setup(); vi.useFakeTimers();
     const r = await settle(h.run);

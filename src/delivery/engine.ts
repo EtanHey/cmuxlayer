@@ -1956,7 +1956,24 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let submitDispatched = false;
     let bootReturnReady = false;
     try {
-      const assertBinding = opts.beforeMutation;
+      // Readiness can extend boot's budget after an update/relaunch. Before
+      // any first text mutation, enforce that effective deadline; dispatched
+      // text/Return retains its existing pending and late-acceptance semantics.
+      const assertInitialBootTextDeadline = () => {
+        if (!textDispatched && !submitDispatched &&
+            opts.boot_payload_observe_deadline_ms !== undefined &&
+            Date.now() >= opts.boot_payload_observe_deadline_ms) {
+          throw new InitialBootReturnDeadlineExpired();
+        }
+      };
+      const beforeMutation = opts.beforeMutation;
+      const assertBinding = opts.boot_payload_observe_deadline_ms === undefined
+        ? beforeMutation
+        : async () => {
+            assertInitialBootTextDeadline();
+            await beforeMutation?.();
+            assertInitialBootTextDeadline();
+          };
       let securityDismissed = false;
       let securityCapable = true;
       let inputSafetyObserved = false;
@@ -2024,6 +2041,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (deadline !== undefined && Date.now() >= deadline) throw new InitialBootReturnDeadlineExpired();
         } else if (!inputSafetyObserved && securityCapable) await readSafeInput();
         inputSafetyObserved = false;
+        assertInitialBootTextDeadline();
       } };
       await assertBinding?.();
       if (opts.key !== undefined) {
@@ -2896,6 +2914,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     stableSurfaceIdentity?: string | null;
     initialUpdateMenuTextHash?: string;
+    deadline_ms?: number;
     cli?: CliType;
     text: string;
     timeout_ms: number;
@@ -2904,13 +2923,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     assertStableSurfaceIdentity?: () => Promise<void>;
   }): Promise<{
     delivery_state: "ready" | "queued";
+    deadline_ms: number;
     metrics: RawSubmitEvidenceMetrics | null;
     route: { surface: string; workspace?: string };
     cli: CliType;
     updateMenuTextHash?: string;
     observation?: NonNullable<PublicDeliveryReceipt["observation"]>;
   }> => {
-    let deadline = Date.now() + opts.timeout_ms;
+    let deadline = opts.deadline_ms ?? Date.now() + opts.timeout_ms;
     let lastText = "";
     let lastSurface = opts.surface;
     const consecutiveMatches = new Map<CliType, number>();
@@ -3136,6 +3156,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (count >= requiredBootReadyObservations(candidate, screen.text)) {
             return {
               delivery_state: "ready",
+              deadline_ms: deadline,
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
               cli: candidate,
@@ -3182,6 +3203,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
       return {
         delivery_state: "queued",
+        deadline_ms: deadline,
         ...queuedObservation,
       };
     }
@@ -3932,7 +3954,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedText];
 
-    const bootDeadline = Date.now() + (opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS);
+    let bootDeadline = Date.now() + (opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS);
     let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -3940,10 +3962,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       cli: opts.cli,
       text: sanitizedText,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+      deadline_ms: opts.cli === "claude" ? bootDeadline : undefined,
       onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
       resolveRoute: opts.resolveRoute,
       assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
     });
+
+    if (opts.cli === "claude") bootDeadline = readiness.deadline_ms;
 
     let deliveryRoute = opts.resolveRoute
       ? await opts.resolveRoute()
@@ -3955,6 +3980,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       left.surface === right.surface &&
       (left.workspace ?? null) === (right.workspace ?? null);
     if (!sameRoute(readiness.route, deliveryRoute)) {
+      const remainingReadyBudget = opts.cli === "claude"
+        ? bootDeadline - Date.now()
+        : opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS;
+      if (opts.cli === "claude" && remainingReadyBudget <= 0) {
+        throw new BootPromptTimeoutError(
+          `Boot prompt readiness deadline expired before route re-read on ${deliveryRoute.surface}`,
+          [],
+        );
+      }
       readiness = await waitForBootPromptReady({
         surface: deliveryRoute.surface,
         workspace: deliveryRoute.workspace,
@@ -3962,13 +3996,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         initialUpdateMenuTextHash: readiness.updateMenuTextHash,
         cli: opts.cli,
         text: sanitizedText,
-        timeout_ms: opts.cli === "claude"
-          ? Math.max(0, bootDeadline - Date.now())
-          : opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+        timeout_ms: remainingReadyBudget,
+        deadline_ms: opts.cli === "claude" ? bootDeadline : undefined,
         onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
         resolveRoute: opts.resolveRoute,
         assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
       });
+      if (opts.cli === "claude") bootDeadline = readiness.deadline_ms;
       deliveryRoute = opts.resolveRoute
         ? await opts.resolveRoute()
         : readiness.route;
