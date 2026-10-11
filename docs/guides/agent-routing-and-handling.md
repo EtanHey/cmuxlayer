@@ -54,6 +54,8 @@ or target, reads retained local evidence without pane input or topology reads,
 and never updates the receipt, claims ownership, types, or presses Return.
 `ok:false` and `recovery_eligible:false` mean this call cannot submit; nested
 `receipt` fields describe the original delivery, not input by this call.
+Every outcome returns MCP `isError:true` and JSON text containing `ok:false`
+and an explicit recovery refusal, including terminal and observation-only receipts.
 Terminal receipts remain terminal. Queued/accepted or previously dispatched
 uncertain submissions return `observe_only`. Every other case is unsupported:
 even an intact complete keyed owner plus submit_dispatched:false lacks proven

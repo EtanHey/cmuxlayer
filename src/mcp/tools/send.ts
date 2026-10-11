@@ -604,7 +604,7 @@ export function registerSendToTool(
           }
           const data = deps.observeRecovery(args.delivery_id);
           if ("receipt" in data && data.receipt) assertWorkerUpwardChannel(data.receipt.agent_id);
-          return okFormatted(formatOk("send_to", data), data);
+          return err(new Error("send_to recover_delivery refused: observation only; no input performed"), data);
         }
         if (args.delivery_id) throw new Error("send_to delivery_id is supported only in mode=recover_delivery");
         if (!mode) {

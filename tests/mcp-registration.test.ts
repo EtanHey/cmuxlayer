@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { installToolRegistration } from "../src/mcp/registration.js";
-import { ok } from "../src/mcp/tool-result.js";
+import { ok, err } from "../src/mcp/tool-result.js";
 
 const text = (value: string) => ({
   content: [{ type: "text" as const, text: value }],
@@ -30,11 +30,11 @@ describe("installToolRegistration (mcp/registration.ts)", () => {
     const registration = installToolRegistration(server, { client: {}, palette: null,
       resolveCallerAgentId: () => null, lifecycleGate });
     server.tool("wait_for", "fixture", async () => ok({ diagnostic: "ownership" }));
-    server.tool("send_to", "recovery fixture", async () => ok({ ok: false, recovery_eligible: false }));
+    server.tool("send_to", "recovery fixture", async () => err(new Error("recovery refused"), { recovery_eligible: false }));
     const handler = registration.toolHandlersByName.get("wait_for")!;
     expect((await handler({ diagnostic: "ownership", delivery_id: "fixture" }, {})).isError).not.toBe(true);
     expect(lifecycleGate).not.toHaveBeenCalled();
-    expect((await registration.toolHandlersByName.get("send_to")!({ mode: "recover_delivery", delivery_id: "fixture" }, {})).isError).not.toBe(true);
+    expect((await registration.toolHandlersByName.get("send_to")!({ mode: "recover_delivery", delivery_id: "fixture" }, {})).isError).toBe(true);
     expect(lifecycleGate).not.toHaveBeenCalled();
     expect((await handler({ delivery_id: "fixture" }, {})).isError).toBe(true);
     expect(lifecycleGate).toHaveBeenCalledOnce();

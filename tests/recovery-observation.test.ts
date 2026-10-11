@@ -106,12 +106,29 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
     const before = snapshot(); transportCall.mockClear(); topologyCall.mockClear();
     const call = (extra: Record<string, unknown> = {}) => runWithCallerContext({ surfaceId: CALLER_UUID },
       () => client.callTool({ name: "send_to", arguments: { mode: "recover_delivery", delivery_id: ID, ...extra } }));
+    const expectRecoveryRefusal = (result: Awaited<ReturnType<typeof client.callTool>>) => {
+      expect(result.isError).toBe(true);
+      const content = result.content as { type: string; text: string }[];
+      expect(content).toHaveLength(1); expect(content[0].type).toBe("text");
+      expect(content[0].text).not.toContain("✔");
+      const textPayload = JSON.parse(content[0].text);
+      expect(textPayload).toEqual(result.structuredContent);
+      expect(textPayload).toMatchObject({ ok: false, delivery_id: ID,
+        error: "send_to recover_delivery refused: observation only; no input performed",
+        input_performed: false, recovery_eligible: false, never_dispatched_proof: "not_proven" });
+      expect(content[0].text).not.toContain("PRIVATE");
+    };
     const tools = await client.listTools();
     expect(tools.tools.find(tool => tool.name === "send_to")?.inputSchema.properties).toHaveProperty("delivery_id");
     const [first, second, normal] = await Promise.all([call(), call(), runWithCallerContext({ surfaceId: UUID },
       () => client.callTool({ name: "send_to", arguments: { mode: "agent", agent_id: "target", text: t.receipt.text } }))]);
-    for (const result of [first, second]) expect(result.structuredContent).toMatchObject({ ok: false,
-      delivery_id: ID, reason: "return_dispatch_journal_not_proven", recovery_eligible: false, input_performed: false });
+    for (const result of [first, second]) {
+      expectRecoveryRefusal(result);
+      expect(result.structuredContent).toMatchObject({ ok: false, delivery_id: ID,
+        reason: "return_dispatch_journal_not_proven", recovery_eligible: false, input_performed: false,
+        receipt: { agent_id: "target", delivery_state: "pending_verify", terminal: false,
+          typed: true, submit_dispatched: false, submit_verified: null } });
+    }
     // A normal send from another caller follows the existing pending duplicate
     // gate. Recovery observations cannot lend it the original caller's owner.
     expect(normal.structuredContent?.ok).toBe(false);
@@ -124,6 +141,7 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
     const foreign = await runWithCallerContext({ surfaceId: UUID }, () => client.callTool({ name: "send_to",
       arguments: { mode: "recover_delivery", delivery_id: ID, caller_agent_id: "sender" } }));
     expect(foreign.structuredContent).toMatchObject({ caller_agent_id: "target", reason: "ownership_not_proven", input_performed: false });
+    expectRecoveryRefusal(foreign);
     expect(snapshot()).toBe(before);
     const controls = ["missing-owner", "incomplete", "workspace", "uuid", "session", "boot", "unbound-boot", "wrong-id"];
     for (const control of controls) {
@@ -140,7 +158,8 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
       context.typedDraftOwners.clear();
       if (control !== "missing-owner") context.typedDraftOwners.set(key, changedOwner);
       const changedBefore = snapshot();
-      expect((await call()).structuredContent).toMatchObject({ recovery_outcome: "unsupported", recovery_eligible: false, input_performed: false });
+      const refused = await call(); expectRecoveryRefusal(refused);
+      expect(refused.structuredContent).toMatchObject({ recovery_outcome: "unsupported", recovery_eligible: false, input_performed: false });
       expect(snapshot()).toBe(changedBefore);
     }
     engine.stateMgr.writeState(target); engine.getRegistry().set(target.agent_id, target);
@@ -157,6 +176,7 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
       engine.resolveDelivery({ ...original, ...control }); journal.mockClear();
       const originalBefore = snapshot();
       const outcome = await call();
+      expectRecoveryRefusal(outcome);
       expect(outcome.structuredContent).toMatchObject({ ok: false, delivery_id: ID, input_performed: false, recovery_eligible: false });
       expect(outcome.structuredContent?.recovery_outcome).toBe(control.submit_dispatched === true || "delivery_state" in control ? "observe_only" : "unsupported");
       expect(snapshot()).toBe(originalBefore); expect(journal).not.toHaveBeenCalled();
@@ -173,13 +193,20 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
     const absentBefore = snapshot();
     const unresolved = await client.callTool({ name: "send_to", arguments: { mode: "recover_delivery", delivery_id: ID } });
     expect(unresolved.structuredContent).toMatchObject({ reason: "caller_unresolved", input_performed: false });
+    expectRecoveryRefusal(unresolved);
     expect(unresolved.structuredContent).not.toHaveProperty("receipt"); expect(snapshot()).toBe(absentBefore);
     // A synthetic accepted receipt models independently settled verification;
     // the read must retain that result and never re-open it.
-    engine.resolveDelivery({ ...engine.getDeliveryReceipt(ID)!, delivery_state: "submitted", terminal: true, submit_verified: true, submit_dispatched: true });
-    const acceptedBefore = snapshot(); journal.mockClear();
-    expect((await call()).structuredContent).toMatchObject({ recovery_outcome: "terminal", receipt: { delivery_state: "submitted" } });
-    expect(snapshot()).toBe(acceptedBefore); expect(journal).not.toHaveBeenCalled();
+    for (const state of ["submitted", "failed_confirmed"] as const) {
+      engine.resolveDelivery({ ...original, delivery_state: state, terminal: true,
+        submit_verified: state === "submitted", submit_dispatched: true });
+      const terminalBefore = snapshot(); journal.mockClear();
+      const terminal = await call(); expectRecoveryRefusal(terminal);
+      expect(terminal.structuredContent).toMatchObject({ recovery_outcome: "terminal",
+        receipt: { delivery_state: state, terminal: true, typed: true,
+          submit_dispatched: true, submit_verified: state === "submitted" } });
+      expect(snapshot()).toBe(terminalBefore); expect(journal).not.toHaveBeenCalled();
+    }
     expect(transportCall).not.toHaveBeenCalled(); expect(topologyCall).not.toHaveBeenCalled();
     expect(verify).not.toHaveBeenCalled(); expect(deliver).not.toHaveBeenCalled();
   } finally { await client.close(); await server.close(); context.dispose(); rmSync(dir, { recursive: true, force: true }); }
