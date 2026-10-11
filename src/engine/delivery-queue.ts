@@ -397,7 +397,7 @@ export class DeliveryQueue {
       if (
         (receipt.delivery_state === "pending_verify" ||
           (receipt.delivery_state === "typed" && receipt.typed === true &&
-            receipt.submit_dispatched === false && !receipt.terminal) ||
+            !receipt.terminal) ||
           receipt.delivery_state === "queued" ||
           receipt.delivery_state === "steer_pending" ||
           receipt.delivery_state === "queued_followup") &&
@@ -521,7 +521,10 @@ export class DeliveryQueue {
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
         const now = Date.now();
         const timedOut = deadlineApplies && now >= deadlineMs;
-        const skipRead = this.shouldSkipVerifyRead(receipt, now);
+        // Parking needs a current observation, including absence/generation
+        // changes. A throttle placeholder cannot establish a live draft.
+        const skipRead = this.shouldSkipVerifyRead(receipt, now) &&
+          !(timedOut && receipt.typed === true && receipt.submit_dispatched === false);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (skipRead && !timedOut) continue;
         if (!skipRead && this.deliveryVerifier) {
@@ -641,7 +644,7 @@ export class DeliveryQueue {
           observation.reason === "target_gone" &&
           (receipt.verify_miss_count ?? 0) >=
             DELIVERY_TARGET_GONE_CONFIRM_MISSES;
-        if (timedOut && observation.outcome === "pending" && !confirmedGone &&
+        if (timedOut && observation.outcome === "pending" && observation.reason === undefined && !confirmedGone &&
           receipt.typed === true && receipt.submit_dispatched === false) {
           // A verification deadline cannot fail a submit that never happened.
           // Stop passive verification without expiring the caller's draft. The

@@ -122,6 +122,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
   afterEach(() => {
     rmSync(testDir, { recursive: true, force: true });
     vi.resetModules();
+    vi.unstubAllGlobals();
   });
 
   async function setup() {
@@ -423,7 +424,18 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  async function expireQuotaDraft(t: Awaited<ReturnType<typeof setup>>) {
+  function forwardClock(at: number) {
+    const NativeDate = Date;
+    let offset = at - NativeDate.now();
+    class ForwardDate extends NativeDate {
+      constructor(value?: string | number) { super(value === undefined ? NativeDate.now() + offset : value); }
+      static now() { return NativeDate.now() + offset; }
+    }
+    vi.stubGlobal("Date", ForwardDate);
+    return (ms: number) => { offset += ms; };
+  }
+
+  async function expireQuotaDraft(t: Awaited<ReturnType<typeof setup>>, realisticClock = false) {
     t.pane.state.rendered = true;
     t.pane.state.onExec = args => {
       if (args.includes("send") && !args.includes("send-key")) t.pane.state.quota = true;
@@ -434,15 +446,16 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     const owners = [...t.context.typedDraftOwners.values()].map(owner => structuredClone(owner));
     expect(owners).toHaveLength(1);
     expect(owners[0]).toMatchObject({ caller: "lead-seat", deliveryIds: [sent.delivery_id] });
-    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(original.verify_deadline_at!) + 1);
-    try { await t.engine.verifyPendingDeliveries(); } finally { clock.mockRestore(); }
+    const advanceClock = realisticClock ? forwardClock(Date.parse(original.verify_deadline_at!) + 1) : undefined;
+    const clock = realisticClock ? undefined : vi.spyOn(Date, "now").mockReturnValue(Date.parse(original.verify_deadline_at!) + 1);
+    try { await t.engine.verifyPendingDeliveries(); } finally { clock?.mockRestore(); }
     const expired = t.engine.getDeliveryReceipt(sent.delivery_id)!;
     expect(returnPresses(t.pane.exec)).toBe(0);
     expect(t.pane.state.composer).toBe(wrappedMessage);
     expect([...t.context.typedDraftOwners.values()]).toEqual(owners);
     console.log("RECEIPT_EXPIRY_SWEEP", JSON.stringify({ original, expired, owners, returns: returnPresses(t.pane.exec) }));
     t.pane.state.quota = false;
-    return { sent, expired };
+    return { sent, expired, advanceClock };
   }
 
   it("ReceiptExpiry keeps the original recoverable after the normal quota-blocked sweep", async () => {
@@ -497,9 +510,91 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       expect(t.pane.state.composer).toBe(wrappedMessage);
       expect(t.context.typedDraftOwners.size).toBe(1);
       expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
-        delivery_id: sent.delivery_id, delivery_state: "pending_verify", terminal: false,
+        delivery_id: sent.delivery_id, delivery_state: "typed", terminal: false,
         submit_dispatched: true, submit_verified: null,
       });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each([1000, 31_000])("ReceiptExpiryR1 recovers the original after an unaccepted Return and a normal %sms sweep", async gap => {
+    const t = await setup();
+    try {
+      const { sent, expired, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false;
+      const attempted = await t.keyReturn(LEAD_UUID, "surface:new");
+      const afterAttempt = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+      expect(t.engine.findOpenDuplicate({ agent_id: "target-seat", text: wrappedMessage, press_enter: true })?.delivery_id).toBe(sent.delivery_id);
+      const attemptReturns = returnPresses(t.pane.exec);
+      advanceClock!(gap);
+      const sweepAt = Date.now();
+      expect(new Date().getTime()).toBeGreaterThanOrEqual(sweepAt);
+      const readsBefore = t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length;
+      await t.engine.verifyPendingDeliveries();
+      const afterSweep = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+      const sweepReturns = returnPresses(t.pane.exec);
+      const sweepReads = t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length - readsBefore;
+      const sinceVerify = sweepAt - Date.parse(expired.verify_last_attempt_at!);
+      t.pane.state.acceptReturn = true;
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new");
+      const final = t.engine.getDeliveryReceipt(sent.delivery_id);
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      console.log("R1_F1_LIFECYCLE", JSON.stringify({ gap, sinceVerify, expired, attempted, afterAttempt, afterSweep,
+        recovered, final, attemptReturns, sweepReturns, sweepReads, finalReturns: returnPresses(t.pane.exec), submitted: t.pane.state.submitted }));
+      expect(attempted).toMatchObject({ delivery_id: sent.delivery_id, submit_verified: null });
+      expect(attemptReturns).toBe(1);
+      expect(recovered).toMatchObject({ ok: true, delivery_id: sent.delivery_id, submit_verified: true });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(final).toMatchObject({ delivery_id: sent.delivery_id, delivery_state: "submitted", submit_verified: true });
+      expect(afterSweep).toMatchObject({ terminal: false, delivery_state: "typed", submit_dispatched: true, submit_verified: null });
+      expect(sweepReturns).toBe(1); expect(sweepReads).toBe(0); // Parked uncertainty never enables passive Return retry.
+      expect(returnPresses(t.pane.exec)).toBe(2);
+      expect(t.context.typedDraftOwners.size).toBe(0);
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") && !args.includes("send-key"))).toHaveLength(1);
+      expect(gap === 1000 ? sinceVerify < 30_000 : sinceVerify >= 30_000).toBe(true);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["edited", "rebound"])("ReceiptExpiryR1 cannot keep an unverified Return parked after %s evidence", async control => {
+    const t = await setup();
+    try {
+      const { sent } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false;
+      t.pane.state.onExec = args => {
+        if (!args.includes("send-key") || !args.includes("return")) return;
+        if (control === "edited") t.pane.state.composer += " operator edit";
+        else {
+          const target = t.engine.stateMgr.updateRecord("target-seat", { cli_session_id: "replacement-session" });
+          t.engine.getRegistry().set(target.agent_id, target);
+        }
+      };
+      const attempted = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(attempted).toMatchObject({ delivery_id: sent.delivery_id, submit_verified: null });
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+        delivery_state: "pending_verify", terminal: false, submit_dispatched: true, submit_verified: null,
+      });
+      expect(returnPresses(t.pane.exec)).toBe(1); expect(t.pane.state.submitted).toEqual([]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("ReceiptExpiryR1 fails replaced boot recovery at deadline without absorbing duplicates", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      t.pane.state.onExec = args => { if (args.includes("send") && !args.includes("send-key")) t.pane.state.quota = true; };
+      const sent = await t.send(wrappedMessage, true);
+      const original = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+      // Seed the existing boot-recovery queue contract; the registered verifier
+      // must reject this generation once the managed target is replaced.
+      t.engine.acceptPendingVerify({ ...original, boot_recovery: true, boot_instance_id: "old-boot" });
+      const target = t.engine.stateMgr.updateRecord("target-seat", { boot_instance_id: "replacement-boot" });
+      t.engine.getRegistry().set(target.agent_id, target);
+      forwardClock(Date.parse(original.verify_deadline_at!) + 1);
+      await t.engine.verifyPendingDeliveries();
+      const final = t.engine.getDeliveryReceipt(sent.delivery_id);
+      const duplicate = t.engine.findOpenDuplicate({ agent_id: "target-seat", text: wrappedMessage, press_enter: true });
+      console.log("R1_F2_BOOT", JSON.stringify({ final, duplicate, returns: returnPresses(t.pane.exec) }));
+      expect(final).toMatchObject({ delivery_state: "failed_confirmed", terminal: true, error: "boot_instance_changed" });
+      expect(duplicate).toBeNull(); expect(returnPresses(t.pane.exec)).toBe(0);
     } finally { t.context.dispose(); }
   }, 30_000);
 

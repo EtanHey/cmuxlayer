@@ -73,6 +73,30 @@ describe("receipt expiry queue boundaries", () => {
     expect(queue.getDeliveryReceipt("original")).toMatchObject({ delivery_state: "failed_confirmed", terminal: true, error: "target_gone" });
   });
 
+  it.each(["target_gone", "boot_instance_changed"])("ReceiptExpiryR1 fails a single %s observation at deadline", async reason => {
+    const { queue, accept } = setup({ outcome: "pending", reason });
+    accept(false); vi.advanceTimersByTime(1001); await queue.verifyPendingDeliveries();
+    const final = queue.getDeliveryReceipt("original");
+    vi.advanceTimersByTime(5 * 60 * 60 * 1000); await queue.verifyPendingDeliveries();
+    const duplicate = queue.findOpenDuplicate({ agent_id: "target", text: "owned text", press_enter: true });
+    console.log("R1_F2_QUEUE", JSON.stringify({ reason, final, duplicate }));
+    expect(final).toMatchObject({ delivery_state: "failed_confirmed", terminal: true, error: reason });
+    expect(queue.getDeliveryReceipt("original")).toEqual(final);
+    expect(duplicate).toBeNull();
+  });
+
+  it.each([undefined, "target_gone", "boot_instance_changed"])("ReceiptExpiryR1 reads known undispatched text at deadline inside throttle (%s)", async reason => {
+    const { queue, verifier, accept } = setup({ outcome: "pending", reason });
+    accept(false); await queue.verifyPendingDeliveries();
+    vi.advanceTimersByTime(1001); await queue.verifyPendingDeliveries();
+    const final = queue.getDeliveryReceipt("original");
+    console.log("R1_F2_THROTTLE", JSON.stringify({ reason, verifierCalls: verifier.mock.calls.length, final }));
+    expect(verifier).toHaveBeenCalledTimes(2);
+    expect(final).toMatchObject(reason === undefined
+      ? { delivery_state: "typed", terminal: false, submit_verified: null }
+      : { delivery_state: "failed_confirmed", terminal: true, error: reason });
+  });
+
   it("accepts actual submission evidence even after the deadline", async () => {
     const { queue, accept } = setup({ outcome: "delivered", submit_verified: true });
     accept(false); vi.advanceTimersByTime(1001); await queue.verifyPendingDeliveries();

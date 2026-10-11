@@ -2144,9 +2144,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         if (original && original.agent_id === targetAgent?.agent_id && original.text === ownedSubmitText &&
             original.delivery_state === "typed" && !original.terminal &&
             original.typed === true && original.submit_dispatched === false) {
-          // An unverified recovery Return is now dispatched uncertainty, not
-          // an undispatched draft. Keep the same ID, error and deadline evidence.
-          engine!.resolveDelivery({ ...original, delivery_state: "pending_verify", terminal: false,
+          const latest = await readParsedSurface(opts.surface, opts.workspace);
+          const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
+          const stillOwned = targetCli === "claude" && latest &&
+            inferComposerCli(latest.text, latest.parsed) === "claude" &&
+            latest.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(latest.text, "claude") &&
+            callerOwnsTypedDraft({ ...opts, text: ownedSubmitText, deliveryId: ownedDeliveryId }) &&
+            region !== null && composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) &&
+            !screenTranscriptContainsText(latest.text, ownedSubmitText);
+          // Record the attempted Return without rearming passive retry against
+          // an expired deadline when the exact bound draft is still visible.
+          // Missing/changed evidence stays dispatched uncertainty for verification.
+          engine!.resolveDelivery({ ...original, delivery_state: stillOwned ? "typed" : "pending_verify", terminal: false,
             press_enter: true, submit_dispatched: true, submit_verified: null,
             rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
           });
