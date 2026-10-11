@@ -44,6 +44,7 @@ function makeSlowComposerPane() {
     composer: "", rendered: false, submitted: [] as string[],
     wrapped: false, damagedFooter: false, quota: false, acceptReturn: true,
     buffer: "",
+    fixedHeight: 0,
     quotaLabel: "Oct 11 at 5am (Asia/Jerusalem)",
     /** Test hook: observes every pane call before the fake answers it. */
     onExec: undefined as undefined | ((args: string[]) => void),
@@ -62,9 +63,12 @@ function makeSlowComposerPane() {
     const quota = state.quota ? [`  ⎿  You've hit your weekly limit · resets ${state.quotaLabel}`,
       "     /usage-credits to finish what you’re working on."] : [];
     const footer = state.damagedFooter ? ["", "─".repeat(30) + "���" + "─".repeat(61), "  ⎇ main | 🔧 9"] : [];
-    return state.submitted.length > 0
-      ? ["Claude Code", ...state.submitted.map((t) => `⏺ ${t}`), "✻ Working… (esc to interrupt)", ...quota, `❯ ${visible}`, ...footer].join("\n")
-      : ["Claude Code", "What can I help you with?", ...quota, `❯ ${visible}`, ...footer].join("\n");
+    const background = state.fixedHeight ? ["earlier output row 1", "earlier output row 2", "earlier output row 3", "(exit code 0)"] : [];
+    const rows = state.submitted.length > 0
+      ? ["Claude Code", ...state.submitted.map((t) => `⏺ ${t}`), "✻ Working… (esc to interrupt)", ...quota, `❯ ${visible}`, ...footer]
+      : ["Claude Code", "What can I help you with?", ...background, ...quota, `❯ ${visible}`, ...footer];
+    if (state.fixedHeight) rows.push("", "  ⎇ main | 🔧 9");
+    return (state.fixedHeight ? rows.join("\n").split("\n").slice(-state.fixedHeight) : rows).join("\n");
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     state.onExec?.(args);
@@ -166,6 +170,68 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     return { pane, context, engine, spawn, key, keyReturn, send, sendSurface,
       setNow: (value: string) => { now = Date.parse(value); }, setSession: (id: string) => { sessionId = id; } };
   }
+
+  async function timeOnlyTarget(t: Awaited<ReturnType<typeof setup>>) {
+    const path = join(testDir, "target-session.jsonl");
+    writeFileSync(path, JSON.stringify({ type: "assistant", sessionId: "target-session", uuid: "quota-episode-1",
+      isApiErrorMessage: true, error: "rate_limit", timestamp: "2026-10-10T22:45:31.158Z",
+      message: { content: [{ type: "text", text: "You've hit your weekly limit · resets 5am (Asia/Jerusalem)" }] } }) + "\n");
+    const target = { ...t.engine.getRegistry().get("lead-seat")!, agent_id: "target-seat", surface_id: "surface:new",
+      surface_uuid: NEW_UUID, cli_session_id: "target-session", created_at: "2026-10-10T22:00:00Z", cli_session_path: path };
+    t.engine.stateMgr.writeState(target); t.engine.getRegistry().set(target.agent_id, target);
+    t.setNow("2026-10-11T02:51:22.802Z");
+    t.pane.state.rendered = true; t.pane.state.wrapped = true;
+    t.pane.state.quota = true; t.pane.state.quotaLabel = "5am (Asia/Jerusalem)";
+    return target;
+  }
+
+  it("ScrollWitness submits once when typing scrolls a fixed-height pane before Return", async () => {
+    const t = await setup();
+    try {
+      await timeOnlyTarget(t); t.pane.state.fixedHeight = 11;
+      const before = t.pane.screen();
+      let typedFrame = "";
+      t.pane.state.onExec = args => { if (args.includes("read-screen") && t.pane.state.composer === wrappedMessage) typedFrame = t.pane.screen(); };
+      const sent = await t.send(wrappedMessage, true, true);
+      expect(sent, JSON.stringify(sent)).toMatchObject({ ok: true, submit_verified: true });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(typedFrame.split("\n")).toHaveLength(11);
+      expect(typedFrame.split("\n")[0]).not.toBe(before.split("\n")[0]);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_id: sent.delivery_id, text: wrappedMessage, delivery_state: "submitted" });
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("ScrollWitness observes an unaccepted Return without losing its anchor or retyping the owned words", async () => {
+    const t = await setup();
+    try {
+      const target = await timeOnlyTarget(t); t.pane.state.acceptReturn = false;
+      const typed = await t.send(wrappedMessage, false, true);
+      const sent = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(sent, JSON.stringify(sent)).toMatchObject({ delivery_id: typed.delivery_id, submit_dispatched: true, submit_verified: null, terminal: false, delivered: false });
+      expect(returnPresses(t.pane.exec)).toBe(1); expect(t.pane.state.submitted).toEqual([]);
+      expect(t.pane.state.composer).toBe(wrappedMessage);
+      t.pane.state.fixedHeight = 11;
+      const { claudeUsageRefusal, hasCurrentClaudeUsageLimit } = await import("../src/screen-parser.js");
+      const now = Date.parse("2026-10-11T02:51:22.802Z"), floor = Date.parse(target.created_at);
+      const observed = t.context.claudeQuotaAnchors.observe({ key: JSON.stringify([NEW_UUID, target.agent_id, target.cli_session_id,
+        target.boot_instance_id ?? null, t.context.surfaceObserverEpoch, floor]), uuid: NEW_UUID,
+        sessionId: target.cli_session_id!, sessionPath: target.cli_session_path, notBeforeMs: floor }, claudeUsageRefusal(t.pane.screen()), now);
+      expect(observed).toEqual({ at: Date.parse("2026-10-10T22:45:31.158Z"), source: "session_record" });
+      expect(hasCurrentClaudeUsageLimit(t.pane.screen(), now, undefined, observed?.at)).toBe(false);
+      expect(returnPresses(t.pane.exec)).toBe(1); // Observation alone dispatches nothing.
+      t.pane.state.acceptReturn = true;
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new"); // Existing exact-owned recovery, not payload replay.
+      expect(recovered, JSON.stringify(recovered)).toMatchObject({ ok: true, submit_verified: true, delivery_id: sent.delivery_id });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_id: sent.delivery_id, text: wrappedMessage, delivery_state: "submitted" });
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(returnPresses(t.pane.exec)).toBe(2); // One unaccepted attempt and one accepted submission, no third Return.
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") && !args.includes("send-key"))).toHaveLength(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
 
   it("TimeOnly recovers the exact session-anchored draft once under its original ID", async () => {
     const t = await setup();

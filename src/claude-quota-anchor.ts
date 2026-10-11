@@ -7,7 +7,7 @@ export interface ClaudeQuotaTarget {
 }
 interface Refusal { text: string; episode: string }
 interface Anchor { at: number; source: "session_record" | "first_observed"; witness?: string }
-interface TargetState { uuid: string; highWater: number; episode?: Anchor & { signature: string; firstObserved: number } }
+interface TargetState { uuid: string; highWater: number; acceptedWitness?: string; episode?: Anchor & { signature: string; firstObserved: number } }
 
 /** Exact current-session record only; bounded tail, never mtime or history search. */
 export function readClaudeQuotaRecord(target: ClaudeQuotaTarget, refusal: string, now: number): Anchor | null {
@@ -54,19 +54,25 @@ export class ClaudeQuotaAnchorTracker {
     const record = readClaudeQuotaRecord(target, refusal.text, now);
     const session = this.sessionWatermarks.get(target.sessionId);
     if (record && (!session || session.key === target.key || record.at > session.at) &&
-        (record.at > state.highWater || record.witness === episode.witness)) {
+        (record.at > state.highWater || record.witness === state.acceptedWitness)) {
       state.highWater = Math.max(state.highWater, record.at);
+      // Exact evidence belongs to this binding, not to a viewport or attempted
+      // submit. Re-read the latest transcript event before every acceptance.
+      state.acceptedWitness = record.witness;
       this.sessionWatermarks.set(target.sessionId, { key: target.key, at: record.at });
       if (this.sessionWatermarks.size > 128) this.sessionWatermarks.delete(this.sessionWatermarks.keys().next().value!);
       Object.assign(episode, record);
-    } else if (episode.source === "session_record") {
-      // A newer unmatched/partial event invalidates exact evidence. Retire its
-      // watermark and use one new late fallback, rather than retaining clearance.
-      episode = { signature, firstObserved: now, at: now, source: "first_observed" }; state.episode = episode;
+    } else {
+      state.acceptedWitness = undefined;
+      if (episode.source === "session_record") {
+        // A newer unmatched/partial event invalidates exact evidence. Retain its
+        // high-water mark and use one late fallback, rather than old clearance.
+        episode = { signature, firstObserved: now, at: now, source: "first_observed" }; state.episode = episode;
+      }
     }
     return { at: episode.at, source: episode.source };
   }
-  /** Consume before a submit attempt, including an uncertain transport outcome. */
+  /** Retire only fallback episodes on an attempt; exact evidence is revalidated from the transcript. */
   noteSubmit(uuid: string | null): void {
     for (const state of this.states.values()) if (uuid && state.uuid === uuid.toLowerCase()) state.episode = undefined;
   }
