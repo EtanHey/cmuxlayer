@@ -396,6 +396,8 @@ export class DeliveryQueue {
     for (const receipt of this.deliveryReceipts.values()) {
       if (
         (receipt.delivery_state === "pending_verify" ||
+          (receipt.delivery_state === "typed" && receipt.typed === true &&
+            receipt.submit_dispatched === false && !receipt.terminal) ||
           receipt.delivery_state === "queued" ||
           receipt.delivery_state === "steer_pending" ||
           receipt.delivery_state === "queued_followup") &&
@@ -639,6 +641,21 @@ export class DeliveryQueue {
           observation.reason === "target_gone" &&
           (receipt.verify_miss_count ?? 0) >=
             DELIVERY_TARGET_GONE_CONFIRM_MISSES;
+        if (timedOut && observation.outcome === "pending" && !confirmedGone &&
+          receipt.typed === true && receipt.submit_dispatched === false) {
+          // A verification deadline cannot fail a submit that never happened.
+          // Stop passive verification without expiring the caller's draft. The
+          // normal ownership guard still gates any later Return under this ID.
+          receipt.delivery_state = "typed";
+          receipt.terminal = false;
+          receipt.resolved_at = null;
+          receipt.submit_verified = null;
+          receipt.needs_attention = true;
+          receipt.attention_reason = "Verification deadline elapsed before submit dispatch; inspect the typed draft and recover only through its current owner. No replay was attempted.";
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
         if (
           observation.outcome === "failed_confirmed" ||
           confirmedGone ||

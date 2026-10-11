@@ -423,6 +423,104 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
+  async function expireQuotaDraft(t: Awaited<ReturnType<typeof setup>>) {
+    t.pane.state.rendered = true;
+    t.pane.state.onExec = args => {
+      if (args.includes("send") && !args.includes("send-key")) t.pane.state.quota = true;
+    };
+    const sent = await t.send(wrappedMessage, true);
+    expect(sent).toMatchObject({ typed: true, delivery_state: "pending_verify", submit_dispatched: false });
+    const original = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+    const owners = [...t.context.typedDraftOwners.values()].map(owner => structuredClone(owner));
+    expect(owners).toHaveLength(1);
+    expect(owners[0]).toMatchObject({ caller: "lead-seat", deliveryIds: [sent.delivery_id] });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(original.verify_deadline_at!) + 1);
+    try { await t.engine.verifyPendingDeliveries(); } finally { clock.mockRestore(); }
+    const expired = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+    expect(returnPresses(t.pane.exec)).toBe(0);
+    expect(t.pane.state.composer).toBe(wrappedMessage);
+    expect([...t.context.typedDraftOwners.values()]).toEqual(owners);
+    console.log("RECEIPT_EXPIRY_SWEEP", JSON.stringify({ original, expired, owners, returns: returnPresses(t.pane.exec) }));
+    t.pane.state.quota = false;
+    return { sent, expired };
+  }
+
+  it("ReceiptExpiry keeps the original recoverable after the normal quota-blocked sweep", async () => {
+    const t = await setup();
+    try {
+      const { sent, expired } = await expireQuotaDraft(t);
+      const duplicate = await t.send(wrappedMessage, true);
+      expect(duplicate).toMatchObject({ delivery_id: sent.delivery_id, duplicate_of: sent.delivery_id });
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new");
+      const final = t.engine.getDeliveryReceipt(sent.delivery_id);
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      console.log("RECEIPT_EXPIRY_RECOVERED", JSON.stringify({ expired, recovered, final,
+        owners: [...t.context.typedDraftOwners.values()], returns: returnPresses(t.pane.exec), submitted: t.pane.state.submitted }));
+      expect(recovered).toMatchObject({ ok: true, delivery_id: sent.delivery_id, submit_verified: true });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(t.context.typedDraftOwners.size).toBe(0);
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") && !args.includes("send-key"))).toHaveLength(1);
+      expect(final).toMatchObject({ delivery_id: sent.delivery_id, delivery_state: "submitted", terminal: true, submit_verified: true, needs_attention: false, attention_reason: null });
+      expect(expired).toMatchObject({ delivery_state: "typed", terminal: false, submit_verified: null, submit_dispatched: false });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["different-owner", "edited", "rebound"] as const)("ReceiptExpiry refuses %s after the sweep", async (control) => {
+    const t = await setup();
+    try {
+      const { sent, expired } = await expireQuotaDraft(t);
+      if (control === "edited") t.pane.state.composer += " edited by operator";
+      if (control === "rebound") {
+        const target = { ...t.engine.getRegistry().get("target-seat")!, cli_session_id: "replacement-session" };
+        t.engine.stateMgr.writeState(target); t.engine.getRegistry().set(target.agent_id, target);
+      }
+      const refused = await t.keyReturn(control === "different-owner" ? OTHER_UUID : LEAD_UUID, "surface:new");
+      console.log("RECEIPT_EXPIRY_CONTROL", JSON.stringify({ control, refused, original: t.engine.getDeliveryReceipt(sent.delivery_id), returns: returnPresses(t.pane.exec) }));
+      expect(refused.ok).toBe(false);
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      expect(t.pane.state.submitted).toEqual([]);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toEqual(expired);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("ReceiptExpiry records an unverified recovery Return as dispatched uncertainty", async () => {
+    const t = await setup();
+    try {
+      const { sent } = await expireQuotaDraft(t);
+      t.pane.state.acceptReturn = false;
+      const attempted = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(attempted).toMatchObject({ delivery_id: sent.delivery_id, submit_verified: null });
+      expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(t.pane.state.submitted).toEqual([]);
+      expect(t.pane.state.composer).toBe(wrappedMessage);
+      expect(t.context.typedDraftOwners.size).toBe(1);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({
+        delivery_id: sent.delivery_id, delivery_state: "pending_verify", terminal: false,
+        submit_dispatched: true, submit_verified: null,
+      });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("ReceiptExpiry never replays an already accepted delivery", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      const sent = await t.send(wrappedMessage, true);
+      const accepted = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+      expect(accepted).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true });
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1000);
+      try { await t.engine.verifyPendingDeliveries(); } finally { clock.mockRestore(); }
+      const refused = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(refused.ok).toBe(false);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toEqual(accepted);
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(t.context.typedDraftOwners.size).toBe(0);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
   it("P0 refuses quota appearing on the final owned-key observation", async () => {
     const t = await setup();
     try {

@@ -2132,11 +2132,25 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             ["pending_verify", "typed"].includes(original.delivery_state)) {
           engine!.resolveDelivery({ ...original, delivery_state: "submitted", terminal: true,
             press_enter: true, submit_dispatched: true, submit_verified: true, error: null,
+            needs_attention: false, attention_reason: null,
             rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
           });
         }
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
+      } else if (submitDispatched && ownedDeliveryId) {
+        const engine = context.lifecycleSweepEngine;
+        const original = engine?.getDeliveryReceipt(ownedDeliveryId);
+        if (original && original.agent_id === targetAgent?.agent_id && original.text === ownedSubmitText &&
+            original.delivery_state === "typed" && !original.terminal &&
+            original.typed === true && original.submit_dispatched === false) {
+          // An unverified recovery Return is now dispatched uncertainty, not
+          // an undispatched draft. Keep the same ID, error and deadline evidence.
+          engine!.resolveDelivery({ ...original, delivery_state: "pending_verify", terminal: false,
+            press_enter: true, submit_dispatched: true, submit_verified: null,
+            rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
+          });
+        }
       }
       const receipt = buildPublicDeliveryReceipt({
         delivery_id: ownedDeliveryId,
