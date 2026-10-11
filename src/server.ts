@@ -3650,6 +3650,18 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           return { outcome: "pending" as const };
         }
         const baseline = context.deliveryPreTypeScreens.get(receipt.delivery_id);
+        if (receipt.delivery_state === "typed" && receipt.typed === true &&
+            receipt.submit_dispatched === true && !receipt.terminal) {
+          // Parked observation has no deadline: an unrelated working turn or
+          // an empty composer cannot prove this draft was accepted. Require
+          // exact transcript text newly attributable to this receipt's baseline.
+          const verified = baseline !== undefined && composer !== null && composer.trim() === "" &&
+            !pending && !queued && !cursorQueuedFollowup &&
+            screenTranscriptContainsText(resolvedSnapshot.text, receipt.text) &&
+            !screenTranscriptContainsText(baseline, receipt.text);
+          if (verified) settleVerifiedDeliveryDraft(receipt.delivery_id, receipt.text);
+          return verified ? { outcome: "delivered" as const, submit_verified: true } : { outcome: "pending" as const };
+        }
         const pendingKind = codexPendingDeliveryKind(resolvedSnapshot.text, receipt.text, baseline);
         // An older identical Tab queue is not this delivery. Its continued
         // presence must not hide a fresh committed steer at the tool boundary.

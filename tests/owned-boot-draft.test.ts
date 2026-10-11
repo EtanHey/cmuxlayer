@@ -698,6 +698,56 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
+  // Reviewer REPROBE_LA: clearing an unaccepted draft is not acceptance,
+  // even when an unrelated prompt later changes the target to working.
+  it.each(["clear-only", "clear-then-unrelated-turn", "preexisting-identical"])("LateAcceptanceR1 refuses false acceptance after %s", async mode => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false;
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      const afterAttempt = t.engine.getDeliveryReceipt(sent.delivery_id);
+      const baseline = t.context.deliveryPreTypeScreens.get(sent.delivery_id)!;
+      if (mode === "preexisting-identical") {
+        // Seed the evidence contract with an old exact transcript row in both
+        // the pre-type baseline and the later screen, absent new acceptance.
+        t.context.deliveryPreTypeScreens.set(sent.delivery_id, `⏺ ${wrappedMessage}\n${baseline}`);
+        t.pane.state.submitted.push(wrappedMessage);
+      }
+      t.pane.state.composer = "";
+      if (mode !== "clear-only") t.pane.state.submitted.push("unrelated operator prompt");
+      const inputs = paneInputs(t.pane.exec);
+      advanceClock!(31_000); await t.engine.verifyPendingDeliveries();
+      const afterSweep = t.engine.getDeliveryReceipt(sent.delivery_id);
+      advanceClock!(5 * 60 * 60 * 1000); await t.engine.verifyPendingDeliveries();
+      const after5h = t.engine.getDeliveryReceipt(sent.delivery_id);
+      const record = { mode, delivery_id: sent.delivery_id, afterAttempt, afterSweep, after5h,
+        passiveInputs: paneInputs(t.pane.exec) - inputs, returns: returnPresses(t.pane.exec),
+        submitted: t.pane.state.submitted, owners: t.context.typedDraftOwners.size };
+      if (process.env.CMUXLAYER_LATE_R1_RECEIPT_PATH) appendFileSync(process.env.CMUXLAYER_LATE_R1_RECEIPT_PATH, JSON.stringify(record) + "\n");
+      expect(afterSweep).toMatchObject({ delivery_id: sent.delivery_id, delivery_state: "typed", terminal: false,
+        submit_dispatched: true, submit_verified: null, needs_attention: true });
+      expect(after5h).toMatchObject({ delivery_state: "typed", terminal: false, submit_verified: null });
+      expect(paneInputs(t.pane.exec)).toBe(inputs); expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(t.pane.state.submitted).toEqual(mode === "clear-only" ? [] : mode === "preexisting-identical"
+        ? [wrappedMessage, "unrelated operator prompt"] : ["unrelated operator prompt"]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["missing-baseline", "wrong-delivery-id"])("LateAcceptanceR1 requires exact receipt proof after %s", async control => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false; await t.keyReturn(LEAD_UUID, "surface:new");
+      t.pane.state.submitted.push(t.pane.state.composer); t.pane.state.composer = "";
+      if (control === "missing-baseline") t.context.deliveryPreTypeScreens.delete(sent.delivery_id);
+      else [...t.context.typedDraftOwners.values()][0].deliveryIds = ["unrelated-receipt"];
+      const inputs = paneInputs(t.pane.exec); advanceClock!(31_000); await t.engine.verifyPendingDeliveries();
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "typed", terminal: false, submit_verified: null });
+      expect(paneInputs(t.pane.exec)).toBe(inputs); expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
   it("ReceiptExpiry never replays an already accepted delivery", async () => {
     const t = await setup();
     try {
