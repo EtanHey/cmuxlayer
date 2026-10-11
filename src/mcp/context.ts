@@ -38,6 +38,7 @@ import { type SeatRegistry } from "../seat-identity.js";
 import { SurfaceWriteLivenessTracker } from "../surface-write-liveness.js";
 import type { PublicDeliveryReceipt, DeliveryRecord } from "../delivery/receipts.js";
 import { CmuxSocketError } from "../cmux-socket-error.js";
+import { ClaudeQuotaAnchorTracker } from "../claude-quota-anchor.js";
 import {
   appendDaemonLog,
   logErrorCode,
@@ -435,6 +436,7 @@ export interface TypedDraftOwner {
 }
 
 export interface CmuxServerContext {
+  claudeQuotaAnchors: ClaudeQuotaAnchorTracker;
   deliveryNow: () => number;
   deliveryTimeZone?: string;
   /** Shared by every MCP peer using this daemon context. */
@@ -618,6 +620,7 @@ export function createServerContext(
     opts?.surfaceObserverEpochProvider ??
     (() => deriveCmuxObserverEpoch(client));
   const context: CmuxServerContext = {
+    claudeQuotaAnchors: new ClaudeQuotaAnchorTracker(),
     deliveryNow: opts?.deliveryNow ?? Date.now,
     deliveryTimeZone: opts?.deliveryTimeZone,
     client,

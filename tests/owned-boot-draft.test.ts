@@ -5,7 +5,7 @@
 // and the advised send_to({mode:"key",text:"return"}) was refused
 // blocked_by_foreign_draft while the composer held that exact pointer.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -44,6 +44,7 @@ function makeSlowComposerPane() {
     composer: "", rendered: false, submitted: [] as string[],
     wrapped: false, damagedFooter: false, quota: false, acceptReturn: true,
     buffer: "",
+    quotaLabel: "Oct 11 at 5am (Asia/Jerusalem)",
     /** Test hook: observes every pane call before the fake answers it. */
     onExec: undefined as undefined | ((args: string[]) => void),
   };
@@ -58,7 +59,7 @@ function makeSlowComposerPane() {
       }
       visible = rows.join("\n  ");
     }
-    const quota = state.quota ? ["  ⎿  You've hit your weekly limit · resets Oct 11 at 5am (Asia/Jerusalem)",
+    const quota = state.quota ? [`  ⎿  You've hit your weekly limit · resets ${state.quotaLabel}`,
       "     /usage-credits to finish what you’re working on."] : [];
     const footer = state.damagedFooter ? ["", "─".repeat(30) + "���" + "─".repeat(61), "  ⎇ main | 🔧 9"] : [];
     return state.submitted.length > 0
@@ -165,6 +166,30 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     return { pane, context, engine, spawn, key, keyReturn, send, sendSurface,
       setNow: (value: string) => { now = Date.parse(value); }, setSession: (id: string) => { sessionId = id; } };
   }
+
+  it("TimeOnly recovers the exact session-anchored draft once under its original ID", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      const typed = await t.send("Preserve the anchored words");
+      const target = t.engine.getRegistry().get("target-seat")!;
+      const path = join(testDir, "target-session.jsonl");
+      writeFileSync(path, JSON.stringify({ type: "assistant", sessionId: "target-session", uuid: "quota-episode-1",
+        isApiErrorMessage: true, error: "rate_limit", timestamp: "2026-10-10T22:45:31.158Z",
+        message: { content: [{ type: "text", text: "You've hit your weekly limit · resets 5am (Asia/Jerusalem)" }] } }) + "\n");
+      const bound = { ...target, created_at: "2026-10-10T22:00:00Z", cli_session_path: path };
+      t.engine.stateMgr.writeState(bound); t.engine.getRegistry().set(bound.agent_id, bound);
+      t.pane.state.quotaLabel = "5am (Asia/Jerusalem)"; t.pane.state.quota = true;
+      expect((await t.keyReturn(LEAD_UUID, "surface:new")).error_code).toBe("blocked_by_usage_limit");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      t.setNow("2026-10-11T02:51:22.802Z");
+      expect(await t.keyReturn(LEAD_UUID, "surface:new")).toMatchObject({ ok: true, submit_verified: true, delivery_id: typed.delivery_id });
+      expect(t.pane.state.quota).toBe(true);
+      expect(t.pane.state.submitted).toEqual(["Preserve the anchored words"]);
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
 
   it("R1 B1 recovers same-owned input after the displayed reset while the refusal stays visible", async () => {
     const t = await setup();

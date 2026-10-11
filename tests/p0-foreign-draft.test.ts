@@ -8,6 +8,13 @@ import { claudeUsageResetAt, isClaudeQuotaRecoveryCommand } from "../src/claude-
 import { extractComposerInputRegion, composerHoldsForeignDraft, composerRegionMatchesPayload } from "../src/delivery/composer-screen.js";
 
 describe("P0 Claude rendering and terminal quota boundaries", () => {
+  it("TimeOnly resolves a timezone-bearing label strictly after the explicit refusal anchor", () => {
+    const screen = "Claude Code\n  ⎿ You've hit your weekly limit · resets 5am (Asia/Jerusalem)\n❯ ";
+    const anchor = Date.parse("2026-10-10T22:45:31.158Z");
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T01:59:00Z"), undefined, anchor)).toBe(true);
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T02:51:22.802Z"), undefined, anchor)).toBe(false);
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T02:51:22.802Z"))).toBe(true);
+  });
   it("R1 B1 keeps the captured reset visible and compares an explicit historical clock", () => {
     const screen = "Claude Code\n  ⎿ You've hit your weekly limit · resets Oct 11 at 5am (Asia/Jerusalem)\n❯ ";
     expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T01:59:00Z"))).toBe(true);

@@ -34,6 +34,7 @@ import {
   codexScreenHasActiveTurn,
   hasVisibleAgentProgress,
   hasCurrentClaudeUsageLimit,
+  claudeUsageRefusal,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -697,6 +698,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await beforeMutation?.();
         const dispatchKey = typeof key === "string" ? key : await key();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        if (isSubmitKey(normalizeKeyName(dispatchKey))) context.claudeQuotaAnchors.noteSubmit(observedSurfaceUuid(surface));
         await client.sendKey(surface, dispatchKey, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -730,7 +732,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   // Each caller retains its typed/queued entries until verified submission.
   const typedDraftOwners = context.typedDraftOwners;
-  const currentClaudeQuota = (text: string) => hasCurrentClaudeUsageLimit(text, context.deliveryNow(), context.deliveryTimeZone);
+  const currentClaudeQuota = (text: string, opts: { surface: string; stableSurfaceIdentity?: string | null }) => {
+    const now = context.deliveryNow();
+    const refusal = claudeUsageRefusal(text);
+    const record = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+    const uuid = opts.stableSurfaceIdentity?.toLowerCase();
+    const floor = record ? Math.max(...[record.created_at, record.boot_resumed_at, record.boot_verify_started_at]
+      .filter((value): value is string => Boolean(value)).map(value => Date.parse(value))) : NaN;
+    const target = record?.cli === "claude" && uuid && record.surface_uuid?.toLowerCase() === uuid && record.cli_session_id
+      ? { key: JSON.stringify([uuid, record.agent_id, record.cli_session_id, record.boot_instance_id ?? null, context.surfaceObserverEpoch, floor]),
+          uuid, sessionId: record.cli_session_id, sessionPath: record.cli_session_path, notBeforeMs: floor } : null;
+    const timeOnly = refusal?.label && /^\d{1,2}(?::\d{2})?\s*(?:am|pm)\s+\([^()]+\)$/i.test(refusal.label);
+    const anchor = context.claudeQuotaAnchors.observe(target, timeOnly ? refusal : null, now);
+    return hasCurrentClaudeUsageLimit(text, now, context.deliveryTimeZone, anchor?.at);
+  };
   const rememberDraftOwner = (key: string, token: TypedDraftOwner): void => {
     const entries = token.texts ?? [token.text];
     token.texts = entries.slice(-8);
@@ -938,7 +953,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
         snapshot.parsed.control_state === "permission_prompt" ||
         (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
-        isPickerOrMenuScreen(snapshot.text, "claude") || (currentClaudeQuota(snapshot.text) && !isClaudeQuotaRecoveryCommand(opts.text)) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+        isPickerOrMenuScreen(snapshot.text, "claude") || (currentClaudeQuota(snapshot.text, opts) && !isClaudeQuotaRecoveryCommand(opts.text)) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
     // draft_pending takes precedence over activity in the screen parser. Clear
     // only the current composer in a copied frame to inspect the turn status.
     const rows = normalizeTerminalText(snapshot.text).split("\n");
@@ -1904,7 +1919,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             ? ownedComposerText(owner, region, "claude", snapshot.text) ?? "" : "";
         }
         const quotaInput = opts.key === undefined || isSubmitKey(normalizeKeyName(opts.key));
-        if (observedCli === "claude" && quotaInput && !isClaudeQuotaRecoveryCommand(quotaCommand) && currentClaudeQuota(snapshot.text)) {
+        if (observedCli === "claude" && quotaInput && !isClaudeQuotaRecoveryCommand(quotaCommand) && currentClaudeQuota(snapshot.text, opts)) {
           throw new DeliverySafetyGateError("blocked_by_usage_limit", snapshot.parsed);
         }
         if (opts.key === undefined) {
@@ -2032,7 +2047,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             await opts.beforeMutation?.();
             if (targetCli === "claude" && ownedSubmitText) {
               const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
-              if (latest && !isClaudeQuotaRecoveryCommand(ownedSubmitText) && currentClaudeQuota(latest.text)) {
+              if (latest && !isClaudeQuotaRecoveryCommand(ownedSubmitText) && currentClaudeQuota(latest.text, opts)) {
                 throw new DeliverySafetyGateError("blocked_by_usage_limit", latest.parsed);
               }
               const current = typedDraftOwners.get(ownerKey);
