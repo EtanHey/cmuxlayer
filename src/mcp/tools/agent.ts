@@ -427,9 +427,51 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
           );
         },
         notify: (notifyOpts) => client.notify(notifyOpts),
-        // The Claude channel emitter was removed (N1a); lifecycle events
-        // have no MCP-side consumer.
-        notifyLifecycleEvent: async () => {},
+        notifyLifecycleEvent: async (event, child) => {
+          if ((event !== "done" && event !== "blocked") || !child.parent_agent_id ||
+              !child.report_path || !child.done_marker || !child.report_episode_key) return;
+          const deliveryId = event === "done" ? child.report_done_delivery_id : child.report_blocked_delivery_id;
+          if (!deliveryId) throw new Error("report outcome has no durable delivery identity");
+          const current = stateMgr.readState(child.agent_id) ?? registry.get(child.agent_id);
+          const parent = registry.get(child.parent_agent_id) ?? stateMgr.readState(child.parent_agent_id);
+          if (!current || current.parent_agent_id !== child.parent_agent_id ||
+              current.report_path !== child.report_path || current.done_marker !== child.done_marker ||
+              current.report_episode_key !== child.report_episode_key || current.user_killed ||
+              current.deletion_intent || !parent || parent.user_killed || parent.deletion_intent ||
+              [...stateMgr.listStates(), ...registry.list()].some((agent) =>
+                agent.collab_path && resolve(agent.collab_path) === resolve(child.report_path!))) {
+            throw new Error("report completion ownership is unavailable");
+          }
+          if (!deps.lifecycleAgentInputDeliverer) throw new Error("report completion delivery is unavailable");
+          const text = `[report] ${child.agent_id} ${event} — read ${child.report_path}`;
+          const receipt = engine.getDeliveryReceipt(deliveryId);
+          if (receipt?.agent_id === parent.agent_id && receipt.text === text &&
+              ["submitted", "queued", "steer_pending", "queued_followup", "pending_verify"].includes(receipt.delivery_state)) return;
+          const delivery = await deps.lifecycleAgentInputDeliverer({
+            agent_id: parent.agent_id, text, press_enter: true, allow_busy: true,
+            source_event: "report_to_parent", delivery_id: deliveryId,
+          });
+          if (delivery.delivery_id && (delivery.delivery === "steer_pending" ||
+              delivery.delivery === "queued" || delivery.delivery === "queued_followup")) {
+            engine.acceptComposerQueue({ delivery_id: delivery.delivery_id, agent_id: parent.agent_id,
+              text, press_enter: true, source_event: "report_to_parent", retry_count: delivery.retry_count,
+              rpc_methods: delivery.rpc_methods, typed: delivery.typed, submit_dispatched: delivery.submit_dispatched,
+              delivery_state: delivery.delivery });
+          }
+          if (delivery.delivery === "submitted") {
+            engine.resolveDelivery({ delivery_id: deliveryId, agent_id: parent.agent_id,
+              text, press_enter: true, source_event: "report_to_parent", delivery_state: "submitted",
+              terminal: true, retry_count: delivery.retry_count ?? 0, submit_verified: delivery.submit_verified, error: null });
+          }
+          if (delivery.delivery === "pending_verify") {
+            engine.acceptPendingVerify({ delivery_id: deliveryId, agent_id: parent.agent_id,
+              text, press_enter: true, source_event: "report_to_parent", retry_count: delivery.retry_count ?? 0,
+              rpc_methods: delivery.rpc_methods, typed: delivery.typed, submit_dispatched: delivery.submit_dispatched });
+          }
+          if (!delivery.delivery || !["submitted", "steer_pending", "queued", "queued_followup", "pending_verify"].includes(delivery.delivery)) {
+            throw new Error(`report completion was not delivered: ${delivery.delivery}`);
+          }
+        },
       },
       {
         spawnPreflight:
@@ -592,6 +634,15 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
               retryable: false,
               reason: "subject_not_owned",
             };
+          }
+          // Engine report revisions remain diagnostic watch observations.
+          // Terminal reports are delivered only by the artifact/resting episode sweep.
+          if (event.target_kind === "file" && event.subject_agent_id &&
+              event.provenance !== "public" &&
+              (event.reason === "target_changed" || event.reason === "predicate_matched")) {
+            const subject = stateMgr.readState(event.subject_agent_id) ?? registry.get(event.subject_agent_id);
+            if (event.provenance === "engine" ||
+                (subject?.report_path && resolve(subject.report_path) === resolve(event.target))) return true;
           }
           let externalDelivered = false;
           if (event.reason !== "predicate_matched") {
