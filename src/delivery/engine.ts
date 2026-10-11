@@ -32,6 +32,7 @@ import {
   parseScreen,
   codexScreenHasActiveTurn,
   hasVisibleAgentProgress,
+  hasCurrentClaudeUsageLimit,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -935,7 +936,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
         snapshot.parsed.control_state === "permission_prompt" ||
         (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
-        isPickerOrMenuScreen(snapshot.text, "claude") || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+        isPickerOrMenuScreen(snapshot.text, "claude") || hasCurrentClaudeUsageLimit(snapshot.text) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
     // draft_pending takes precedence over activity in the screen parser. Clear
     // only the current composer in a copied frame to inspect the turn status.
     const rows = normalizeTerminalText(snapshot.text).split("\n");
@@ -1890,8 +1891,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
+        const observedCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli ?? inferComposerCli(snapshot.text, snapshot.parsed);
+        if (observedCli === "claude" && hasCurrentClaudeUsageLimit(snapshot.text)) {
+          throw new DeliverySafetyGateError("blocked_by_usage_limit", snapshot.parsed);
+        }
         const hadBanner = isCodexDismissibleOverlay(snapshot.text);
-        securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
+        securityCapable = observedCli === "claude" || hadBanner || snapshot.parsed.agent_type === "codex" ||
           (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
         const safe = await dismissAccountSecurityBanner(snapshot, {
           escape: async () => {
@@ -1981,6 +1986,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
+        if (targetCli === "claude" && !ownedText && rawInput === "") {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
+        }
         if ((!ownedQueuedText || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
           typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
@@ -2000,6 +2008,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             await opts.beforeMutation?.();
             if (targetCli === "claude" && ownedSubmitText) {
               const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              if (latest && hasCurrentClaudeUsageLimit(latest.text)) {
+                throw new DeliverySafetyGateError("blocked_by_usage_limit", latest.parsed);
+              }
               const current = typedDraftOwners.get(ownerKey);
               const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
               if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
@@ -2043,11 +2054,23 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           rpc_methods: [...rpcMethods], timings_ms: opts.timings,
         }));
       }
+      const ownedIndex = ownedSubmitText ? ownedEntries.indexOf(ownedSubmitText) : -1;
+      const ownedDeliveryId = ownedIndex >= 0 ? owner?.deliveryIds?.[ownedIndex] || undefined : undefined;
       if (verification.submit_verified === true) {
+        const engine = context.lifecycleSweepEngine;
+        const original = ownedDeliveryId ? engine?.getDeliveryReceipt(ownedDeliveryId) : null;
+        if (original && original.agent_id === targetAgent?.agent_id && original.text === ownedSubmitText &&
+            ["pending_verify", "typed"].includes(original.delivery_state)) {
+          engine!.resolveDelivery({ ...original, delivery_state: "submitted", terminal: true,
+            press_enter: true, submit_dispatched: true, submit_verified: true, error: null,
+            rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
+          });
+        }
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
       }
       const receipt = buildPublicDeliveryReceipt({
+        delivery_id: ownedDeliveryId,
         typed: false,
         submit_attempted: submitAttempted,
         submit_dispatched: submitDispatched,
@@ -2073,6 +2096,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           press_enter: submitAttempted,
           submit_verified: verification.submit_verified,
           retry_count: 0,
+          delivery_id: ownedDeliveryId,
         });
       }
       return {
@@ -2682,6 +2706,27 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               "inspect the pane or wait_for({delivery_id}) before sending again.",
           });
         }
+      }
+      if (error instanceof DeliverySafetyGateError && error.error_code === "blocked_by_usage_limit" && textDispatched) {
+        // The bytes already belong to this delivery. A pre-Return quota veto
+        // must retain uncertainty and ownership, rather than terminalize or
+        // enqueue a replay of the original words.
+        const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        const boot = opts.source_event === "boot_prompt"
+          ? resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity) : null;
+        if (owner && boot && owner.caller && owner.text === opts.chunks.join("")) {
+          owner.bootAgentId = boot.agent_id;
+          owner.bootInstanceId = boot.boot_instance_id ?? undefined;
+        }
+        const bytes = opts.chunks.reduce((sum, chunk) => sum + Buffer.byteLength(chunk, "utf8"), 0);
+        if (opts.source_event) appendDeliveryEvent({ event_type: opts.source_event, source_agent: opts.source_agent ?? null,
+          target_surface: opts.surface, bytes, press_enter: opts.press_enter, submit_verified: null,
+          retry_count: 0, delivery_id: opts.delivery_id, delivery_state: "pending_verify" });
+        return { ...buildPublicDeliveryReceipt({ delivery_state: "pending_verify", delivery_id: opts.delivery_id,
+          typed: true, submit_attempted: opts.press_enter, submit_dispatched: submitDispatched,
+          submit_verified: null, retry_count: 0, rpc_methods: [...rpcMethods], timings_ms: opts.timings,
+          needs_attention: true, attention_reason: "blocked_by_usage_limit", WARNING: error.message,
+        }), bytes };
       }
       throw preserveDeliveryEvidenceOnError(
         error,

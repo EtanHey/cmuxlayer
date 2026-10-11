@@ -2,9 +2,34 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { normalizeKeyName, isSubmitKey } from "../src/key-names.js";
 import { computeModelMismatch, computeEffortMismatch, parseCodexEffort } from "../src/engine/launch-command.js";
-import { parseScreen } from "../src/screen-parser.js";
+import { parseScreen, hasCurrentClaudeUsageLimit } from "../src/screen-parser.js";
 import { matchReadyPattern } from "../src/pattern-registry.js";
-import { extractComposerInputRegion, composerHoldsForeignDraft } from "../src/delivery/composer-screen.js";
+import { extractComposerInputRegion, composerHoldsForeignDraft, composerRegionMatchesPayload } from "../src/delivery/composer-screen.js";
+
+describe("P0 Claude rendering and terminal quota boundaries", () => {
+  const quota = "  ⎿ You've hit your weekly limit · resets 5am";
+  it.each(["", "✻ Thinking…\n", "❯ retry\n✻ Thinking…\n"])("vetoes a fresh terminal quota after %j", preceding => {
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n${preceding}${quota}\n❯ `)).toBe(true);
+  });
+  it.each(["⏺ Recovery completed", "✻ Thinking…", "⏺ Read(/scratch/task.md)"])("clears an older quota after %s", recovery => {
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n${quota}\n❯ retry\n${recovery}\n❯ `)).toBe(false);
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n${quota}\n❯ retry\n${recovery}\n${quota}\n     /usage-credits to finish what you’re working on.\n❯ `)).toBe(true);
+  });
+  it.each([
+    `❯ Explain the limit\n⏺ Quoting the captured error\n${quota}\n❯ `,
+    `❯ Explain the limit\n⏺ Bash(cat quota-example.txt)\n${quota}\n❯ `,
+    `❯ Draft quoting the harness\n${quota}\n`,
+  ])("does not treat quoted tool/model/composer text as quota: %j", body => {
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n${body}`)).toBe(false);
+  });
+  it("keeps unframed damaged rules and edited whitespace as draft text", () => {
+    const rule = "─".repeat(30) + "���" + "─".repeat(61);
+    const screen = `Claude Code\n❯ original\n  ${rule}\n  ⎇ main | 🔧 9`;
+    expect(extractComposerInputRegion(screen, undefined, "claude", true)).toContain(rule);
+    expect(composerRegionMatchesPayload("original\n  words", "original  words", "claude", "─".repeat(95))).toBe(false);
+    expect(composerRegionMatchesPayload("Read\n  words", "Read words", "claude", "─".repeat(95))).toBe(false);
+  });
+});
 
 // Derived from real 0.157 captures; only model labels change to the display
 // names reported in #974 and #987. These are replay variants, not new captures.

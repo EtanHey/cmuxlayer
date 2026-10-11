@@ -42,19 +42,32 @@ const NEW_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 function makeSlowComposerPane() {
   const state = {
     composer: "", rendered: false, submitted: [] as string[],
+    wrapped: false, damagedFooter: false, quota: false, acceptReturn: true,
     /** Test hook: observes every pane call before the fake answers it. */
     onExec: undefined as undefined | ((args: string[]) => void),
   };
   const screen = () => {
-    const visible = state.rendered ? state.composer : "";
+    let visible = state.rendered ? state.composer : "";
+    if (state.wrapped && visible) {
+      const rows = [""];
+      for (const word of visible.split(" ")) {
+        const last = rows.length - 1;
+        if (rows[last] && rows[last].length + word.length + 1 > 105) rows.push(word);
+        else rows[last] += (rows[last] ? " " : "") + word;
+      }
+      visible = rows.join("\n  ");
+    }
+    const quota = state.quota ? ["  ⎿  You've hit your weekly limit · resets Oct 11 at 5am (Asia/Jerusalem)",
+      "     /usage-credits to finish what you’re working on."] : [];
+    const footer = state.damagedFooter ? ["", "─".repeat(30) + "���" + "─".repeat(61), "  ⎇ main | 🔧 9"] : [];
     return state.submitted.length > 0
-      ? ["Claude Code", ...state.submitted.map((t) => `⏺ ${t}`), "✻ Working… (esc to interrupt)", `❯ ${visible}`].join("\n")
-      : ["Claude Code", "What can I help you with?", `❯ ${visible}`].join("\n");
+      ? ["Claude Code", ...state.submitted.map((t) => `⏺ ${t}`), "✻ Working… (esc to interrupt)", ...quota, `❯ ${visible}`, ...footer].join("\n")
+      : ["Claude Code", "What can I help you with?", ...quota, `❯ ${visible}`, ...footer].join("\n");
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     state.onExec?.(args);
     if (args.includes("send-key") && args.includes("return")) {
-      if (state.rendered && state.composer) {
+      if (state.acceptReturn && state.rendered && state.composer) {
         state.submitted.push(state.composer);
         state.composer = "";
       }
@@ -127,15 +140,147 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     engine.stateMgr.writeState(other); engine.getRegistry().set(other.agent_id, other);
     const as = <T>(uuid: string | undefined, fn: () => Promise<T>) =>
       runWithCallerContext(uuid ? { surfaceId: uuid, workspaceId: "workspace:1" } : undefined, fn);
-    const spawn = (uuid: string | undefined) => as(uuid, async () => parseToolResult(
+    const spawn = (uuid: string | undefined, prompt = "Read and follow /tmp/reviewer-brief.md") => as(uuid, async () => parseToolResult(
       await server._registeredTools.spawn_agent.handler({ verbose: true,
         repo: "brainlayer", model: "sonnet", cli: "claude", workspace: "workspace:1",
-        prompt: "Read and follow /tmp/reviewer-brief.md", boot_prompt_timeout_ms: 2_000,
+        prompt, boot_prompt_timeout_ms: 2_000,
       }, {})));
     const keyReturn = (uuid: string | undefined, surface: string) => as(uuid, async () => parseToolResult(
       await server._registeredTools.send_to.handler({ mode: "key", surface, text: "return" }, {})));
-    return { pane, context, engine, spawn, keyReturn, setSession: (id: string) => { sessionId = id; } };
+    const send = (text: string, press_enter = false) => as(LEAD_UUID, async () => {
+      if (!engine.getRegistry().get("target-seat")) {
+        const target = { ...lead, agent_id: "target-seat", surface_id: "surface:new", surface_uuid: NEW_UUID, cli_session_id: "target-session" };
+        engine.stateMgr.writeState(target); engine.getRegistry().set(target.agent_id, target);
+      }
+      return parseToolResult(await server._registeredTools.send_to.handler({ agent_id: "target-seat", text, press_enter, verbose: true }, {}));
+    });
+    return { pane, context, engine, spawn, keyReturn, send, setSession: (id: string) => { sessionId = id; } };
   }
+
+  it("P0 recovers the spawn-written Claude whole-word path wrap under its original delivery ID", async () => {
+    const t = await setup();
+    try {
+      const spawned = await t.spawn(LEAD_UUID, "Read and follow /Users/fixture/Gits/orchestrator/docs.local/handoffs/2026-10-11/reviewer-owned-draft-audit-packet.md");
+      expect(spawned.spawn_state).toBe("boot_unsubmitted");
+      const id = spawned.boot_prompt_receipt.delivery_id;
+      expect(id).toEqual(expect.any(String));
+      t.pane.state.rendered = true; t.pane.state.wrapped = true;
+      const recovered = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(recovered, JSON.stringify(recovered)).toMatchObject({ ok: true, submit_verified: true, delivery_id: id });
+      expect(t.pane.state.submitted).toHaveLength(1);
+      const presses = returnPresses(t.pane.exec);
+      const repeated = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(repeated.ok).toBe(false);
+      expect(returnPresses(t.pane.exec)).toBe(presses);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  const wrappedMessage = "Review the followup plan and preserve every original word. Read and follow /Users/fixture/Gits/coach/docs.local/collabs/2026-10-11-jrc-study-sync.md";
+  it("P0 recovers an uncertain send with Claude path wraps and damaged footer without retyping", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true; t.pane.state.acceptReturn = false;
+      const sent = await t.send(wrappedMessage, true);
+      expect(sent, JSON.stringify(sent)).toMatchObject({ typed: true, submit_verified: null });
+      const id = sent.delivery_id;
+      t.pane.state.wrapped = true; t.pane.state.damagedFooter = true; t.pane.state.acceptReturn = true;
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(recovered, JSON.stringify(recovered)).toMatchObject({ ok: true, submit_verified: true, delivery_id: id });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(t.engine.getDeliveryReceipt(id)).toMatchObject({ delivery_id: id, delivery_state: "submitted", submit_verified: true });
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") && !args.includes("send-key"))).toHaveLength(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("P0 refuses an observed Claude quota before typing", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true; t.pane.state.quota = true;
+      const sent = await t.send("Review the next task", true);
+      expect(sent, JSON.stringify(sent)).toMatchObject({ ok: false, error_code: "blocked_by_usage_limit", typed: false });
+      expect(t.pane.state.composer).toBe("");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("P0 retains a typed delivery when quota appears before Return and recovers only after it clears", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      t.pane.state.onExec = args => {
+        if (args.includes("send") && !args.includes("send-key")) t.pane.state.quota = true;
+      };
+      const sent = await t.send(wrappedMessage, true);
+      expect(sent, JSON.stringify(sent)).toMatchObject({ ok: false, typed: true, delivery_state: "pending_verify", submit_dispatched: false });
+      expect(t.pane.state.composer).toBe(wrappedMessage);
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      const refused = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(refused.error_code).toBe("blocked_by_usage_limit");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      t.pane.state.quota = false; t.pane.state.wrapped = true;
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(recovered).toMatchObject({ ok: true, submit_verified: true, delivery_id: sent.delivery_id });
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "submitted", submit_verified: true });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("P0 refuses quota appearing on the final owned-key observation", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      await t.send(wrappedMessage);
+      let reads = 0;
+      t.pane.state.onExec = args => {
+        if (args.includes("read-screen") && ++reads === 2) t.pane.state.quota = true;
+      };
+      const refused = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(refused.error_code).toBe("blocked_by_usage_limit");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      expect(t.pane.state.composer).toBe(wrappedMessage);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("P0 preserves boot ownership when quota appears after the boot text lands", async () => {
+    const t = await setup();
+    try {
+      t.setSession("11111111-2222-4333-8444-555555555555");
+      t.pane.state.rendered = true;
+      t.pane.state.onExec = args => {
+        if (args.includes("send") && String(args.at(-1)).startsWith("Read and follow")) t.pane.state.quota = true;
+      };
+      const spawned = await t.spawn(LEAD_UUID);
+      expect(spawned.spawn_state).toBe("boot_unsubmitted");
+      expect(spawned.boot_prompt_receipt).toMatchObject({ typed: true, submit_dispatched: false, delivery_state: "pending_verify" });
+      const refused = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(refused.error_code).toBe("blocked_by_usage_limit");
+      t.pane.state.quota = false;
+      const recovered = await t.keyReturn(LEAD_UUID, spawned.surface_id);
+      expect(recovered).toMatchObject({ ok: true, submit_verified: true, delivery_id: spawned.boot_prompt_receipt.delivery_id });
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["other caller", "edited", "new session", "new surface"])("P0 refuses wrapped recovery after %s", async kind => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      await t.send(wrappedMessage);
+      t.pane.state.wrapped = true;
+      if (kind === "edited") t.pane.state.composer += " changed";
+      if (kind === "new session") {
+        const changed = t.engine.stateMgr.updateRecord("target-seat", { cli_session_id: "replacement-session" });
+        t.engine.getRegistry().set(changed.agent_id, changed);
+      }
+      if (kind === "new surface") {
+        const changed = t.engine.stateMgr.updateRecord("target-seat", { surface_uuid: OTHER_UUID });
+        t.engine.getRegistry().set(changed.agent_id, changed);
+      }
+      const presses = returnPresses(t.pane.exec);
+      const refused = await t.keyReturn(kind === "other caller" ? OTHER_UUID : LEAD_UUID, "surface:new");
+      expect(refused.ok).toBe(false);
+      expect(returnPresses(t.pane.exec)).toBe(presses);
+    } finally { t.context.dispose(); }
+  }, 30_000);
 
   it.each([false, true])("accepts the advised key-Return and settles the boot after retyping=%s", async retype => {
     const t = await setup();

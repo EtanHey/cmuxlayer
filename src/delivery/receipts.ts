@@ -533,6 +533,7 @@ export class DeliverySafetyGateError extends Error {
       | "composer_picker_not_closed"
       | "hooks_review_not_dismissed"
       | "blocked_by_permission_prompt"
+      | "blocked_by_usage_limit"
       | "blocked_by_foreign_draft"
       | "blocked_by_foreign_queue"
       | "queued_stalled_idle"
@@ -566,6 +567,8 @@ export class DeliverySafetyGateError extends Error {
         ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
         : error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
+        : error_code === "blocked_by_usage_limit"
+        ? "Claude usage limit is visible; no further input was sent. Preserve any typed draft and its original delivery ID; inspect the pane after the limit clears before recovering it."
         : error_code === "blocked_by_foreign_draft"
           ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
         : error_code === "owned_boot_contract_pending"
