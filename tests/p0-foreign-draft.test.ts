@@ -4,9 +4,46 @@ import { normalizeKeyName, isSubmitKey } from "../src/key-names.js";
 import { computeModelMismatch, computeEffortMismatch, parseCodexEffort } from "../src/engine/launch-command.js";
 import { parseScreen, hasCurrentClaudeUsageLimit } from "../src/screen-parser.js";
 import { matchReadyPattern } from "../src/pattern-registry.js";
+import { claudeUsageResetAt, isClaudeQuotaRecoveryCommand } from "../src/claude-usage-reset.js";
 import { extractComposerInputRegion, composerHoldsForeignDraft, composerRegionMatchesPayload } from "../src/delivery/composer-screen.js";
 
 describe("P0 Claude rendering and terminal quota boundaries", () => {
+  it("R1 B1 keeps the captured reset visible and compares an explicit historical clock", () => {
+    const screen = "Claude Code\n  ⎿ You've hit your weekly limit · resets Oct 11 at 5am (Asia/Jerusalem)\n❯ ";
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T01:59:00Z"))).toBe(true);
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse("2026-10-11T02:51:22.802Z"))).toBe(false);
+  });
+  it.each([
+    ["Jan 1 at 12:30am (Pacific/Kiritimati)", "2026-12-31T10:29:00Z", "2026-12-31T10:30:00Z"],
+    ["Dec 31 at 11:30pm (America/New_York)", "2027-01-01T04:29:00Z", "2027-01-01T04:30:00Z"],
+  ])("R1 B1 handles timezone/year rollover: %s", (reset, before, after) => {
+    const screen = `Claude Code\n  ⎿ You've hit your weekly limit · resets ${reset}\n❯ `;
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse(before))).toBe(true);
+    expect(hasCurrentClaudeUsageLimit(screen, Date.parse(after))).toBe(false);
+  });
+  it.each(["", " · resets eventually", " · resets in 2 hours", " · resets 5am (Asia/Jerusalem)",
+    " · resets Oct 11 at 5am", " · resets Oct 99 at 5am (Asia/Jerusalem)"])("R1 B1 refuses missing/ambiguous reset %j", suffix => {
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n  ⎿ You've hit your weekly limit${suffix}\n❯ `,
+      Date.parse("2026-10-11T02:51:22.802Z"))).toBe(true);
+  });
+  it.each([
+    ["Mar 8 2026 at 2:30am (America/New_York)", "2026-03-08T10:00:00Z"],
+    ["Nov 1 2026 at 1:30am (America/New_York)", "2026-11-01T10:00:00Z"],
+    ["Feb 30 2026 at 5am (Asia/Jerusalem)", "2026-03-01T10:00:00Z"],
+    ["Oct 11 2026 at 5am (Unknown/Zone)", "2026-10-11T10:00:00Z"],
+  ])("R1 B1 keeps invalid dates and DST gaps/overlaps unknown: %s", (label, clock) => {
+    const now = Date.parse(clock);
+    expect(claudeUsageResetAt(label, now)).toBeNull();
+    expect(hasCurrentClaudeUsageLimit(`Claude Code\n  ⎿ You've hit your weekly limit · resets ${label}\n❯ `, now)).toBe(true);
+  });
+  it("R1 B1 uses a timezone fallback only when explicitly supplied", () => {
+    const now = Date.parse("2026-10-11T02:51:22.802Z");
+    expect(claudeUsageResetAt("Oct 11 2026 at 5am", now)).toBeNull();
+    expect(claudeUsageResetAt("Oct 11 2026 at 5am", now, "Asia/Jerusalem")).toBe(Date.parse("2026-10-11T02:00:00Z"));
+  });
+  it.each(["/clear", "/usage-credits extra", "/usage extra", " /usage", "/custom-skill"])("R1 B1 does not exempt arbitrary slash input %s", text => {
+    expect(isClaudeQuotaRecoveryCommand(text)).toBe(false);
+  });
   const quota = "  ⎿ You've hit your weekly limit · resets 5am";
   it.each(["", "✻ Thinking…\n", "❯ retry\n✻ Thinking…\n"])("vetoes a fresh terminal quota after %j", preceding => {
     expect(hasCurrentClaudeUsageLimit(`Claude Code\n${preceding}${quota}\n❯ `)).toBe(true);

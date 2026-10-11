@@ -214,7 +214,7 @@ describe("spawn response shaping", () => {
       { callerOwnsBootDraft: true }).structuredContent.warning as string;
     expect(owned).toContain('send_to({mode:"key",surface:"surface:1",text:"return"})');
     expect(owned).toContain("from this same caller");
-    expect(owned).toContain("no quota, permission prompt or picker");
+    expect(owned).toContain("no current quota, permission prompt or picker");
     expect(owned).not.toContain("within 5 minutes");
     for (const opts of [undefined, { callerOwnsBootDraft: false }]) {
       const unowned = buildSpawnToolReturn(unsubmitted, false, undefined, undefined, opts)

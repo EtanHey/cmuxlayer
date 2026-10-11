@@ -4,6 +4,7 @@
 // closure's captured state now arrives as DeliveryEngineDeps.
 
 import { createHash, randomUUID } from "node:crypto";
+import { isClaudeQuotaRecoveryCommand } from "../claude-usage-reset.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
@@ -729,6 +730,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   // Each caller retains its typed/queued entries until verified submission.
   const typedDraftOwners = context.typedDraftOwners;
+  const currentClaudeQuota = (text: string) => hasCurrentClaudeUsageLimit(text, context.deliveryNow(), context.deliveryTimeZone);
   const rememberDraftOwner = (key: string, token: TypedDraftOwner): void => {
     const entries = token.texts ?? [token.text];
     token.texts = entries.slice(-8);
@@ -936,7 +938,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
         snapshot.parsed.control_state === "permission_prompt" ||
         (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
-        isPickerOrMenuScreen(snapshot.text, "claude") || hasCurrentClaudeUsageLimit(snapshot.text) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+        isPickerOrMenuScreen(snapshot.text, "claude") || (currentClaudeQuota(snapshot.text) && !isClaudeQuotaRecoveryCommand(opts.text)) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
     // draft_pending takes precedence over activity in the screen parser. Clear
     // only the current composer in a copied frame to inspect the turn status.
     const rows = normalizeTerminalText(snapshot.text).split("\n");
@@ -951,7 +953,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const entries = owner.texts ?? [owner.text];
       const owned = opts.delivery_id ? entries.some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.delivery_id)
         : Boolean(owner.caller) && owner.caller === resolveCurrentCallerAgent()?.agent_id && entries.includes(opts.text);
-      return sameTarget && owned && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      return sameTarget && owned && !owner.incomplete && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
     });
   };
 
@@ -1881,6 +1883,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
+    let dispatchedText = "";
     let submitDispatched = false;
     try {
       const assertBinding = opts.beforeMutation;
@@ -1892,8 +1895,27 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
         const observedCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli ?? inferComposerCli(snapshot.text, snapshot.parsed);
-        if (observedCli === "claude" && hasCurrentClaudeUsageLimit(snapshot.text)) {
+        let quotaCommand = opts.chunks.join("");
+        if (opts.key !== undefined && isSubmitKey(normalizeKeyName(opts.key))) {
+          const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+          const region = extractComposerInputRegion(snapshot.text, undefined, "claude", true);
+          quotaCommand = owner && !owner.incomplete && owner.caller && owner.caller === resolveCurrentCallerAgent()?.agent_id &&
+            draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner) && region !== null
+            ? ownedComposerText(owner, region, "claude", snapshot.text) ?? "" : "";
+        }
+        const quotaInput = opts.key === undefined || isSubmitKey(normalizeKeyName(opts.key));
+        if (observedCli === "claude" && quotaInput && !isClaudeQuotaRecoveryCommand(quotaCommand) && currentClaudeQuota(snapshot.text)) {
           throw new DeliverySafetyGateError("blocked_by_usage_limit", snapshot.parsed);
+        }
+        if (opts.key === undefined) {
+          for (const [key, owner] of typedDraftOwners) {
+            if (!owner.incomplete || !(owner.uuid ? owner.uuid.toLowerCase() === opts.stableSurfaceIdentity?.toLowerCase()
+                : owner.ref === opts.surface && owner.workspace === (opts.workspace ?? null))) continue;
+            // An operator may preserve/dispose of the prefix. Only an observed
+            // empty Claude composer clears the association; changed/unknown input does not.
+            if (observedCli === "claude" && extractComposerInputRegion(snapshot.text, undefined, "claude", true) === "") typedDraftOwners.delete(key);
+            else throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+          }
         }
         const hadBanner = isCodexDismissibleOverlay(snapshot.text);
         securityCapable = observedCli === "claude" || hadBanner || snapshot.parsed.agent_type === "codex" ||
@@ -1942,7 +1964,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
       const caller = resolveCurrentCallerAgent()?.agent_id;
-      const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      const ownerCurrent = Boolean(caller) && owner !== undefined && !owner.incomplete && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
       const ownedQueue = submitBaseline ? assignVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : [];
@@ -1990,7 +2012,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
         }
         if ((!ownedQueuedText || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
-          typedDraftOwners.delete(ownerKey);
+          // Refusing a known incomplete prefix must not forget why a later
+          // whole-message resend is unsafe. Keep the association, not submit authority.
+          if (!owner?.incomplete) typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
         if (!ownedQueuedText && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
@@ -2008,7 +2032,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             await opts.beforeMutation?.();
             if (targetCli === "claude" && ownedSubmitText) {
               const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
-              if (latest && hasCurrentClaudeUsageLimit(latest.text)) {
+              if (latest && !isClaudeQuotaRecoveryCommand(ownedSubmitText) && currentClaudeQuota(latest.text)) {
                 throw new DeliverySafetyGateError("blocked_by_usage_limit", latest.parsed);
               }
               const current = typedDraftOwners.get(ownerKey);
@@ -2371,7 +2395,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.source_event === "spawn_agent",
           opts.beforeMutation,
         );
-        if (batch.text.length > 0) textDispatched = true;
+        if (batch.text.length > 0) { textDispatched = true; dispatchedText += batch.text; }
         if (chunkRpcMethod) rpcMethods.add(chunkRpcMethod);
         for (const sentChunks of batch.deliveredChunkCounts) {
           opts.onChunkDelivered?.(sentChunks);
@@ -2711,21 +2735,31 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         // The bytes already belong to this delivery. A pre-Return quota veto
         // must retain uncertainty and ownership, rather than terminalize or
         // enqueue a replay of the original words.
-        const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+        const key = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+        const bytes = Buffer.byteLength(dispatchedText, "utf8");
+        const complete = dispatchedText === opts.chunks.join("");
+        if (!complete && opts.delivery_id) rememberDraftOwner(key, {
+          caller: resolveCurrentCallerAgent()?.agent_id ?? null, text: dispatchedText, at: Date.now(),
+          ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
+          fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: true,
+          deliveryIds: [opts.delivery_id], incomplete: true,
+        });
+        const owner = typedDraftOwners.get(key);
         const boot = opts.source_event === "boot_prompt"
           ? resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity) : null;
-        if (owner && boot && owner.caller && owner.text === opts.chunks.join("")) {
+        if (owner && boot && owner.caller && owner.text === dispatchedText) {
           owner.bootAgentId = boot.agent_id;
           owner.bootInstanceId = boot.boot_instance_id ?? undefined;
         }
-        const bytes = opts.chunks.reduce((sum, chunk) => sum + Buffer.byteLength(chunk, "utf8"), 0);
         if (opts.source_event) appendDeliveryEvent({ event_type: opts.source_event, source_agent: opts.source_agent ?? null,
           target_surface: opts.surface, bytes, press_enter: opts.press_enter, submit_verified: null,
           retry_count: 0, delivery_id: opts.delivery_id, delivery_state: "pending_verify" });
         return { ...buildPublicDeliveryReceipt({ delivery_state: "pending_verify", delivery_id: opts.delivery_id,
           typed: true, submit_attempted: opts.press_enter, submit_dispatched: submitDispatched,
           submit_verified: null, retry_count: 0, rpc_methods: [...rpcMethods], timings_ms: opts.timings,
-          needs_attention: true, attention_reason: "blocked_by_usage_limit", WARNING: error.message,
+          draft_complete: complete, owned_draft_recovery: complete && Boolean(owner?.caller),
+          needs_attention: true, attention_reason: complete ? "blocked_by_usage_limit" : "partial_draft",
+          WARNING: complete ? error.message : `Only ${bytes} UTF-8 bytes of this delivery were dispatched before quota blocked the next batch. The composer holds an incomplete prefix; full-draft ownership and automatic recovery are unavailable. Preserve those words; do not retype or submit the prefix as the original message.`,
         }), bytes };
       }
       throw preserveDeliveryEvidenceOnError(
@@ -4240,7 +4274,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   }): boolean => {
     const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
     const caller = resolveCurrentCallerAgent()?.agent_id;
-    const owned = Boolean(caller) && owner !== undefined && owner.caller === caller &&
+    const owned = Boolean(caller) && owner !== undefined && !owner.incomplete && owner.caller === caller &&
       draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(owner) && (opts.deliveryId === undefined ||
         (owner.texts ?? [owner.text]).some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.deliveryId));

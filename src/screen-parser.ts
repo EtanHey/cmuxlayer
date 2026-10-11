@@ -1,4 +1,5 @@
 import { CODEX_FOOTER_RE } from "./codex-chrome.js";
+import { claudeUsageResetAt } from "./claude-usage-reset.js";
 import type {
   ParsedCliUpdateState,
   ParsedScreenAgentType,
@@ -527,7 +528,7 @@ function classifyClaudeGlyphLine(
 }
 
 /** Delivery veto only; a terminal refusal after activity is still current. */
-export function hasCurrentClaudeUsageLimit(text: string): boolean {
+export function hasCurrentClaudeUsageLimit(text: string, nowMs = Date.now(), timeZone?: string): boolean {
   const frame = analyzeClaudeFrame(text);
   let composer = -1;
   frame.lines.forEach((line, index) => { if (/^\s*❯(?:\s|$)/u.test(line)) composer = index; });
@@ -537,7 +538,7 @@ export function hasCurrentClaudeUsageLimit(text: string): boolean {
   for (let index = 0; index < composer; index++) {
     const line = frame.lines[index] ?? "";
     if (/^❯(?:\s|$)/u.test(line)) { turnStart = index; refusal = -1; }
-    if (/^\s*⎿\s+You['’]ve hit your (?:weekly )?limit\s*·\s*resets\s+\S.*$/iu.test(line)) refusal = index;
+    if (/^\s*⎿\s+You['’]ve hit your (?:weekly )?limit(?:\s*·\s*resets(?:\s+.*)?)?\s*$/iu.test(line)) refusal = index;
   }
   if (refusal < 0) return false;
   const output = frame.glyphs.filter(glyph => glyph.lineIndex > turnStart && glyph.lineIndex < composer &&
@@ -547,7 +548,10 @@ export function hasCurrentClaudeUsageLimit(text: string): boolean {
   // terminal refusal has the adjacent harness usage-credits instruction;
   // an action spinner before a new refusal does not count as recovery.
   const credits = /^\s*\/usage-credits to finish what you’re working on\.\s*$/u.test(frame.lines[refusal + 1] ?? "");
-  return !output || output.kind === "action" || credits;
+  if (output && output.kind !== "action" && !credits) return false;
+  const label = /\breset[s]?\s+(.+)$/i.exec(frame.lines[refusal] ?? "")?.[1];
+  const resetAt = label ? claudeUsageResetAt(label, nowMs, timeZone) : null;
+  return resetAt === null || nowMs < resetAt;
 }
 
 function analyzeClaudeFrame(text: string): ClaudeFrame {

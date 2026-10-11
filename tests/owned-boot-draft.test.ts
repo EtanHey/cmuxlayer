@@ -43,6 +43,7 @@ function makeSlowComposerPane() {
   const state = {
     composer: "", rendered: false, submitted: [] as string[],
     wrapped: false, damagedFooter: false, quota: false, acceptReturn: true,
+    buffer: "",
     /** Test hook: observes every pane call before the fake answers it. */
     onExec: undefined as undefined | ((args: string[]) => void),
   };
@@ -66,6 +67,8 @@ function makeSlowComposerPane() {
   };
   const exec: ExecFn = withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args: string[]) => {
     state.onExec?.(args);
+    if (args.includes("set-buffer")) { state.buffer = String(args.at(-1)); return { stdout: "{}", stderr: "" }; }
+    if (args.includes("paste-buffer")) { state.composer += state.buffer; return { stdout: "{}", stderr: "" }; }
     if (args.includes("send-key") && args.includes("return")) {
       if (state.acceptReturn && state.rendered && state.composer) {
         state.submitted.push(state.composer);
@@ -121,9 +124,11 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     const { runWithCallerContext } = await import("../src/caller-context.js");
     const pane = makeSlowComposerPane();
     let sessionId: string | null = null;
+    let now = Date.parse("2026-10-11T01:59:00Z");
     const context = createServerContext({
       exec: pane.exec, stateDir: testDir, inboxBaseDir: testDir,
       disableSpawnPreflight: true,
+      deliveryNow: () => now,
       // Spawn learns the session id right after typing the boot draft
       // (captureSpawnSessionBestEffort) -- the real ordering on 0.4.87.
       sessionIdentityResolver: () => sessionId ? { session_id: sessionId } as any : null,
@@ -145,17 +150,119 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
         repo: "brainlayer", model: "sonnet", cli: "claude", workspace: "workspace:1",
         prompt, boot_prompt_timeout_ms: 2_000,
       }, {})));
-    const keyReturn = (uuid: string | undefined, surface: string) => as(uuid, async () => parseToolResult(
-      await server._registeredTools.send_to.handler({ mode: "key", surface, text: "return" }, {})));
-    const send = (text: string, press_enter = false) => as(LEAD_UUID, async () => {
+    const key = (uuid: string | undefined, surface: string, text: string) => as(uuid, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ mode: "key", surface, text }, {})));
+    const keyReturn = (uuid: string | undefined, surface: string) => key(uuid, surface, "return");
+    const send = (text: string, press_enter = false, allow_long_inline = false) => as(LEAD_UUID, async () => {
       if (!engine.getRegistry().get("target-seat")) {
         const target = { ...lead, agent_id: "target-seat", surface_id: "surface:new", surface_uuid: NEW_UUID, cli_session_id: "target-session" };
         engine.stateMgr.writeState(target); engine.getRegistry().set(target.agent_id, target);
       }
-      return parseToolResult(await server._registeredTools.send_to.handler({ agent_id: "target-seat", text, press_enter, verbose: true }, {}));
+      return parseToolResult(await server._registeredTools.send_to.handler({ agent_id: "target-seat", text, press_enter, allow_long_inline, verbose: true }, {}));
     });
-    return { pane, context, engine, spawn, keyReturn, send, setSession: (id: string) => { sessionId = id; } };
+    const sendSurface = (text: string) => as(LEAD_UUID, async () => parseToolResult(
+      await server._registeredTools.send_to.handler({ mode: "surface", surface: "surface:new", text, press_enter: true, allow_long_inline: true, verbose: true }, {})));
+    return { pane, context, engine, spawn, key, keyReturn, send, sendSurface,
+      setNow: (value: string) => { now = Date.parse(value); }, setSession: (id: string) => { sessionId = id; } };
   }
+
+  it("R1 B1 recovers same-owned input after the displayed reset while the refusal stays visible", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      const typed = await t.send("Preserve these exact words");
+      t.pane.state.quota = true;
+      const blocked = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(blocked.error_code).toBe("blocked_by_usage_limit");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      t.setNow("2026-10-11T02:51:22.802Z");
+      const submitted = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(submitted).toMatchObject({ ok: true, submit_verified: true, delivery_id: typed.delivery_id });
+      expect(t.pane.state.quota).toBe(true);
+      expect(t.pane.state.submitted).toEqual(["Preserve these exact words"]);
+      await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("R1 B1 submits fresh text after reset with the old refusal visible", async () => {
+    const t = await setup();
+    try {
+      t.setNow("2026-10-11T02:51:22.802Z");
+      t.pane.state.rendered = true; t.pane.state.quota = true;
+      expect(await t.send("A fresh authorized task", true)).toMatchObject({ ok: true, submit_verified: true });
+      expect(t.pane.state.submitted).toEqual(["A fresh authorized task"]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["escape", "up", "tab"])("R1 B2 dispatches non-submit key %s once under current quota", async text => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true; t.pane.state.quota = true;
+      const result = await t.key(LEAD_UUID, "surface:new", text);
+      expect(result).toMatchObject({ ok: true, key_dispatched: true, submit_attempted: false });
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send-key") && args.includes(text))).toHaveLength(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["/usage", "/usage-credits", "/rate-limit-options"])("R1 B1 permits exact %s navigation under quota without admitting a foreign draft", async command => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true; t.pane.state.quota = true;
+      expect(await t.send(command, true)).toMatchObject({ ok: true, submit_verified: true });
+      expect(t.pane.state.submitted).toEqual([command]);
+      t.pane.state.composer = "human draft";
+      const before = returnPresses(t.pane.exec);
+      expect((await t.send(command, true)).ok).toBe(false);
+      expect(t.pane.state.composer).toBe("human draft");
+      expect(returnPresses(t.pane.exec)).toBe(before);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("R1 B1 quota navigation key recovery still requires the original caller and delivery", async () => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true; t.pane.state.quota = true;
+      // /usage collides with the retained /usage-credits advice in the
+      // existing conservative transcript-accepted guard. Keep that guard;
+      // use navigation absent from the transcript to prove caller binding.
+      const typed = await t.send("/rate-limit-options");
+      expect(typed.typed, JSON.stringify(typed)).toBe(true);
+      expect((await t.keyReturn(OTHER_UUID, "surface:new")).ok).toBe(false);
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      const recovered = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(recovered, JSON.stringify(recovered)).toMatchObject({ ok: true, submit_verified: true, delivery_id: typed.delivery_id });
+      expect(t.pane.state.submitted).toEqual(["/rate-limit-options"]);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["surface", "agent"])("R1 N1 %s preserves a dispatched UTF-8 prefix without claiming full ownership or recovery", async mode => {
+    const t = await setup();
+    try {
+      t.pane.state.rendered = true;
+      // Register the managed target without putting any text in its composer.
+      await t.send("");
+      const text = "é ".repeat(6000); //18000bytes, two native paste batches.
+      t.pane.state.onExec = args => { if (args.includes("paste-buffer")) t.pane.state.quota = true; };
+      const deliver = () => mode === "surface" ? t.sendSurface(text) : t.send(text, true, true);
+      const sent = await deliver();
+      const actualBytes = Buffer.byteLength(t.pane.state.composer, "utf8");
+      expect(actualBytes).toBeGreaterThan(0); expect(actualBytes).toBeLessThan(Buffer.byteLength(text, "utf8"));
+      expect(sent).toMatchObject({ ok: false, bytes: actualBytes, draft_complete: false, owned_draft_recovery: false, delivery_state: "pending_verify" });
+      expect(sent.WARNING).toContain("incomplete prefix");
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      t.setNow("2026-10-11T02:51:22.802Z");
+      const before = t.pane.state.composer;
+      expect((await t.keyReturn(LEAD_UUID, "surface:new")).ok).toBe(false);
+      expect((await deliver()).ok).toBe(false);
+      expect(t.pane.state.composer).toBe(before);
+      expect(returnPresses(t.pane.exec)).toBe(0);
+      // Explicit operator disposition is observable as empty input; it does
+      // not authorize automatic continuation or whole-message replay.
+      t.pane.state.composer = "";
+      expect(await t.send("A new task after manual disposition", true)).toMatchObject({ ok: true, submit_verified: true });
+    } finally { t.context.dispose(); }
+  }, 30_000);
 
   it("P0 recovers the spawn-written Claude whole-word path wrap under its original delivery ID", async () => {
     const t = await setup();
