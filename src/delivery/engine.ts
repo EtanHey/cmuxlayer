@@ -1078,6 +1078,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     text: string;
     timeout_ms: number;
+    deadline_ms?: number;
     beforeRead?: () => Promise<void>;
   }): Promise<{
     screenText: string;
@@ -1090,17 +1091,33 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       ? 3 : 1;
     const startedAt = Date.now();
     for (let read = 0; ; read += 1) {
+      if (opts.deadline_ms !== undefined && Date.now() >= opts.deadline_ms) break;
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
+      if (opts.deadline_ms !== undefined && (!snapshot || Date.now() >= opts.deadline_ms)) break;
       const pickerRegion = snapshot ? composerPickerInputRegion(snapshot.text) : null;
-      if (snapshot && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
-          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)))) {
+      const bootRegion = opts.deadline_ms !== undefined && snapshot
+        ? extractComposerInputRegion(snapshot.text, opts.text, "claude", true) : null;
+      const complete = opts.deadline_ms !== undefined
+        ? bootRegion !== null && composerRegionMatchesPayload(bootRegion, opts.text, "claude", snapshot!.text)
+        : snapshot !== null && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
+          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)));
+      if (snapshot && complete) {
         return {
           screenText: snapshot.text,
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
+      }
+      // Actual Claude canary: three successful empty frames preceded the
+      // painted boot pointer. Only boot uses the remaining caller deadline;
+      // established send paths retain their existing read budget.
+      if (opts.deadline_ms !== undefined) {
+        const remaining = opts.deadline_ms - Date.now();
+        if (remaining <= 0) break;
+        await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
+        continue;
       }
       // #801 gate 1: agy's Bubble Tea textarea repainted a 150-char paste only
       // after the 3-read window (surface:947), so Return was never pressed.
@@ -1883,6 +1900,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
+    /** Claude boot only: shared deadline covering readiness and repaint. */
+    boot_payload_observe_deadline_ms?: number;
     /** Internal remaining readiness budget, sampled after Return. */
     submit_verify_remaining_budget_ms?: () => number;
     stableSurfaceIdentity?: string | null;
@@ -1900,6 +1919,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     let textDispatched = false;
     let dispatchedText = "";
     let submitDispatched = false;
+    let bootReturnReady = false;
     try {
       const assertBinding = opts.beforeMutation;
       let securityDismissed = false;
@@ -1958,7 +1978,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         // The existing pre-type/key baseline is already a safe observation.
         // Consume it once; subsequent input batches need a fresh overlay check.
-        if (!inputSafetyObserved && securityCapable) await readSafeInput();
+        if (bootReturnReady) {
+          const snapshot = await readSafeInput();
+          const region = snapshot ? extractComposerInputRegion(snapshot.text, undefined, "claude", true) : null;
+          if (Date.now() >= opts.boot_payload_observe_deadline_ms! || !snapshot || region === null ||
+              !composerRegionMatchesPayload(region, opts.chunks.join(""), "claude", snapshot.text)) {
+            throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot?.parsed ?? parseScreen(""));
+          }
+        } else if (!inputSafetyObserved && securityCapable) await readSafeInput();
         inputSafetyObserved = false;
       } };
       await assertBinding?.();
@@ -2464,6 +2491,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                   SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
                 BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
               ),
+              deadline_ms: opts.boot_payload_observe_deadline_ms,
               beforeRead: assertBinding,
             })
           : null;
@@ -2489,6 +2517,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_verification_reason = null;
         deliveryOutcome = "pending_verify";
       } else {
+        bootReturnReady = opts.boot_payload_observe_deadline_ms !== undefined;
         const codexRelay = (targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "")) === "codex" &&
           (opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
@@ -3827,6 +3856,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedText];
 
+    const bootDeadline = Date.now() + (opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS);
     let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -3856,7 +3886,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         initialUpdateMenuTextHash: readiness.updateMenuTextHash,
         cli: opts.cli,
         text: sanitizedText,
-        timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+        timeout_ms: opts.cli === "claude"
+          ? Math.max(0, bootDeadline - Date.now())
+          : opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
         onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
         resolveRoute: opts.resolveRoute,
         assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
@@ -3871,6 +3903,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
     }
     const assertDeliveryRouteCurrent = async (): Promise<void> => {
+      if (opts.cli === "claude") await opts.assertStableSurfaceIdentity?.();
       if (opts.resolveRoute) {
           const current = await opts.resolveRoute!();
           if (!sameRoute(deliveryRoute, current)) {
@@ -3930,6 +3963,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             // readiness patterns decide when typing may begin; no CLI may turn
             // status alone into proof that cmuxlayer's payload was submitted.
             require_observed_payload_before_enter: true,
+            ...(opts.cli === "claude" ? { boot_payload_observe_deadline_ms: bootDeadline } : {}),
             submit_verify_timeout_ms: opts.timeout_ms
               ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
               : undefined,
