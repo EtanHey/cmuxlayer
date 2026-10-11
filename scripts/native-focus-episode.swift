@@ -169,9 +169,10 @@ func send(_ row: [String: Any]) throws {
     FileHandle.standardOutput.write(bytes); FileHandle.standardOutput.write(Data([10]))
 }
 do {
-    try require(args.count == 5 && getuid() == 501, "ACCOUNT_OR_ARGUMENT_MISMATCH")
+    try require(args.count == 6 && getuid() == 501, "ACCOUNT_OR_ARGUMENT_MISMATCH")
     runID = args[1]; dispatchID = args[2]; threadID = args[3]
-    try require(threadID == "mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d" && !dispatchID.isEmpty, "FOREIGN_COORDINATION")
+    let expectedThreadID = args[5] // Accepted packet binding, supplied by the pinned JS supervisor.
+    try require(expectedThreadID.hasPrefix("mcp:") && UUID(uuidString: String(expectedThreadID.dropFirst(4))) != nil && threadID == expectedThreadID && !dispatchID.isEmpty, "FOREIGN_COORDINATION")
     guard let end = clock.date(from: args[4]) else { throw Stop(reason: "DEADLINE_MISSING") }; deadline = end
     try require(deadline.timeIntervalSinceNow <= 900, "EPISODE_TOO_LONG"); try budget(60)
     let trust = AXIsProcessTrusted(); event("AXIsProcessTrusted", ["trusted": trust]); try require(trust, "AX_CONTEXT_NOT_TRUSTED")

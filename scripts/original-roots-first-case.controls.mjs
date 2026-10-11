@@ -18,6 +18,7 @@ const cfg = { executionApproved: true, coordinationReceipt: { status: 'ACCEPTED'
   appProcess: { pid: 44, uid: 501, start: 'start-A', executable: '/Applications/cmux.app/Contents/MacOS/cmux', argv: 'observed-app' },
   nodeSha256: 'a'.repeat(64), cmuxSha256: 'b'.repeat(64), runnerSha256: 'c'.repeat(64), proxyRunnerSha256: 'd'.repeat(64),
   notBeforeUTC: stamp(-1000), mutationEndUTC: stamp(10000), deadlineUTC: stamp(70000) };
+cfg.expectedThreadId=cfg.coordinationReceipt.threadId;
 test('future execution requires approved current identity/window', () => assert.equal(validateConfig(cfg, now), cfg));
 for (const [name, patch] of Object.entries({ noApproval: { executionApproved: false }, expired: { mutationEndUTC: stamp(-1) },
   noReserve: { deadlineUTC: stamp(11000) }, oldProduct: { productHead: 'f'.repeat(40) }, globalRoot: { root: '/Users/happycampr' },

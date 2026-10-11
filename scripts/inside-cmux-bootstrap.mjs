@@ -13,7 +13,7 @@ import {BridgeClient,validateCheckpoint} from './native-focus-bridge.mjs';
 import {privateJSON} from './bootstrap-gate.mjs';
 import {execFileSync} from 'node:child_process';
 const self=fileURLToPath(import.meta.url), stage=dirname(self);
-export const PINS={runner:'2d6178fee8bda45eb3c683e98c2fcca940858c9e0c74de600164a14cd86740ab',proxy:'355dd758b5fabec25da4950c7de64340bdae4afdb7f42037e35c6697879c104f',node:'832eaf52cafa7ff1364c2ca378451db14fb043d8d23a5cfd18a0a103d66226fc',cmux:'855ae2b7e14132402979e5b0e202ce85dc1ae7e6c840884530930bd3bc3adbc1'};
+export const PINS={runner:'7b11a268974983d7e8efc1a061bcf69f90d821d5bb729f1b1b2162edc1566ad7',proxy:'355dd758b5fabec25da4950c7de64340bdae4afdb7f42037e35c6697879c104f',node:'832eaf52cafa7ff1364c2ca378451db14fb043d8d23a5cfd18a0a103d66226fc',cmux:'855ae2b7e14132402979e5b0e202ce85dc1ae7e6c840884530930bd3bc3adbc1'};
 const check=(ok,why)=>{if(!ok)throw Error(why);};
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const write=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});

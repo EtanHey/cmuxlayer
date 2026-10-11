@@ -7,6 +7,7 @@ const m = await import(pathToFileURL(file)); const source = readFileSync(file, '
 const id='11111111-1111-4111-8111-111111111111', root='/Users/happycampr/Library/Caches/cmuxlayer-firstcase-'+id;
 const stamp = delta => new Date(Date.now()+delta).toISOString();
 const c={executionApproved:true,coordinationReceipt:{status:'ACCEPTED',dispatchId:'synthetic',threadId:'mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d'},host:'synthetic',productHead:m.HEAD,productTree:m.TREE,uid:501,runId:id,marker:'FIRSTCASE_'+id,workspaceId:id,anchorSurfaceId:id,anchorPaneRef:'pane:1',root,candidate:'/Users/happycampr/Library/Caches/candidate',manifestPath:'/tmp/manifest',node:'/node',cmux:'/cmux',socket:'/socket',socketIdentity:{uid:501},appProcess:{uid:501,start:'A',argv:'synthetic'},nodeSha256:'a'.repeat(64),cmuxSha256:'b'.repeat(64),runnerSha256:'c'.repeat(64),proxyRunnerSha256:'d'.repeat(64),notBeforeUTC:stamp(-1000),mutationEndUTC:stamp(2000),deadlineUTC:stamp(62000)};
+c.expectedThreadId=c.coordinationReceipt.threadId;
 let pass=0,fail=0;
 async function test(name,run){try{await run();pass++;console.log('PASS '+name);}catch(e){fail++;console.log('FAIL '+name+' '+String(e));}}
 await test('R1 actual request options bounded by absolute remaining window',async()=>{

@@ -44,8 +44,11 @@ export function verifyCandidate(candidate, manifestPath) {
   return { head: HEAD, tree: TREE, manifest_sha256: MANIFEST, dist_entries: 390, fixture: 'captured Codex contract' };
 }
 
+export function matchesExpectedThread(expected,actual) {
+  return typeof expected === 'string' && /^mcp:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(expected) && actual === expected;
+}
 export function validateConfig(c, now = Date.now()) {
-  check(c.executionApproved === true && c.coordinationReceipt?.status === 'ACCEPTED' && c.coordinationReceipt.dispatchId && c.coordinationReceipt.threadId === 'mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d' && c.host && c.productHead === HEAD && c.productTree === TREE, 'parent execution/window/product approval required');
+  check(c.executionApproved === true && c.coordinationReceipt?.status === 'ACCEPTED' && c.coordinationReceipt.dispatchId && matchesExpectedThread(c.expectedThreadId,c.coordinationReceipt.threadId) && c.host && c.productHead === HEAD && c.productTree === TREE, 'parent execution/window/product approval required');
   check(uuid(c.runId) && uuid(c.workspaceId) && uuid(c.anchorSurfaceId) && c.anchorPaneRef?.startsWith('pane:'), 'exact run/workspace/surface/pane identities required');
   for (const key of ['root', 'candidate', 'manifestPath', 'node', 'cmux', 'socket']) check(safePath(c[key]), 'unsafe path: ' + key);
   check(c.root === '/Users/happycampr/Library/Caches/cmuxlayer-firstcase-' + c.runId, 'owned501 run root required');

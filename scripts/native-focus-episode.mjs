@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import {spawn, execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {join, dirname} from 'node:path';
-import {sameProcess} from './original-roots-first-case.mjs';
+import {sameProcess,matchesExpectedThread} from './original-roots-first-case.mjs';
 import {queryProcess} from './original-roots-first-case.proxy.mjs';
 import {validateExecutor} from './bootstrap-gate.mjs';
 import {StringDecoder} from 'node:string_decoder';
@@ -11,6 +11,12 @@ export const OBSERVER='NSWORKSPACE_FOREGROUND_DIRECT_PID_AX';
 export const RECIPE='ACTIVATE_EXISTING_RAISE_SET_FOCUSED_WINDOW';
 const check=(ok,why)=>{if(!ok)throw Error(why);};
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+// Foundation's pinned fractional-seconds parser needs .sssZ. Preserve the instant.
+export function canonicalHelperDeadline(value) {
+ check(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value),'valid UTC helper deadline required');
+ const canonical=value.replace(/(?:\.(\d{1,3}))?Z$/,(_,fraction)=>'.'+(fraction??'').padEnd(3,'0')+'Z'),ms=Date.parse(canonical);
+ check(Number.isFinite(ms)&&new Date(ms).toISOString()===canonical,'valid UTC helper deadline required');return canonical;
+}
 const privateFile=(path,uid=501)=>{
  const s=fs.lstatSync(path);
  check(s.isFile()&&!s.isSymbolicLink()&&s.nlink===1&&s.uid===uid&&(s.mode&0o777)===0o600&&fs.realpathSync(path)===path,'private canonical receipt required');
@@ -57,7 +63,7 @@ export function readFocusReceipt(plan,c,now=Date.now(),query=queryProcess) {
 }
 export function executorReadiness(w,c,proof){return validateExecutor(w,c,proof);}
 export class Episode {
- constructor(config){this.c=config;this.sequence=0;this.tokens={};this.pending=null;this.ended=false;this.buffer='';this.decoder=new StringDecoder('utf8');this.restorations={cmux:{status:'UNATTEMPTED'},original:{status:'UNATTEMPTED'}};}
+ constructor(config){this.c=config;this.sequence=0;this.tokens={};this.pending=null;this.ended=false;this.buffer='';this.decoder=new StringDecoder('utf8');this.stops=new Set();this.restorations={cmux:{status:'UNATTEMPTED'},original:{status:'UNATTEMPTED'}};}
  remaining(){const n=Date.parse(this.c.deadlineUTC)-Date.now();check(n>0,'absolute episode deadline');return n;}
  record(name,value){fs.writeFileSync(join(this.c.receiptDir,name+'.json'),JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});}
  identity(){return queryProcess(this.child.pid,Math.min(1000,this.remaining()));}
@@ -66,35 +72,46 @@ export class Episode {
   const c=this.c;
   check(process.platform==='darwin'&&process.arch==='arm64'&&process.getuid()===501&&process.env.HOME==='/Users/happycampr'&&fs.lstatSync('/dev/console').uid===501,'normal501 native context required');
   check(execFileSync('/bin/launchctl',['manageruid'],{encoding:'utf8',timeout:1000}).trim()==='501'&&execFileSync('/bin/launchctl',['managername'],{encoding:'utf8',timeout:1000}).trim()==='Aqua','gui501 Aqua session required');
-  check(c.threadId==='mcp:8fd6b8a4-87bd-466f-81fc-4e57713c6a2d'&&c.dispatchId&&this.remaining()>=240000&&this.remaining()<=900000,'fresh episode identity/deadline/reserves required');
+  check(matchesExpectedThread(c.expectedThreadId,c.threadId)&&c.dispatchId&&this.remaining()>=240000&&this.remaining()<=900000,'fresh episode identity/deadline/reserves required');
   const s=fs.lstatSync(dirname(c.helper)),b=fs.lstatSync(c.helper);
   check(s.isDirectory()&&!s.isSymbolicLink()&&s.uid===501&&(s.mode&0o777)===0o700&&fs.realpathSync(dirname(c.helper))===dirname(c.helper),'private stage required');
   check(b.isFile()&&!b.isSymbolicLink()&&b.nlink===1&&b.uid===501&&(b.mode&0o777)===0o700&&fs.realpathSync(c.helper)===c.helper&&sha(fs.readFileSync(c.helper))===c.helperSHA256,'pinned helper required');
   check(dirname(c.receiptDir)===dirname(c.helper),'stage-local exclusive receipts required');fs.mkdirSync(c.receiptDir,{mode:0o700});
+  return this.startTransport();
+ }
+ async startTransport(){
+  const c=this.c;let errorFD;
+  try{
+  // Recheck expiry before opening files/spawning; callers still own native preflight.
+  c.deadlineUTC=canonicalHelperDeadline(c.deadlineUTC);check(this.remaining()>2000,'helper startup cleanup reserve exhausted');check(matchesExpectedThread(c.expectedThreadId,c.threadId),'helper expected thread binding mismatch');
   this.controller=queryProcess(process.pid,1000);this.record('controller-identity',this.controller);
-  this.argv=[c.helper,c.runId,c.dispatchId,c.threadId,c.deadlineUTC];
-  const errorFD=fs.openSync(join(c.receiptDir,'helper.stderr.private.txt'),'wx',0o600);
+  this.argv=[c.helper,c.runId,c.dispatchId,c.threadId,c.deadlineUTC,c.expectedThreadId];
+  errorFD=fs.openSync(join(c.receiptDir,'helper.stderr.private.txt'),'wx',0o600);
   this.stdoutFD=fs.openSync(join(c.receiptDir,'helper.stdout.private.jsonl'),'wx',0o600);
-  const ready=this.awaitRow();
-  this.child=spawn(c.helper,this.argv.slice(1),{stdio:['pipe','pipe',errorFD],env:{HOME:'/Users/happycampr',PATH:'/usr/bin:/bin'},cwd:dirname(c.helper)});fs.closeSync(errorFD);
+  const ready=this.awaitRow();ready.catch(()=>{}); // Observe early spawn/exit rejection before awaiting spawn.
+  this.child=spawn(c.helper,this.argv.slice(1),{stdio:['pipe','pipe',errorFD],env:{HOME:'/Users/happycampr',PATH:'/usr/bin:/bin'},cwd:dirname(c.helper)});
   this.child.stdout.on('data',bytes=>{
    fs.writeSync(this.stdoutFD,bytes);this.buffer+=this.decoder.write(bytes);
    if(this.buffer.length>65536){this.reject(Error('helper output bound exceeded'));return;}
    while(this.buffer.includes('\n')){const n=this.buffer.indexOf('\n'),line=this.buffer.slice(0,n);this.buffer=this.buffer.slice(n+1);try{this.deliver(JSON.parse(line));}catch(e){this.reject(e);}}
   });
+  this.child.once('exit',(code,signal)=>{this.exitObserved={code,signal,observedUTC:new Date().toISOString()};});
   this.exitPromise=new Promise(resolve=>this.child.once('close',(code,signal)=>{this.ended=true;this.exit={code,signal};this.reject(Error('helper transport closed'));resolve(this.exit);}));
-  this.child.once('error',e=>this.reject(e));
+  this.child.once('error',e=>{this.transportError=e;this.reject(e);});
+  this.child.stdin.on('error',e=>{this.transportError=e;this.reject(e);});
   await new Promise((resolve,reject)=>{this.child.once('spawn',resolve);this.child.once('error',reject);});
   this.baseline=this.identity();check(this.baseline.ppid===process.pid&&this.baseline.uid===501&&this.baseline.argv===this.argv.join(' ')&&this.baseline.executable===c.helper,'owned helper binding unavailable');this.record('helper-identity',this.baseline);
   this.timers=[setTimeout(()=>this.stop('SIGTERM'),Math.max(0,this.remaining()-2000)),setTimeout(()=>this.stop('SIGKILL'),Math.max(0,this.remaining()-700))];
-  const row=await ready;check(row.status==='HELPER_STARTED'&&row.helperPID===this.baseline.pid&&row.helperPPID===process.pid&&row.helperExecutable===c.helper,'startup identity unavailable');this.session=row.session;this.alive();return row;
+  const row=await ready;this.startupRow=row;this.record('startup-row',row);check(row.status==='HELPER_STARTED'&&row.helperPID===this.baseline.pid&&row.helperPPID===process.pid&&row.helperExecutable===c.helper,'helper startup rejected: '+row.status+' '+(row.error??'identity unavailable'));this.session=row.session;this.alive();this.started=true;return row;
+  }catch(error){this.startupError=error;this.reject(error);this.record('startup-failure',{error:String(error),argv:this.argv??null,startupRow:this.startupRow??null,helperIdentity:this.baseline??null,guiActions:0});throw error;}
+  finally{if(errorFD!==undefined)fs.closeSync(errorFD);}
  }
  awaitRow(){check(!this.pending,'one in-flight command only');return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending=null;reject(Error('helper command deadline; effects UNKNOWN'));},Math.min(10000,this.remaining()));this.pending={resolve,reject,timer};});}
  deliver(row){check(this.pending,'unsolicited helper output');const p=this.pending;this.pending=null;clearTimeout(p.timer);p.resolve(row);}
  reject(error){if(this.pending){const p=this.pending;this.pending=null;clearTimeout(p.timer);p.reject(error);}}
  async command(command,extra={}){
   this.alive();const sequence=++this.sequence,pending=this.awaitRow();
-  this.child.stdin.write(JSON.stringify({command,...extra,session:this.session,sequence})+'\n');
+  pending.catch(()=>{});try{this.child.stdin.write(JSON.stringify({command,...extra,session:this.session,sequence})+'\n');}catch(error){this.reject(error);}
   let row;try{row=await pending;}catch(error){this.record('command-error-'+sequence,{command,error:String(error),effects:'UNKNOWN',replay:false});throw error;}this.record('command-'+sequence,row);
   check(row.sequence===sequence&&row.session===this.session&&row.runId===this.c.runId&&row.threadId===this.c.threadId&&row.dispatchId===this.c.dispatchId&&row.deadlineUTC===this.c.deadlineUTC,'helper reply provenance mismatch');
   check(row.status==='OBSERVED','actual helper observation/action failed: '+row.status);if(command!=='finish')this.alive();return row;
@@ -117,11 +134,25 @@ export class Episode {
   try{const row=await this.command('restore-token',{kind,token:target.token,expectedKind,expectedToken:expected.token});check(row.restorationProved===true&&row.sameFocusedWindow===true,'restoration equality unproved');this.restorations[kind]={status:'AX_WINDOW_RESTORED',receiptSequence:row.sequence,protocolRestoration:'REQUIRES_SEPARATE_TOPOLOGY_RECEIPT'};return row;}
   finally{this.record('restore-'+kind,this.restorations[kind]);}
  }
- stop(signal){if(this.ended)return;let row={signal,requestedUTC:new Date().toISOString(),sent:false};try{this.alive();row.identity=this.baseline;row.sent=this.child.kill(signal);}catch(error){row.error=String(error);row.remaining='UNKNOWN_RETAINED';}this.record('cleanup-'+signal,row);}
- async finish(){
-  if(!this.child)return;
-  try{if(!this.ended)await this.command('finish');await Promise.race([this.exitPromise,new Promise((_,reject)=>setTimeout(()=>reject(Error('helper exit UNPROVED')),Math.min(1000,this.remaining())))]);}
-  finally{(this.timers??[]).forEach(clearTimeout);if(!this.ended)this.stop('SIGTERM');this.record('supervision',{exit:this.exit??null,ownedHelperRemaining:this.ended?false:'UNKNOWN_RETAINED',restorations:this.restorations,END_RETURN:new Date().toISOString()});if(this.ended&&this.stdoutFD!==undefined)fs.closeSync(this.stdoutFD);else{this.child?.stdout?.destroy();this.child?.stdin?.destroy();this.child?.unref();}}
+ stop(signal){if(this.ended||this.exitObserved||this.stops.has(signal))return;this.stops.add(signal);let row={signal,requestedUTC:new Date().toISOString(),sent:false};try{check(this.baseline&&sameProcess(this.baseline,queryProcess(this.child.pid,1000))&&sha(fs.readFileSync(this.c.helper))===this.c.helperSHA256,'owned helper identity/bytes unavailable; no signal');row.identity=this.baseline;row.sent=this.child.kill(signal);}catch(error){row.error=String(error);row.remaining='UNKNOWN_RETAINED';}this.record('cleanup-'+signal,row);}
+ async waitClosed(ms){if(this.ended)return true;let timer;try{return await Promise.race([this.exitPromise.then(()=>true),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),ms);})]);}finally{clearTimeout(timer);}}
+ finish(){return this.finishPromise??=(this.finishOnce());}
+ async finishOnce(){
+  let error=this.startupError??this.transportError;
+  try{if(this.child&&this.started&&!this.ended&&!error){this.finishRequested=true;await this.command('finish');}}
+  catch(e){error??=e;}
+  finally{
+   (this.timers??[]).forEach(clearTimeout);this.reject(Error('helper supervision finishing; no further command'));
+   if(this.child){if(!await this.waitClosed(250)){this.stop('SIGTERM');if(!await this.waitClosed(750)){this.stop('SIGKILL');await this.waitClosed(750);}}}
+   const remaining=this.child&&!this.ended?'UNKNOWN_RETAINED':false;
+   if(remaining)error??=Error('helper exit UNPROVED');
+   if(this.child&&this.started&&(!this.finishRequested||this.exit?.code!==0))error??=Error('helper exited without successful finish');
+   this.supervision={status:error?'FAILED_HELPER_LIFECYCLE':this.started?'HELPER_FINISHED':'HELPER_NOT_STARTED',error:error?String(error):null,exit:this.exit??null,exitObserved:this.exitObserved??null,ownedHelperRemaining:remaining,restorations:this.restorations,END_RETURN:new Date().toISOString()};
+   if(fs.existsSync(this.c.receiptDir))this.record('supervision',this.supervision);
+   if(this.stdoutFD!==undefined){fs.closeSync(this.stdoutFD);this.stdoutFD=undefined;}
+   this.child?.stdout?.destroy();this.child?.stdin?.destroy();if(remaining)this.child?.unref();
+  }
+  if(error)throw error;return this.supervision;
  }
 }
 
