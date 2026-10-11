@@ -3422,7 +3422,16 @@ export class AgentEngine {
       const child = { ...agent, [outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"]: id };
       const signature = prior ? evidence.prior.key : `input:${evidence.boot}:${receipt.delivery_id}`;
       if (await this.notifyLifecycleEventForSweep(ctx, child, outcome, signature)) {
-        this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { [field]: true });
+        try {
+          this.deliveryQueue.updateReportReceipt(receipt.delivery_id, { [field]: true });
+        } catch (error) {
+          // updateReportReceipt retains the in-memory ACK before writing disk.
+          // A restart can retry the durable pending outcome with the same ID.
+          const message = error instanceof Error ? error.message : String(error);
+          this.sweepDebugLog(
+            `[cmuxlayer] report ${outcome} input ACK persistence failed for ${agent.agent_id} delivery ${receipt.delivery_id}; in-memory ACK retained: ${message}`,
+          );
+        }
       }
     };
     // Preserve a pending boot completion at the first input boundary as well.

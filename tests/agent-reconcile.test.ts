@@ -3323,6 +3323,110 @@ describe("Agent reconcile", () => {
         engine.markAgentWorking(childId, { verifiedDelivery: true, deliveryId: id });
       };
 
+      it.each(["done", "blocked"] as const)("corrective input %s ACK write failure preserves later reconciliation and delivery identity", async (outcome) => {
+        await setup(); await finish(); await tick();
+        const deliveryId = `corrective-${outcome}`;
+        input(deliveryId); confirm(deliveryId);
+        const laterId = "later-input-ack-child";
+        const laterPath = join(TEST_DIR, "later-input-ack.md");
+        stateMgr.writeState(makeRecord({ agent_id: laterId, parent_agent_id: "lead-report-parent",
+          cli: "claude", surface_id: "surface:43", state: "creating",
+          report_path: laterPath, done_marker: "DONE_LATER_INPUT_ACK" }));
+        stateMgr.transition(laterId, "booting");
+        engine.getRegistry().set(laterId, stateMgr.transition(laterId, "done"));
+        liveSurfaces.push(makeSurface("surface:43"));
+        writeHeartbeat(laterId, inboxOpts);
+        writeFileSync(laterPath, "Complete\nDONE_LATER_INPUT_ACK\n");
+        const field = outcome === "done" ? "report_done_notified" : "report_blocked_notified";
+        const calls = () => mockClient.notifyLifecycleEvent.mock.calls.filter(
+          ([event, child]) => event === outcome && child.agent_id === childId &&
+            child[outcome === "done" ? "report_done_delivery_id" : "report_blocked_delivery_id"] ===
+              engine.getDeliveryReceipt(deliveryId)!.report_submission![outcome === "done" ? "done_id" : "blocked_id"],
+        );
+        // Exercise the real updateReportReceipt mutation and fail only its durable write.
+        const queue = (engine as any).deliveryQueue;
+        const persistReceipts = queue.persistDeliveryReceipts.bind(queue);
+        let failures = 0;
+        const writeSpy = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+          if (queue.getDeliveryReceipt(deliveryId)[field] && failures++ === 0) {
+            expect(calls()).toHaveLength(1); // The relay already succeeded.
+            throw new Error("injected input ACK persistence failure");
+          }
+          return persistReceipts();
+        });
+        await tick();
+        writeFileSync(reportPath, outcome === "done"
+          ? "Input complete\nDONE_REPORT_EPISODE\n" : "Input blocked\nBLOCKED_REPORT_EPISODE_CHILD\n");
+        persist({ state: "done" }); screen(readyScreen);
+        await expect(engine.runSweep()).resolves.toBeUndefined();
+        expect(calls()).toHaveLength(1);
+        expect(engine.getDeliveryReceipt(deliveryId)![field]).toBe(true);
+        const disk = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
+        expect(disk.find((receipt: any) => receipt.delivery_id === deliveryId)[field]).not.toBe(true);
+        expect(mockClient.notifyLifecycleEvent.mock.calls.filter(
+          ([event, child]) => event === "done" && child.agent_id === laterId,
+        )).toHaveLength(1);
+        expect(sweepDebugLogs.some((line) => line.includes("injected input ACK persistence failure"))).toBe(true);
+        await engine.runSweep();
+        expect(calls()).toHaveLength(1); // In-memory ACK prevents same-process replay.
+        expect(failures).toBe(1); // No claim of a next-sweep disk retry.
+        writeSpy.mockRestore();
+        const identity = engine.getDeliveryReceipt(deliveryId)!.report_submission;
+        engine.dispose();
+        engine = new AgentEngine(stateMgr, engine.getRegistry(), mockClient, { inboxOpts });
+        await engine.runSweep(); // Durable pending evidence reuses the same relay ID.
+        expect(calls()).toHaveLength(2);
+        expect(engine.getDeliveryReceipt(deliveryId)!.report_submission).toEqual(identity);
+        expect(engine.getDeliveryReceipt(deliveryId)![field]).toBe(true);
+        await engine.runSweep();
+        expect(calls()).toHaveLength(2);
+      });
+
+      it("corrective input pending-evidence write failure still refuses parent dispatch", async () => {
+        await setup(); await finish(); await tick();
+        input("corrective-pre-send"); confirm("corrective-pre-send"); await tick();
+        writeFileSync(reportPath, "Input complete\nDONE_REPORT_EPISODE\n");
+        persist({ state: "done" }); screen(readyScreen);
+        const writeSpy = vi.spyOn((engine as any).deliveryQueue, "persistDeliveryReceipts")
+          .mockImplementation(() => { throw new Error("injected pre-send persistence failure"); });
+        await expect(engine.runSweep()).rejects.toThrow("injected pre-send persistence failure");
+        expect(doneCalls()).toHaveLength(1); // Only the already acknowledged boot completion.
+        writeSpy.mockRestore();
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(2);
+      });
+
+      it("corrective input ACK failure does not suppress a later input outcome in the same sweep", async () => {
+        await setup(); await finish(); await tick();
+        input("corrective-first"); confirm("corrective-first"); await tick();
+        writeFileSync(reportPath, "First complete\nDONE_REPORT_EPISODE\n"); await tick();
+        input("corrective-second"); confirm("corrective-second"); await tick();
+        writeFileSync(reportPath, "Second complete\nDONE_REPORT_EPISODE\n");
+        persist({ state: "done" }); screen(readyScreen);
+        const queue = (engine as any).deliveryQueue;
+        const persistReceipts = queue.persistDeliveryReceipts.bind(queue);
+        let failed = false;
+        const writeSpy = vi.spyOn(queue, "persistDeliveryReceipts").mockImplementation(() => {
+          if (!failed && queue.getDeliveryReceipt("corrective-first").report_done_notified) {
+            failed = true;
+            throw new Error("injected first input ACK persistence failure");
+          }
+          return persistReceipts();
+        });
+        await expect(engine.runSweep()).resolves.toBeUndefined();
+        expect(failed).toBe(true);
+        expect(doneCalls()).toHaveLength(3);
+        expect(new Set(doneCalls().map(([, child]) => child.report_done_delivery_id)).size).toBe(3);
+        const disk = JSON.parse(readFileSync(join(TEST_DIR, "delivery-receipts.json"), "utf8"));
+        expect(disk.filter((receipt: any) => receipt.delivery_id.startsWith("corrective-")))
+          .toHaveLength(2);
+        expect(disk.filter((receipt: any) => receipt.delivery_id.startsWith("corrective-"))
+          .every((receipt: any) => receipt.report_done_notified)).toBe(true);
+        writeSpy.mockRestore();
+        await engine.runSweep();
+        expect(doneCalls()).toHaveLength(3);
+      });
+
       it("F1-P2 second verified input preserves completed iterations without edit duplicates", async () => {
         await setup();
         await finish();
