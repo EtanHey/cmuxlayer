@@ -508,7 +508,9 @@ export class DeliveryQueue {
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
-        const watching =
+        const observationOnly = receipt.delivery_state === "typed" &&
+          receipt.typed === true && receipt.submit_dispatched === true && !receipt.terminal;
+        const watching = observationOnly ||
           receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued_followup" ||
           receipt.delivery_state === "steer_pending" ||
@@ -529,7 +531,9 @@ export class DeliveryQueue {
         if (skipRead && !timedOut) continue;
         if (!skipRead && this.deliveryVerifier) {
           const agent = this.getAgentState(receipt.agent_id);
-          const snapshotKey = agent?.surface_id ?? receipt.agent_id;
+          // Parked observation needs this receipt's ownership proof even when
+          // another receipt on the same surface already supplied a snapshot.
+          const snapshotKey = observationOnly ? receipt.delivery_id : agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
           if (this.deliverySnapshotReader) {
             if (!snapshots.has(snapshotKey)) {
@@ -584,6 +588,9 @@ export class DeliveryQueue {
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
+        // An attempted parked draft may collect acceptance, but observation
+        // cannot expire it, enqueue it or trigger failure handling.
+        if (observationOnly) continue;
         if (observation.delivery_state && receipt.composer_accepted) {
           receipt.delivery_state = observation.delivery_state;
           this.persistDeliveryReceipts();

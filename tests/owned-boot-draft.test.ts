@@ -5,7 +5,7 @@
 // and the advised send_to({mode:"key",text:"return"}) was refused
 // blocked_by_foreign_draft while the composer held that exact pointer.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -546,7 +546,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       expect(t.pane.state.submitted).toEqual([wrappedMessage]);
       expect(final).toMatchObject({ delivery_id: sent.delivery_id, delivery_state: "submitted", submit_verified: true });
       expect(afterSweep).toMatchObject({ terminal: false, delivery_state: "typed", submit_dispatched: true, submit_verified: null });
-      expect(sweepReturns).toBe(1); expect(sweepReads).toBe(0); // Parked uncertainty never enables passive Return retry.
+      expect(sweepReturns).toBe(1); expect(sweepReads).toBe(gap < 30_000 ? 0 : 1); // Observation never enables passive Return retry.
       expect(returnPresses(t.pane.exec)).toBe(2);
       expect(t.context.typedDraftOwners.size).toBe(0);
       expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("send") && !args.includes("send-key"))).toHaveLength(1);
@@ -595,6 +595,106 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
       console.log("R1_F2_BOOT", JSON.stringify({ final, duplicate, returns: returnPresses(t.pane.exec) }));
       expect(final).toMatchObject({ delivery_state: "failed_confirmed", terminal: true, error: "boot_instance_changed" });
       expect(duplicate).toBeNull(); expect(returnPresses(t.pane.exec)).toBe(0);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  const paneInputs = (exec: any) => exec.mock.calls.filter(([, args]: [string, string[]]) =>
+    ["send", "send-key", "set-buffer", "paste-buffer"].some(verb => args.includes(verb))).length;
+
+  it("LateAcceptance settles the original ID on normal sweep without passive input", async () => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false;
+      const attempted = await t.keyReturn(LEAD_UUID, "surface:new");
+      const parked = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+      t.pane.state.submitted.push(t.pane.state.composer); t.pane.state.composer = ""; // Reviewer late-accept-r1 model.
+      const inputsBefore = paneInputs(t.pane.exec);
+      const readsBefore = t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length;
+      advanceClock!(31_000); await t.engine.verifyPendingDeliveries();
+      const afterSweep = t.engine.getDeliveryReceipt(sent.delivery_id);
+      const sweepReads = t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length - readsBefore;
+      advanceClock!(5 * 60 * 60 * 1000); await t.engine.verifyPendingDeliveries();
+      const after5h = t.engine.getDeliveryReceipt(sent.delivery_id);
+      const duplicate = t.engine.findOpenDuplicate({ agent_id: "target-seat", text: wrappedMessage, press_enter: true });
+      const passiveInputs = paneInputs(t.pane.exec) - inputsBefore;
+      const record = { attempted, parked, afterSweep, after5h, duplicate, sweepReads, passiveInputs,
+        returns: returnPresses(t.pane.exec), inputs: paneInputs(t.pane.exec), owners: t.context.typedDraftOwners.size, submitted: t.pane.state.submitted };
+      const receiptPath = process.env.CMUXLAYER_LATE_RECEIPT_PATH;
+      if (receiptPath) appendFileSync(receiptPath, JSON.stringify(record) + "\n");
+      console.log("LATE_ACCEPTANCE_LIFECYCLE", JSON.stringify(record));
+      expect(attempted).toMatchObject({ delivery_id: sent.delivery_id, submit_verified: null });
+      expect(passiveInputs).toBe(0); expect(returnPresses(t.pane.exec)).toBe(1);
+      expect(t.pane.state.submitted).toEqual([wrappedMessage]);
+      expect(afterSweep).toMatchObject({ delivery_id: sent.delivery_id, delivery_state: "submitted", terminal: true,
+        submit_dispatched: true, submit_verified: true, needs_attention: false, attention_reason: null });
+      expect(after5h).toEqual(afterSweep); expect(duplicate).toBeNull(); expect(t.context.typedDraftOwners.size).toBe(0);
+      expect(sweepReads).toBe(1);
+      expect(paneInputs(t.pane.exec)).toBe(2); // One original text and one original Return.
+      const refused = await t.keyReturn(LEAD_UUID, "surface:new");
+      expect(refused.ok).toBe(false); expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("LateAcceptance retains unaccepted attempts over repeated sweeps with zero passive input", async () => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false; await t.keyReturn(LEAD_UUID, "surface:new");
+      const inputs = paneInputs(t.pane.exec);
+      for (const gap of [1000, 31_000, 5 * 60 * 60 * 1000]) {
+        advanceClock!(gap); await t.engine.verifyPendingDeliveries();
+        expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "typed", terminal: false,
+          submit_dispatched: true, submit_verified: null, needs_attention: true });
+        expect(paneInputs(t.pane.exec)).toBe(inputs);
+      }
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)?.attention_reason).toContain("Return was dispatched");
+      expect(t.pane.state.composer).toBe(wrappedMessage); expect(t.pane.state.submitted).toEqual([]);
+      expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it("LateAcceptance waits for normal throttle before observing acceptance", async () => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false; await t.keyReturn(LEAD_UUID, "surface:new");
+      t.pane.state.submitted.push(t.pane.state.composer); t.pane.state.composer = "";
+      const inputs = paneInputs(t.pane.exec), reads = t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen")).length;
+      advanceClock!(1000); await t.engine.verifyPendingDeliveries();
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)?.delivery_state).toBe("typed");
+      expect(t.pane.exec.mock.calls.filter(([, args]: [string, string[]]) => args.includes("read-screen"))).toHaveLength(reads);
+      advanceClock!(31_000); await t.engine.verifyPendingDeliveries();
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)?.delivery_state).toBe("submitted");
+      expect(paneInputs(t.pane.exec)).toBe(inputs); expect(returnPresses(t.pane.exec)).toBe(1);
+    } finally { t.context.dispose(); }
+  }, 30_000);
+
+  it.each(["session", "surface", "boot", "unavailable", "lost-proof", "during-read"])("LateAcceptance cannot settle changed or unavailable %s evidence", async control => {
+    const t = await setup();
+    try {
+      const { sent, advanceClock } = await expireQuotaDraft(t, true);
+      t.pane.state.acceptReturn = false; await t.keyReturn(LEAD_UUID, "surface:new");
+      if (control === "boot") {
+        const original = t.engine.getDeliveryReceipt(sent.delivery_id)!;
+        t.engine.acceptPendingVerify({ ...original, boot_recovery: true, boot_instance_id: "old-boot" });
+        t.engine.resolveDelivery({ ...t.engine.getDeliveryReceipt(sent.delivery_id)!, delivery_state: "typed", terminal: false });
+        const owner = [...t.context.typedDraftOwners.values()][0]; owner.bootAgentId = "target-seat"; owner.bootInstanceId = "old-boot";
+      }
+      t.pane.state.submitted.push(t.pane.state.composer); t.pane.state.composer = "";
+      const changed = () => {
+        const target = t.engine.stateMgr.updateRecord("target-seat", control === "surface" ? { surface_uuid: OTHER_UUID }
+          : control === "boot" ? { boot_instance_id: "replacement-boot" } : { cli_session_id: "replacement-session" });
+        t.engine.getRegistry().set(target.agent_id, target);
+      };
+      if (["session", "surface", "boot"].includes(control)) changed();
+      if (control === "during-read") t.pane.state.onExec = args => { if (args.includes("read-screen")) changed(); };
+      if (control === "unavailable") t.pane.state.onExec = args => { if (args.includes("read-screen")) throw new Error("modeled unavailable read"); };
+      if (control === "lost-proof") { t.context.typedDraftOwners.clear(); t.context.deliveryPreTypeScreens.clear(); }
+      const inputs = paneInputs(t.pane.exec); advanceClock!(31_000); await t.engine.verifyPendingDeliveries();
+      expect(t.engine.getDeliveryReceipt(sent.delivery_id)).toMatchObject({ delivery_state: "typed", terminal: false,
+        submit_dispatched: true, submit_verified: null });
+      expect(paneInputs(t.pane.exec)).toBe(inputs); expect(returnPresses(t.pane.exec)).toBe(1);
     } finally { t.context.dispose(); }
   }, 30_000);
 

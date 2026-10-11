@@ -986,6 +986,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     withSurfaceWrite,
     observedSurfaceUuid,
     observeDraftOwnership,
+    readParkedDeliverySnapshot,
     readParsedSurface,
     shouldVerifyRawSurfaceSubmit,
     executeDeliveryEngine,
@@ -3578,6 +3579,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     engine.setDeliverySnapshotReader(async (receipt: AgentDeliveryReceipt) => {
       const agent = engine.getAgentState(receipt.agent_id);
       if (!agent) return null;
+      if (receipt.delivery_state === "typed" && receipt.typed === true &&
+          receipt.submit_dispatched === true && !receipt.terminal) {
+        return readParkedDeliverySnapshot(receipt, agent);
+      }
       return readParsedSurface(
         agent.surface_id,
         agent.workspace_id ?? undefined,

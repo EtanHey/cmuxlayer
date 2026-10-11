@@ -854,6 +854,40 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }
   };
 
+  const readParkedDeliverySnapshot = async (
+    receipt: { delivery_id: string; agent_id: string; text: string },
+    agent: AgentRecord,
+  ) => {
+    const uuid = agent.surface_uuid ?? observedSurfaceUuid(agent.surface_id);
+    const entry = [...typedDraftOwners].find(([, owner]) =>
+      !owner.incomplete && owner.caller &&
+      (owner.uuid ? owner.uuid.toLowerCase() === uuid?.toLowerCase() :
+        owner.ref === agent.surface_id && owner.workspace === (agent.workspace_id ?? null)) &&
+      (owner.texts ?? [owner.text]).some((text, index) =>
+        text === receipt.text && owner.deliveryIds?.[index] === receipt.delivery_id));
+    // A reload without the private recovery proof remains unknown.
+    if (!entry) return null;
+    const [key, owner] = entry;
+    // The read can consume a token when its exact text reaches the transcript.
+    const proof = { ...owner, texts: owner.texts?.slice(), deliveryIds: owner.deliveryIds?.slice() };
+    const currentTarget = () => {
+      const current = context.lifecycleSweepEngine?.getAgentState(receipt.agent_id);
+      return current?.agent_id === agent.agent_id &&
+        current.surface_id === agent.surface_id && current.surface_uuid === agent.surface_uuid &&
+        current.workspace_id === agent.workspace_id && current.cli === agent.cli &&
+        current.cli_session_id === agent.cli_session_id && current.boot_instance_id === agent.boot_instance_id &&
+        JSON.parse(proof.fp)[0] === receipt.agent_id &&
+        draftOwnerFingerprintMatches(proof, agent.surface_id, uuid) && bootTokenInstanceCurrent(proof);
+    };
+    if (!currentTarget()) return null;
+    const snapshot = await readParsedSurface(agent.surface_id, agent.workspace_id ?? undefined);
+    const remaining = typedDraftOwners.get(key);
+    if (!currentTarget() || (remaining && (remaining.caller !== proof.caller ||
+      !(remaining.texts ?? [remaining.text]).some((text, index) =>
+        text === receipt.text && remaining.deliveryIds?.[index] === receipt.delivery_id)))) return null;
+    return snapshot;
+  };
+
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
@@ -2157,6 +2191,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           // Missing/changed evidence stays dispatched uncertainty for verification.
           engine!.resolveDelivery({ ...original, delivery_state: stillOwned ? "typed" : "pending_verify", terminal: false,
             press_enter: true, submit_dispatched: true, submit_verified: null,
+            attention_reason: stillOwned
+              ? "Return was dispatched but submission remains unverified; observing the exact owned draft without replay."
+              : original.attention_reason,
             rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
           });
         }
@@ -4380,6 +4417,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     withSurfaceWrite,
     observedSurfaceUuid,
     observeDraftOwnership,
+    readParkedDeliverySnapshot,
     readParsedSurface,
     shouldVerifyRawSurfaceSubmit,
     executeDeliveryEngine,

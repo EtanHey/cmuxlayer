@@ -97,6 +97,56 @@ describe("receipt expiry queue boundaries", () => {
       : { delivery_state: "failed_confirmed", terminal: true, error: reason });
   });
 
+  it("LateAcceptance reload observes attempted typed evidence without draining or replay", async () => {
+    const { queue, deps, accept } = setup();
+    queue.resolveDelivery({ ...accept(true), delivery_state: "typed", terminal: false, needs_attention: true });
+    vi.advanceTimersByTime(5 * 60 * 60 * 1000);
+    // Queue persistence contract: the injected verifier supplies acceptance.
+    // A registered server reload without private proof is a separate control.
+    const verifier = vi.fn(async () => ({ outcome: "delivered" as const, submit_verified: true }));
+    const reloaded = new DeliveryQueue(deps, { deliveryVerifier: verifier });
+    const submitter = vi.fn(); reloaded.setDeliverySubmitter(submitter);
+    await reloaded.drainDeliveryQueue(); await reloaded.verifyPendingDeliveries();
+    expect(submitter).not.toHaveBeenCalled(); expect(verifier).toHaveBeenCalledTimes(1);
+    expect(reloaded.getDeliveryReceipt("original")).toMatchObject({ delivery_id: "original",
+      delivery_state: "submitted", terminal: true, submit_verified: true, needs_attention: false });
+    expect(reloaded.findOpenDuplicate({ agent_id: "target", text: "owned text", press_enter: true })).toBeNull();
+  });
+
+  it.each(["pending", "failed_confirmed"] as const)("LateAcceptance retains attempted typed receipt on %s evidence", async outcome => {
+    const { queue, verifier, accept } = setup({ outcome, reason: "surface_read_unavailable" });
+    queue.resolveDelivery({ ...accept(true), delivery_state: "typed", terminal: false, error: "retained evidence" });
+    for (let i = 0; i < 2; i++) {
+      vi.advanceTimersByTime(5 * 60 * 60 * 1000); await queue.verifyPendingDeliveries();
+      expect(queue.getDeliveryReceipt("original")).toMatchObject({ delivery_state: "typed", terminal: false,
+        submit_dispatched: true, submit_verified: null, error: "retained evidence" });
+    }
+    expect(verifier).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["typed", "failed_confirmed"] as const)("LateAcceptance never revives terminal %s receipts", async delivery_state => {
+    const { queue, verifier, accept } = setup({ outcome: "delivered", submit_verified: true });
+    queue.resolveDelivery({ ...accept(true), delivery_state, terminal: true });
+    const original = queue.getDeliveryReceipt("original");
+    vi.advanceTimersByTime(5 * 60 * 60 * 1000); await queue.verifyPendingDeliveries();
+    expect(verifier).not.toHaveBeenCalled(); expect(queue.getDeliveryReceipt("original")).toEqual(original);
+  });
+
+  it("LateAcceptance does not share another receipt's ownership snapshot", async () => {
+    const { queue, accept } = setup();
+    const first = accept(true);
+    queue.resolveDelivery({ ...first, delivery_state: "typed", terminal: false });
+    queue.acceptPendingVerify({ ...first, delivery_id: "other", text: "other text" });
+    queue.resolveDelivery({ ...first, delivery_id: "other", text: "other text", delivery_state: "typed", terminal: false });
+    const reader = vi.fn(async receipt => receipt.delivery_id === "original" ? { text: "accepted" } : null);
+    queue.setDeliverySnapshotReader(reader);
+    queue.setDeliveryVerifier(async (_receipt, snapshot) => ({ outcome: snapshot ? "delivered" : "pending" }));
+    vi.advanceTimersByTime(31_000); await queue.verifyPendingDeliveries();
+    expect(reader).toHaveBeenCalledTimes(2);
+    expect(queue.getDeliveryReceipt("original")?.delivery_state).toBe("submitted");
+    expect(queue.getDeliveryReceipt("other")).toMatchObject({ delivery_state: "typed", terminal: false, submit_verified: null });
+  });
+
   it("accepts actual submission evidence even after the deadline", async () => {
     const { queue, accept } = setup({ outcome: "delivered", submit_verified: true });
     accept(false); vi.advanceTimersByTime(1001); await queue.verifyPendingDeliveries();
