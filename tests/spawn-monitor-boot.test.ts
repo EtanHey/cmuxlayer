@@ -20,6 +20,8 @@ const STATE_DIR = join(tmpdir(), "cmuxlayer-spawn-monitor-boot-state");
 function makeExec(): ExecFn {
   let submitted = false;
   let bootTextSent = false;
+  let bootText = "";
+  let paste = "";
   let activeCli: "claude" | "codex" = "claude";
   return withFakeRightSplitTopology(vi.fn().mockImplementation(async (_cmd, args) => {
     if (args.includes("list-windows")) {
@@ -38,7 +40,16 @@ function makeExec(): ExecFn {
       const text = String(args[args.length - 1] ?? "");
       if (/Codex/.test(text)) activeCli = "codex";
       if (/Claude/.test(text)) activeCli = "claude";
-      if (text.includes("cmuxlayer contract for")) bootTextSent = true;
+      if (text.includes("cmuxlayer contract for") || text.includes("cmuxlayer mailbox contract for")) {
+        bootTextSent = true;
+        bootText += text;
+      }
+    }
+    if (args.includes("set-buffer")) paste = String(args.at(-1) ?? "");
+    if (args.includes("paste-buffer")) {
+      bootTextSent = true;
+      bootText += paste;
+      paste = "";
     }
     if (args.includes("list-workspaces")) {
       return {
@@ -101,10 +112,10 @@ function makeExec(): ExecFn {
           text: submitted
             ? activeCli === "codex"
               ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-              : "Claude Code\n✻ Working"
+              : `Claude Code\n⏺ ${bootText}\n✻ Working\n❯ `
             : activeCli === "codex"
               ? "OpenAI Codex\ncodex> "
-              : "Claude Code\n>",
+              : `Claude Code\n❯ ${bootText}`,
           lines: 20,
           scrollback_used: false,
         }),

@@ -1744,7 +1744,8 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
       {
         workspace: "workspace:1",
         boot_prompt_path: writePrompt(),
-        boot_prompt_timeout_ms: 50,
+        // Leave room for readiness and the mandatory 50ms pre-Return delay.
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );
