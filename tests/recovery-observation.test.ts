@@ -145,6 +145,23 @@ it("registered MCP recovery has no input, writes or verifier calls, including co
     }
     engine.stateMgr.writeState(target); engine.getRegistry().set(target.agent_id, target);
     context.typedDraftOwners.clear(); context.typedDraftOwners.set(key, owner);
+    const original = engine.getDeliveryReceipt(ID)!;
+    for (const control of [
+      { submit_dispatched: undefined },
+      { submit_dispatched: true },
+      { submit_dispatched: false, submission_started_at: "2026-10-11T00:00:00Z" },
+      { delivery_state: "queued", composer_accepted: true },
+      { delivery_state: "steer_pending", composer_accepted: true },
+      { delivery_state: "queued_followup", composer_accepted: true },
+    ] as const) {
+      engine.resolveDelivery({ ...original, ...control }); journal.mockClear();
+      const originalBefore = snapshot();
+      const outcome = await call();
+      expect(outcome.structuredContent).toMatchObject({ ok: false, delivery_id: ID, input_performed: false, recovery_eligible: false });
+      expect(outcome.structuredContent?.recovery_outcome).toBe(control.submit_dispatched === true || "delivery_state" in control ? "observe_only" : "unsupported");
+      expect(snapshot()).toBe(originalBefore); expect(journal).not.toHaveBeenCalled();
+    }
+    engine.resolveDelivery(original); journal.mockClear();
     const upward = { ...sender, role: "worker", collab_path: "/tmp/fixture-collab.md", parent_agent_id: "target" };
     engine.stateMgr.writeState({ ...target, role: "orchestrator" });
     engine.getRegistry().set(target.agent_id, { ...target, role: "orchestrator" });
