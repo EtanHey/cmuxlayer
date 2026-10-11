@@ -51,7 +51,7 @@ describe("TimeOnly session record and episode anchors", () => {
     const rows = ["  earlier output row 1", "  earlier output row 2", "  earlier output row 3", "(exit code 0)",
       `  ⎿  ${text}`, "     /usage-credits to finish what you’re working on.", ""];
     const frame = (composer: string[]) => [...rows, ...composer, "", "  ⎇ master | 🔧 9"].slice(-10).join("\n");
-    const empty = frame(["❯ "]), typed = frame(["❯ Preserve the original words and read the task", "  from the supplied", "  /Users/fixture/task.md"]);
+    const empty = frame(["❯ "]), typed = frame(["❯ Preserve the original words and read the task", "  from the supplied", "  /tmp/p0fixture/task.md"]);
     expect(empty.split("\n")[0]).not.toBe(typed.split("\n")[0]);
     for (const screen of [empty, typed]) {
       const exact = tracker.observe(target(), claudeUsageRefusal(screen), now)!;

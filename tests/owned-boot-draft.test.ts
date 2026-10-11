@@ -358,7 +358,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
   it("P0 recovers the spawn-written Claude whole-word path wrap under its original delivery ID", async () => {
     const t = await setup();
     try {
-      const spawned = await t.spawn(LEAD_UUID, "Read and follow /Users/fixture/Gits/orchestrator/docs.local/handoffs/2026-10-11/reviewer-owned-draft-audit-packet.md");
+      const spawned = await t.spawn(LEAD_UUID, "Read and follow /tmp/p0fixture/Gits/orchestrator/docs.local/handoffs/2026-10-11/reviewer-owned-draft-audit-packet.md");
       expect(spawned.spawn_state).toBe("boot_unsubmitted");
       const id = spawned.boot_prompt_receipt.delivery_id;
       expect(id).toEqual(expect.any(String));
@@ -373,7 +373,7 @@ describe("#793 spawn-written boot draft belongs to the spawning caller", () => {
     } finally { t.context.dispose(); }
   }, 30_000);
 
-  const wrappedMessage = "Review the followup plan and preserve every original word. Read and follow /Users/fixture/Gits/coach/docs.local/collabs/2026-10-11-jrc-study-sync.md";
+  const wrappedMessage = "Review the followup plan and preserve every original word. Read and follow /tmp/p0fixture/Gits/coach/docs.local/collabs/2026-10-11-jrc-study-sync.md";
   it("P0 recovers an uncertain send with Claude path wraps and damaged footer without retyping", async () => {
     const t = await setup();
     try {
