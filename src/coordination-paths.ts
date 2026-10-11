@@ -44,6 +44,10 @@ export function coordinationDoneMarker(agentId: string): string {
   return `DONE_${sanitized.length > 0 ? sanitized : "AGENT"}`;
 }
 
+export function coordinationBlockedMarker(agentId: string): string {
+  return coordinationDoneMarker(agentId).replace(/^DONE_/, "BLOCKED_");
+}
+
 /**
  * Derive the contract from the agent id alone. Deliberately independent of the
  * launcher: it sits above launchMode, so a registry-optional / raw-CLI spawn
@@ -297,6 +301,7 @@ export function renderBootContractFile(input: BootContractFileInput): string {
       "",
       `Write your report to: ${input.coordination.report_path}`,
       `Its final line must be exactly: ${input.coordination.done_marker}`,
+      `If blocked, use this exact final line instead: ${coordinationBlockedMarker(input.agentId)}`,
       "",
     );
   }

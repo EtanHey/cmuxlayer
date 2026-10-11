@@ -140,6 +140,15 @@ export interface AgentRecord {
   /** Last confirmed return from done to working on the same live surface. */
   reopened_at?: string | null;
   reopen_count?: number;
+  /** Artifact version at verified delivery; unchanged reports cannot prove new work. */
+  reopen_report_mtime_ms?: number | null;
+  /** Verified working episode and durable completion receipt for parent reports. */
+  report_episode_key?: string | null;
+  report_episode_started_at?: string | null;
+  report_done_delivery_id?: string | null;
+  report_done_notified_episode?: string | null;
+  report_blocked_delivery_id?: string | null;
+  report_blocked_notified_episode?: string | null;
   /** First-connect skipped transcript identity resolution; retry on bounded sweeps. */
   transcript_session_capture_deferred?: boolean;
   /** Failed deferred transcript resolver calls, persisted across restarts. */

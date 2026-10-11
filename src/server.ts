@@ -3224,6 +3224,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (args.press_enter && delivery.submit_verified === true) {
             engine.markAgentWorking(args.agent_id, {
               verifiedDelivery: args.source_event === "send_to",
+              deliveryId: args.delivery_id,
             });
           }
           return { ...delivery, queued_behind_turn: expectedCli === "codex"
@@ -3495,6 +3496,8 @@ export function createServer(opts?: CreateServerOptions): McpServer {
         }
         await mkdir(dirname(reportPath), { recursive: true });
         await appendFile(reportPath, "", "utf8");
+        // Content observation retains ownership/deadline diagnostics only;
+        // the engine's verified completion episode delivers the report ping.
         await engine.armWatch({
           owner: parentAgentId,
           subject_agent_id: childAgentId,

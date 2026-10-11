@@ -52,6 +52,8 @@ export interface ReconcileHost {
   maybeMarkCliExited: AgentEngine["maybeMarkCliExited"];
   maybeMarkTaskDone: AgentEngine["maybeMarkTaskDone"];
   maybeNotifyLeadMonitorDeath: AgentEngine["maybeNotifyLeadMonitorDeath"];
+  hasFreshReopenReport: AgentEngine["hasFreshReopenReport"];
+  maybeNotifyReportOutcome: AgentEngine["maybeNotifyReportOutcome"];
   notifyLifecycleEventForSweep: AgentEngine["notifyLifecycleEventForSweep"];
   publishSweepStatus: AgentEngine["publishSweepStatus"];
   readSweepScreen: AgentEngine["readSweepScreen"];
@@ -361,17 +363,15 @@ export async function reconcileAgents(
       this.clearAgentLifecycleMemory(initialAgentId);
       continue;
     }
-    if (
-      agent.state === "done" &&
-      agent.user_killed !== true &&
-      agent.reopen_pending_at &&
-      sweepScreenText !== undefined &&
-      isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText)))
-    ) {
+    if (agent.state === "done" && agent.user_killed !== true && !agent.deletion_intent &&
+        agent.reopen_pending_at && sweepScreenText !== undefined &&
+        (isLiveActive(resolveLiveAgentState(agent, parseScreen(sweepScreenText))) ||
+          this.hasFreshReopenReport(agent))) {
       if (!this.assertSweepInputCurrent(sweepCtx)) return;
       agent = this.stateMgr.reopenAfterVerifiedDelivery(agent.agent_id);
       this.registry.set(agent.agent_id, agent);
     }
+    if (!this.assertSweepInputCurrent(sweepCtx)) return;
     let haltScreenText = taskDoneResult.screenText;
     if (haltScreenText === undefined) {
       try {
@@ -425,10 +425,13 @@ export async function reconcileAgents(
       await this.logLifecycleEvent(agent, "spawned", sweepCtx);
     }
 
+    if (agent.parent_agent_id && agent.report_path && agent.done_marker) {
+      await this.maybeNotifyReportOutcome(sweepCtx, agent, sweepScreenText);
+    }
     // Lifecycle log: done
     if (state === "done") {
       await this.logLifecycleEvent(agent, "done", sweepCtx);
-      if (this.shouldNotifyDone(harvestability)) {
+      if (!(agent.parent_agent_id && agent.report_path && agent.done_marker) && this.shouldNotifyDone(harvestability)) {
         await this.notifyLifecycleEventForSweep(sweepCtx, agent, "done");
       }
     }
