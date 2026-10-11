@@ -29,6 +29,9 @@ export interface PublicDeliveryReceipt {
   delivered: boolean;
   terminal: boolean;
   typed: boolean;
+  /** Only present on an interrupted text delivery, never proof of acceptance. */
+  draft_complete?: boolean;
+  owned_draft_recovery?: boolean;
   submit_attempted: boolean;
   submit_dispatched?: boolean;
   submit_verified: boolean | null;
@@ -244,6 +247,8 @@ export function buildPublicDeliveryReceipt(input: {
   delivery_state?: PublicDeliveryState;
   delivery_id?: string;
   typed: boolean;
+  draft_complete?: boolean;
+  owned_draft_recovery?: boolean;
   submit_attempted: boolean;
   submit_verified: boolean | null;
   submit_evidence?: SubmitEvidence | null;
@@ -292,6 +297,8 @@ export function buildPublicDeliveryReceipt(input: {
     delivered: evidencedState === "submitted" && input.submit_verified === true,
     terminal,
     typed: input.typed,
+    ...(input.draft_complete !== undefined ? { draft_complete: input.draft_complete } : {}),
+    ...(input.owned_draft_recovery !== undefined ? { owned_draft_recovery: input.owned_draft_recovery } : {}),
     submit_attempted: input.submit_attempted,
     ...(input.submit_dispatched !== undefined
       ? { submit_dispatched: input.submit_dispatched }
@@ -533,6 +540,7 @@ export class DeliverySafetyGateError extends Error {
       | "composer_picker_not_closed"
       | "hooks_review_not_dismissed"
       | "blocked_by_permission_prompt"
+      | "blocked_by_usage_limit"
       | "blocked_by_foreign_draft"
       | "blocked_by_foreign_queue"
       | "queued_stalled_idle"
@@ -566,6 +574,8 @@ export class DeliverySafetyGateError extends Error {
         ? "No owned text to submit: this composer could be showing an empty-input hint. Return was not sent."
         : error_code === "blocked_by_permission_prompt"
         ? "delivery blocked by active permission prompt"
+        : error_code === "blocked_by_usage_limit"
+        ? "Claude usage limit remains current or its reset is unknown; no further input was sent. Preserve any typed draft and its original delivery ID. Recovery can proceed at the displayed unambiguous reset time or after new harness output confirms recovery; the old refusal may stay visible. Exact /usage, /usage-credits or /rate-limit-options navigation remains guarded by draft ownership."
         : error_code === "blocked_by_foreign_draft"
           ? `target composer already holds text this delivery did not write: ${JSON.stringify(draftText ?? "unknown")}; the composer holds a draft you didn't write; try again in ~20 s or after your next turn`
         : error_code === "owned_boot_contract_pending"

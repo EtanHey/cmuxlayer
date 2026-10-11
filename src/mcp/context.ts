@@ -38,6 +38,7 @@ import { type SeatRegistry } from "../seat-identity.js";
 import { SurfaceWriteLivenessTracker } from "../surface-write-liveness.js";
 import type { PublicDeliveryReceipt, DeliveryRecord } from "../delivery/receipts.js";
 import { CmuxSocketError } from "../cmux-socket-error.js";
+import { ClaudeQuotaAnchorTracker } from "../claude-quota-anchor.js";
 import {
   appendDaemonLog,
   logErrorCode,
@@ -49,6 +50,10 @@ import {
 } from "./tool-result.js";
 
 export interface CreateServerOptions {
+  /** Live quota reset comparisons; override explicitly for historical replays. */
+  deliveryNow?: () => number;
+  /** Used only if a reset label omits its timezone; no implicit host-zone guess. */
+  deliveryTimeZone?: string;
   exec?: ExecFn;
   bin?: string;
   /** Pre-built client (socket or CLI). If omitted, creates a CLI client. */
@@ -420,6 +425,8 @@ export async function assertLifecycleReadyForTool(
 }
 
 export interface TypedDraftOwner {
+  /** A dispatched prefix is associated with its delivery but never submit-authorized. */
+  incomplete?: boolean;
   caller: string | null; text: string; texts?: string[]; deliveryIds?: string[]; at: number; ref: string; uuid: string | null;
   workspace: string | null; fp: string; seen: boolean;
   /** #793: the managed agent whose unsubmitted boot draft this is. */
@@ -429,6 +436,9 @@ export interface TypedDraftOwner {
 }
 
 export interface CmuxServerContext {
+  claudeQuotaAnchors: ClaudeQuotaAnchorTracker;
+  deliveryNow: () => number;
+  deliveryTimeZone?: string;
   /** Shared by every MCP peer using this daemon context. */
   typedDraftOwners: Map<string, TypedDraftOwner>;
   client: CmuxLayerClient;
@@ -610,6 +620,9 @@ export function createServerContext(
     opts?.surfaceObserverEpochProvider ??
     (() => deriveCmuxObserverEpoch(client));
   const context: CmuxServerContext = {
+    claudeQuotaAnchors: new ClaudeQuotaAnchorTracker(),
+    deliveryNow: opts?.deliveryNow ?? Date.now,
+    deliveryTimeZone: opts?.deliveryTimeZone,
     client,
     get surfaceObserverId() {
       return readObserverProvider(observerOwnerIdProvider);

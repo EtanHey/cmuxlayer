@@ -1710,7 +1710,7 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
       {
         workspace: "workspace:1",
         boot_prompt_path: writePrompt(),
-        boot_prompt_timeout_ms: 50,
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );
@@ -1723,7 +1723,9 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
       terminal: false,
       delivered: false,
       delivery_state: "pending_verify",
+      submit_dispatched: true,
       submit_verified: null,
+      submit_verification_reason: "consumption_not_observed",
     });
   }, 20_000);
 
@@ -1744,7 +1746,8 @@ describe("T2 delivery truth — boot consumption evidence (#427)", () => {
       {
         workspace: "workspace:1",
         boot_prompt_path: writePrompt(),
-        boot_prompt_timeout_ms: 50,
+        // Leave room for readiness and the mandatory 50ms pre-Return delay.
+        boot_prompt_timeout_ms: 1_000,
       },
       {} as any,
     );

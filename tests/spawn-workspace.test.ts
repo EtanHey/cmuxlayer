@@ -77,6 +77,7 @@ function makeWorkspaceClient() {
   const activeCli = new Map<string, "claude" | "codex">();
   const submitted = new Set<string>();
   const returnCount = new Map<string, number>();
+  const drafts = new Map<string, string>();
   const client = {
     calls,
     createWorkspace: vi.fn().mockImplementation(async (title: string) => {
@@ -134,12 +135,13 @@ function makeWorkspaceClient() {
     newSurface: vi.fn(),
     focusSurface: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockImplementation(async (surface: string, text: string) => {
-      if (/Codex/.test(text)) activeCli.set(surface, "codex");
-      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+      if (!activeCli.has(surface)) {
+        if (/Codex/.test(text)) activeCli.set(surface, "codex");
+        if (/Claude/.test(text)) activeCli.set(surface, "claude");
+      } else drafts.set(surface, (drafts.get(surface) ?? "") + text);
     }),
     pasteText: vi.fn().mockImplementation(async (surface: string, text: string) => {
-      if (/Codex/.test(text)) activeCli.set(surface, "codex");
-      if (/Claude/.test(text)) activeCli.set(surface, "claude");
+      drafts.set(surface, (drafts.get(surface) ?? "") + text);
     }),
     sendKey: vi.fn().mockImplementation(async (surface: string, key: string) => {
       if (key === "return") {
@@ -155,10 +157,10 @@ function makeWorkspaceClient() {
         text: submitted.has(surface)
           ? cli === "codex"
             ? "gpt-5.5 xhigh · 99% left · ~/Gits/cmuxlayer\nWorking (1s • esc to interrupt)"
-            : "Claude Code\n✻ Working"
+            : `Claude Code\n⏺ ${drafts.get(surface) ?? ""}\n✻ Working\n❯ `
           : cli === "codex"
             ? "OpenAI Codex\ncodex> "
-            : "Claude Code\nWhat can I help you with?\n>",
+            : `Claude Code\nWhat can I help you with?\n❯ ${drafts.get(surface) ?? ""}`,
         lines: 2,
         scrollback_used: false,
       };

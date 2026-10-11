@@ -4,6 +4,7 @@
 // closure's captured state now arrives as DeliveryEngineDeps.
 
 import { createHash, randomUUID } from "node:crypto";
+import { isClaudeQuotaRecoveryCommand } from "../claude-usage-reset.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getTransportHealth } from "../cmux-transport-self-heal.js";
@@ -32,6 +33,8 @@ import {
   parseScreen,
   codexScreenHasActiveTurn,
   hasVisibleAgentProgress,
+  hasCurrentClaudeUsageLimit,
+  claudeUsageRefusal,
 } from "../screen-parser.js";
 import {
   launcherFailureFromShell,
@@ -695,6 +698,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await beforeMutation?.();
         const dispatchKey = typeof key === "string" ? key : await key();
         const cliFallbackCountBeforeDispatch = currentCliFallbackCount();
+        if (isSubmitKey(normalizeKeyName(dispatchKey))) context.claudeQuotaAnchors.noteSubmit(observedSurfaceUuid(surface));
         await client.sendKey(surface, dispatchKey, { workspace });
         invalidateSurfaceTopologyCallScope(client as object);
         return successfulDispatchRpcMethod(
@@ -728,6 +732,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
 
   // Each caller retains its typed/queued entries until verified submission.
   const typedDraftOwners = context.typedDraftOwners;
+  const currentClaudeQuota = (text: string, opts: { surface: string; stableSurfaceIdentity?: string | null }) => {
+    const now = context.deliveryNow();
+    const refusal = claudeUsageRefusal(text);
+    const record = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity);
+    const uuid = opts.stableSurfaceIdentity?.toLowerCase();
+    const floor = record ? Math.max(...[record.created_at, record.boot_resumed_at, record.boot_verify_started_at]
+      .filter((value): value is string => Boolean(value)).map(value => Date.parse(value))) : NaN;
+    const target = record?.cli === "claude" && uuid && record.surface_uuid?.toLowerCase() === uuid && record.cli_session_id
+      ? { key: JSON.stringify([uuid, record.agent_id, record.cli_session_id, record.boot_instance_id ?? null, context.surfaceObserverEpoch, floor]),
+          uuid, sessionId: record.cli_session_id, sessionPath: record.cli_session_path, notBeforeMs: floor } : null;
+    const timeOnly = refusal?.label && /^\d{1,2}(?::\d{2})?\s*(?:am|pm)\s+\([^()]+\)$/i.test(refusal.label);
+    const anchor = context.claudeQuotaAnchors.observe(target, timeOnly ? refusal : null, now);
+    return hasCurrentClaudeUsageLimit(text, now, context.deliveryTimeZone, anchor?.at);
+  };
   const rememberDraftOwner = (key: string, token: TypedDraftOwner): void => {
     const entries = token.texts ?? [token.text];
     token.texts = entries.slice(-8);
@@ -836,6 +854,40 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     }
   };
 
+  const readParkedDeliverySnapshot = async (
+    receipt: { delivery_id: string; agent_id: string; text: string },
+    agent: AgentRecord,
+  ) => {
+    const uuid = agent.surface_uuid ?? observedSurfaceUuid(agent.surface_id);
+    const entry = [...typedDraftOwners].find(([, owner]) =>
+      !owner.incomplete && owner.caller &&
+      (owner.uuid ? owner.uuid.toLowerCase() === uuid?.toLowerCase() :
+        owner.ref === agent.surface_id && owner.workspace === (agent.workspace_id ?? null)) &&
+      (owner.texts ?? [owner.text]).some((text, index) =>
+        text === receipt.text && owner.deliveryIds?.[index] === receipt.delivery_id));
+    // A reload without the private recovery proof remains unknown.
+    if (!entry) return null;
+    const [key, owner] = entry;
+    // The read can consume a token when its exact text reaches the transcript.
+    const proof = { ...owner, texts: owner.texts?.slice(), deliveryIds: owner.deliveryIds?.slice() };
+    const currentTarget = () => {
+      const current = context.lifecycleSweepEngine?.getAgentState(receipt.agent_id);
+      return current?.agent_id === agent.agent_id &&
+        current.surface_id === agent.surface_id && current.surface_uuid === agent.surface_uuid &&
+        current.workspace_id === agent.workspace_id && current.cli === agent.cli &&
+        current.cli_session_id === agent.cli_session_id && current.boot_instance_id === agent.boot_instance_id &&
+        JSON.parse(proof.fp)[0] === receipt.agent_id &&
+        draftOwnerFingerprintMatches(proof, agent.surface_id, uuid) && bootTokenInstanceCurrent(proof);
+    };
+    if (!currentTarget()) return null;
+    const snapshot = await readParsedSurface(agent.surface_id, agent.workspace_id ?? undefined);
+    const remaining = typedDraftOwners.get(key);
+    if (!currentTarget() || (remaining && (remaining.caller !== proof.caller ||
+      !(remaining.texts ?? [remaining.text]).some((text, index) =>
+        text === receipt.text && remaining.deliveryIds?.[index] === receipt.delivery_id)))) return null;
+    return snapshot;
+  };
+
   const readParsedSurface = async (
     surface: string,
     workspace?: string,
@@ -935,7 +987,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     if (!snapshot || inferComposerCli(snapshot.text, snapshot.parsed) !== "claude" ||
         snapshot.parsed.control_state === "permission_prompt" ||
         (requireIdle && (!["ready", "composer_dirty"].includes(snapshot.parsed.control_state) || !["idle", "draft_pending"].includes(snapshot.parsed.status))) ||
-        isPickerOrMenuScreen(snapshot.text, "claude") || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
+        isPickerOrMenuScreen(snapshot.text, "claude") || (currentClaudeQuota(snapshot.text, opts) && !isClaudeQuotaRecoveryCommand(opts.text)) || screenTranscriptContainsText(snapshot.text, opts.text)) return false;
     // draft_pending takes precedence over activity in the screen parser. Clear
     // only the current composer in a copied frame to inspect the turn status.
     const rows = normalizeTerminalText(snapshot.text).split("\n");
@@ -950,11 +1002,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const entries = owner.texts ?? [owner.text];
       const owned = opts.delivery_id ? entries.some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.delivery_id)
         : Boolean(owner.caller) && owner.caller === resolveCurrentCallerAgent()?.agent_id && entries.includes(opts.text);
-      return sameTarget && owned && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      return sameTarget && owned && !owner.incomplete && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
     });
   };
 
   class ClaudeDraftChanged extends Error {}
+  class InitialBootReturnDeadlineExpired extends Error {}
 
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
@@ -1060,6 +1113,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     text: string;
     timeout_ms: number;
+    deadline_ms?: number;
     beforeRead?: () => Promise<void>;
   }): Promise<{
     screenText: string;
@@ -1072,17 +1126,33 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       ? 3 : 1;
     const startedAt = Date.now();
     for (let read = 0; ; read += 1) {
+      if (opts.deadline_ms !== undefined && Date.now() >= opts.deadline_ms) break;
       await opts.beforeRead?.();
       const snapshot = await readParsedSurface(opts.surface, opts.workspace, {
         throwOnSurfaceGone: true,
       });
+      if (opts.deadline_ms !== undefined && (!snapshot || Date.now() >= opts.deadline_ms)) break;
       const pickerRegion = snapshot ? composerPickerInputRegion(snapshot.text) : null;
-      if (snapshot && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
-          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)))) {
+      const bootRegion = opts.deadline_ms !== undefined && snapshot
+        ? extractComposerInputRegion(snapshot.text, opts.text, "claude", true) : null;
+      const complete = opts.deadline_ms !== undefined
+        ? bootRegion !== null && composerRegionMatchesPayload(bootRegion, opts.text, "claude", snapshot!.text)
+        : snapshot !== null && (screenShowsCompletePendingInput(snapshot.text, opts.text) ||
+          (pickerRegion !== null && composerRegionMatchesPayload(pickerRegion, opts.text, inferComposerCli(snapshot.text), snapshot.text)));
+      if (snapshot && complete) {
         return {
           screenText: snapshot.text,
           metrics: parseSubmitEvidenceMetrics(snapshot.text, snapshot.parsed),
         };
+      }
+      // Actual Claude canary: three successful empty frames preceded the
+      // painted boot pointer. Only boot uses the remaining caller deadline;
+      // established send paths retain their existing read budget.
+      if (opts.deadline_ms !== undefined) {
+        const remaining = opts.deadline_ms - Date.now();
+        if (remaining <= 0) break;
+        await delay(Math.min(SEND_INPUT_SUBMIT_VERIFY_POLL_MS, remaining));
+        continue;
       }
       // #801 gate 1: agy's Bubble Tea textarea repainted a 150-char paste only
       // after the 3-read window (surface:947), so Return was never pressed.
@@ -1865,6 +1935,8 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     allow_recovery_enter_retry?: boolean;
     require_observed_payload_before_enter?: boolean;
     submit_verify_timeout_ms?: number;
+    /** Claude boot only: shared deadline covering readiness and repaint. */
+    boot_payload_observe_deadline_ms?: number;
     /** Internal remaining readiness budget, sampled after Return. */
     submit_verify_remaining_budget_ms?: () => number;
     stableSurfaceIdentity?: string | null;
@@ -1880,9 +1952,28 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   > => {
     const rpcMethods = new Set<DeliveryRpcMethod>();
     let textDispatched = false;
+    let dispatchedText = "";
     let submitDispatched = false;
+    let bootReturnReady = false;
     try {
-      const assertBinding = opts.beforeMutation;
+      // Readiness can extend boot's budget after an update/relaunch. Before
+      // any first text mutation, enforce that effective deadline; dispatched
+      // text/Return retains its existing pending and late-acceptance semantics.
+      const assertInitialBootTextDeadline = () => {
+        if (!textDispatched && !submitDispatched &&
+            opts.boot_payload_observe_deadline_ms !== undefined &&
+            Date.now() >= opts.boot_payload_observe_deadline_ms) {
+          throw new InitialBootReturnDeadlineExpired();
+        }
+      };
+      const beforeMutation = opts.beforeMutation;
+      const assertBinding = opts.boot_payload_observe_deadline_ms === undefined
+        ? beforeMutation
+        : async () => {
+            assertInitialBootTextDeadline();
+            await beforeMutation?.();
+            assertInitialBootTextDeadline();
+          };
       let securityDismissed = false;
       let securityCapable = true;
       let inputSafetyObserved = false;
@@ -1890,8 +1981,31 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         const snapshot = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
         if (!snapshot) return null;
+        const observedCli = resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli ?? inferComposerCli(snapshot.text, snapshot.parsed);
+        let quotaCommand = opts.chunks.join("");
+        if (opts.key !== undefined && isSubmitKey(normalizeKeyName(opts.key))) {
+          const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
+          const region = extractComposerInputRegion(snapshot.text, undefined, "claude", true);
+          quotaCommand = owner && !owner.incomplete && owner.caller && owner.caller === resolveCurrentCallerAgent()?.agent_id &&
+            draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner) && region !== null
+            ? ownedComposerText(owner, region, "claude", snapshot.text) ?? "" : "";
+        }
+        const quotaInput = opts.key === undefined || isSubmitKey(normalizeKeyName(opts.key));
+        if (observedCli === "claude" && quotaInput && !isClaudeQuotaRecoveryCommand(quotaCommand) && currentClaudeQuota(snapshot.text, opts)) {
+          throw new DeliverySafetyGateError("blocked_by_usage_limit", snapshot.parsed);
+        }
+        if (opts.key === undefined) {
+          for (const [key, owner] of typedDraftOwners) {
+            if (!owner.incomplete || !(owner.uuid ? owner.uuid.toLowerCase() === opts.stableSurfaceIdentity?.toLowerCase()
+                : owner.ref === opts.surface && owner.workspace === (opts.workspace ?? null))) continue;
+            // An operator may preserve/dispose of the prefix. Only an observed
+            // empty Claude composer clears the association; changed/unknown input does not.
+            if (observedCli === "claude" && extractComposerInputRegion(snapshot.text, undefined, "claude", true) === "") typedDraftOwners.delete(key);
+            else throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot.parsed);
+          }
+        }
         const hadBanner = isCodexDismissibleOverlay(snapshot.text);
-        securityCapable = hadBanner || snapshot.parsed.agent_type === "codex" ||
+        securityCapable = observedCli === "claude" || hadBanner || snapshot.parsed.agent_type === "codex" ||
           (snapshot.parsed.control_state !== "shell" && resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity)?.cli === "codex");
         const safe = await dismissAccountSecurityBanner(snapshot, {
           escape: async () => {
@@ -1916,8 +2030,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         await assertBinding?.();
         // The existing pre-type/key baseline is already a safe observation.
         // Consume it once; subsequent input batches need a fresh overlay check.
-        if (!inputSafetyObserved && securityCapable) await readSafeInput();
+        if (bootReturnReady) {
+          const snapshot = await readSafeInput();
+          const region = snapshot ? extractComposerInputRegion(snapshot.text, undefined, "claude", true) : null;
+          if (!snapshot || region === null ||
+              !composerRegionMatchesPayload(region, opts.chunks.join(""), "claude", snapshot.text)) {
+            throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot?.parsed ?? parseScreen(""));
+          }
+          const deadline = opts.boot_payload_observe_deadline_ms;
+          if (deadline !== undefined && Date.now() >= deadline) throw new InitialBootReturnDeadlineExpired();
+        } else if (!inputSafetyObserved && securityCapable) await readSafeInput();
         inputSafetyObserved = false;
+        assertInitialBootTextDeadline();
       } };
       await assertBinding?.();
       if (opts.key !== undefined) {
@@ -1937,7 +2061,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       const callerSubmit = submitAttempted && !opts.engineSubmitProof;
       const owner = typedDraftOwners.get(ownerKey);
       const caller = resolveCurrentCallerAgent()?.agent_id;
-      const ownerCurrent = Boolean(caller) && owner !== undefined && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
+      const ownerCurrent = Boolean(caller) && owner !== undefined && !owner.incomplete && owner.caller === caller && draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) && bootTokenInstanceCurrent(owner);
       const ownedEntries = ownerCurrent && owner ? owner.texts ?? [owner.text] : [];
       const queueRows = submitBaseline ? countVisibleCodexQueuedInputs(submitBaseline.text) : 0;
       const ownedQueue = submitBaseline ? assignVisibleOwnedQueuedInputs(submitBaseline.text, ownedEntries) : [];
@@ -1981,8 +2105,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         }
         const rawInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli, true);
         const normalizedInput = extractComposerInputRegion(submitBaseline.text, undefined, targetCli);
+        if (targetCli === "claude" && !ownedText && rawInput === "") {
+          throw new DeliverySafetyGateError("nothing_owned_to_submit", submitBaseline.parsed);
+        }
         if ((!ownedQueuedText || normalizedInput !== "") && composerHoldsForeignDraft(submitBaseline.text, ownedText, { cli: targetCli, exact: true })) {
-          typedDraftOwners.delete(ownerKey);
+          // Refusing a known incomplete prefix must not forget why a later
+          // whole-message resend is unsafe. Keep the association, not submit authority.
+          if (!owner?.incomplete) typedDraftOwners.delete(ownerKey);
           throw new DeliverySafetyGateError("blocked_by_foreign_draft", submitBaseline.parsed, extractComposerInputRegion(submitBaseline.text, undefined, targetCli)?.trim());
         }
         if (!ownedQueuedText && rawInput?.trim() && extractComposerInputRegion(submitBaseline.text, ownedText, targetCli) === "") {
@@ -2000,6 +2129,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             await opts.beforeMutation?.();
             if (targetCli === "claude" && ownedSubmitText) {
               const latest = await readParsedSurface(opts.surface, opts.workspace, { throwOnSurfaceGone: true });
+              if (latest && !isClaudeQuotaRecoveryCommand(ownedSubmitText) && currentClaudeQuota(latest.text, opts)) {
+                throw new DeliverySafetyGateError("blocked_by_usage_limit", latest.parsed);
+              }
               const current = typedDraftOwners.get(ownerKey);
               const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
               if (!latest || !current || current.caller !== caller || !draftOwnerFingerprintMatches(current, opts.surface, opts.stableSurfaceIdentity) ||
@@ -2043,11 +2175,49 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           rpc_methods: [...rpcMethods], timings_ms: opts.timings,
         }));
       }
+      const ownedIndex = ownedSubmitText ? ownedEntries.indexOf(ownedSubmitText) : -1;
+      const ownedDeliveryId = ownedIndex >= 0 ? owner?.deliveryIds?.[ownedIndex] || undefined : undefined;
       if (verification.submit_verified === true) {
+        const engine = context.lifecycleSweepEngine;
+        const original = ownedDeliveryId ? engine?.getDeliveryReceipt(ownedDeliveryId) : null;
+        if (original && original.agent_id === targetAgent?.agent_id && original.text === ownedSubmitText &&
+            ["pending_verify", "typed"].includes(original.delivery_state)) {
+          engine!.resolveDelivery({ ...original, delivery_state: "submitted", terminal: true,
+            press_enter: true, submit_dispatched: true, submit_verified: true, error: null,
+            needs_attention: false, attention_reason: null,
+            rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
+          });
+        }
         spendVerifiedDraft(ownerKey, ownedSubmitText);
         if (ownedBoot) settleVerifiedBootSubmit(ownedBoot.agentId, ownedBoot.instanceId);
+      } else if (submitDispatched && ownedDeliveryId) {
+        const engine = context.lifecycleSweepEngine;
+        const original = engine?.getDeliveryReceipt(ownedDeliveryId);
+        if (original && original.agent_id === targetAgent?.agent_id && original.text === ownedSubmitText &&
+            original.delivery_state === "typed" && !original.terminal &&
+            original.typed === true && original.submit_dispatched === false) {
+          const latest = await readParsedSurface(opts.surface, opts.workspace);
+          const region = latest ? extractComposerInputRegion(latest.text, undefined, "claude", true) : null;
+          const stillOwned = targetCli === "claude" && latest &&
+            inferComposerCli(latest.text, latest.parsed) === "claude" &&
+            latest.parsed.control_state !== "permission_prompt" && !isPickerOrMenuScreen(latest.text, "claude") &&
+            callerOwnsTypedDraft({ ...opts, text: ownedSubmitText, deliveryId: ownedDeliveryId }) &&
+            region !== null && composerRegionMatchesPayload(region, ownedSubmitText, "claude", latest.text) &&
+            !screenTranscriptContainsText(latest.text, ownedSubmitText);
+          // Record the attempted Return without rearming passive retry against
+          // an expired deadline when the exact bound draft is still visible.
+          // Missing/changed evidence stays dispatched uncertainty for verification.
+          engine!.resolveDelivery({ ...original, delivery_state: stillOwned ? "typed" : "pending_verify", terminal: false,
+            press_enter: true, submit_dispatched: true, submit_verified: null,
+            attention_reason: stillOwned
+              ? "Return was dispatched but submission remains unverified; observing the exact owned draft without replay."
+              : original.attention_reason,
+            rpc_methods: [...new Set([...(original.rpc_methods ?? []), ...rpcMethods])],
+          });
+        }
       }
       const receipt = buildPublicDeliveryReceipt({
+        delivery_id: ownedDeliveryId,
         typed: false,
         submit_attempted: submitAttempted,
         submit_dispatched: submitDispatched,
@@ -2073,6 +2243,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           press_enter: submitAttempted,
           submit_verified: verification.submit_verified,
           retry_count: 0,
+          delivery_id: ownedDeliveryId,
         });
       }
       return {
@@ -2347,7 +2518,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           opts.source_event === "spawn_agent",
           opts.beforeMutation,
         );
-        if (batch.text.length > 0) textDispatched = true;
+        if (batch.text.length > 0) { textDispatched = true; dispatchedText += batch.text; }
         if (chunkRpcMethod) rpcMethods.add(chunkRpcMethod);
         for (const sentChunks of batch.deliveredChunkCounts) {
           opts.onChunkDelivered?.(sentChunks);
@@ -2401,6 +2572,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
                   SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
                 BOOT_PAYLOAD_OBSERVE_TIMEOUT_MS,
               ),
+              deadline_ms: opts.boot_payload_observe_deadline_ms,
               beforeRead: assertBinding,
             })
           : null;
@@ -2426,6 +2598,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         submit_verification_reason = null;
         deliveryOutcome = "pending_verify";
       } else {
+        bootReturnReady = opts.boot_payload_observe_deadline_ms !== undefined;
         const codexRelay = (targetCli ?? inferComposerCli(deliverySafetySnapshot?.text ?? "")) === "codex" &&
           (opts.source_event === "send_to" ||
             opts.source_event === "dispatch_nudge" ||
@@ -2452,84 +2625,97 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               )
             : null;
         }
-        await timeDeliveryPhase(opts.timings, "type", async () => {
-          await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-          const submitRpcMethod = await sendKeyWithRetry(
-            opts.surface,
-            codexRelay ? async () => {
-              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
-              return submitSelection.key;
-            } : "return",
-            opts.workspace,
-            opts.beforeMutation,
-          );
-          submitDispatched = true;
-          if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
-        });
-        appendDeliveryEvent({
-          event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
-          source_agent: opts.source_agent ?? null,
-          target_surface: opts.surface,
-          bytes,
-          press_enter: submitSelection.key === "return",
-          submit_verified: null,
-          retry_count,
-        });
+        try {
+          await timeDeliveryPhase(opts.timings, "type", async () => {
+            await delay(computeEnterDelayMs(bytes, opts.chunks.length));
+            const submitRpcMethod = await sendKeyWithRetry(
+              opts.surface,
+              codexRelay ? async () => {
+                submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
+                return submitSelection.key;
+              } : "return",
+              opts.workspace,
+              opts.beforeMutation,
+            );
+            submitDispatched = true;
+            // This guard belongs to the initial Return only. Recovery verification
+            // already rechecks binding and exact ownership, including late accepts.
+            bootReturnReady = false;
+            if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
+          });
+        } catch (error) {
+          if (!(error instanceof InitialBootReturnDeadlineExpired) || submitDispatched) throw error;
+          // The exact draft is intact and only the initial budget expired.
+          // Continue through the existing unsubmitted receipt/boot-owner path.
+          bootReturnReady = false;
+          deliveryOutcome = "pending_verify";
+        }
+        if (submitDispatched) {
+          appendDeliveryEvent({
+            event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
+            source_agent: opts.source_agent ?? null,
+            target_surface: opts.surface,
+            bytes,
+            press_enter: submitSelection.key === "return",
+            submit_verified: null,
+            retry_count,
+          });
 
-        const verification = await timeDeliveryPhase(
-          opts.timings,
-          "verify",
-          () =>
-            verifySubmitAfterEnter({
-              surface: opts.surface,
-              workspace: opts.workspace,
-              text: submittedText,
-              bytes,
-              source_event: opts.source_event ?? "send_command",
-              source_agent: opts.source_agent,
-              verify_submit: verifySubmit,
-              allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
-              delivery_id: opts.delivery_id,
-              stableSurfaceIdentity: opts.stableSurfaceIdentity,
-              submit_key: submitSelection.key,
-              codex_busy_mode: opts.codex_busy_mode,
-              timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
-                ? opts.submit_verify_timeout_ms
-                : Math.min(
-                    opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
-                    opts.submit_verify_remaining_budget_ms(),
-                  ),
-              cursor_response_baseline: cursorResponseBaseline,
-              pre_type_screen: deliverySafetySnapshot?.text,
-              pre_return_screen: requireObservedPayloadBeforeEnter
-                ? preReturnBootEvidence?.screenText
-                : undefined,
-              pre_return_metrics: requireObservedPayloadBeforeEnter
-                ? preReturnBootEvidence?.metrics
-                : undefined,
-              require_attributable_submit_evidence:
-                requireObservedPayloadBeforeEnter,
-              require_working_status: opts.source_event === "boot_prompt",
-              beforeMutation: opts.beforeMutation,
-              beforeRead: async () => { await assertBinding?.(); },
-              rpcMethods,
-            }),
-        );
-        submit_verified = verification.submit_verified;
-        submit_evidence = verification.submit_evidence;
-        submit_verification_reason = verification.submit_verification_reason;
-        ownedDraftPending =
-          verification.submit_verification_reason === "input_still_pending";
-        retry_count = verification.retry_count;
-        deliveryOutcome = verification.delivery;
-        queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
-        if (
-          deliveryOutcome === "pending_verify" ||
-          deliveryOutcome === "queued_followup"
-        ) {
-          submit_verified = null;
-          submit_evidence = null;
-          if (deliveryOutcome !== "pending_verify") submit_verification_reason = null;
+          const verification = await timeDeliveryPhase(
+            opts.timings,
+            "verify",
+            () =>
+              verifySubmitAfterEnter({
+                surface: opts.surface,
+                workspace: opts.workspace,
+                text: submittedText,
+                bytes,
+                source_event: opts.source_event ?? "send_command",
+                source_agent: opts.source_agent,
+                verify_submit: verifySubmit,
+                allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+                delivery_id: opts.delivery_id,
+                stableSurfaceIdentity: opts.stableSurfaceIdentity,
+                submit_key: submitSelection.key,
+                codex_busy_mode: opts.codex_busy_mode,
+                timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
+                  ? opts.submit_verify_timeout_ms
+                  : Math.min(
+                      opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                      opts.submit_verify_remaining_budget_ms(),
+                    ),
+                cursor_response_baseline: cursorResponseBaseline,
+                pre_type_screen: deliverySafetySnapshot?.text,
+                pre_return_screen: requireObservedPayloadBeforeEnter
+                  ? preReturnBootEvidence?.screenText
+                  : undefined,
+                pre_return_metrics: requireObservedPayloadBeforeEnter
+                  ? preReturnBootEvidence?.metrics
+                  : undefined,
+                require_attributable_submit_evidence:
+                  requireObservedPayloadBeforeEnter,
+                require_working_status: opts.source_event === "boot_prompt",
+                beforeMutation: opts.beforeMutation,
+                beforeRead: async () => { await assertBinding?.(); },
+                rpcMethods,
+              }),
+          );
+          submit_verified = verification.submit_verified;
+          submit_evidence = verification.submit_evidence;
+          submit_verification_reason = verification.submit_verification_reason;
+          ownedDraftPending =
+            verification.submit_verification_reason === "input_still_pending";
+          retry_count = verification.retry_count;
+          deliveryOutcome = verification.delivery;
+          queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
+          if (
+            deliveryOutcome === "pending_verify" ||
+            deliveryOutcome === "queued_followup"
+          ) {
+            submit_verified = null;
+            submit_evidence = null;
+            if (deliveryOutcome !== "pending_verify") submit_verification_reason = null;
+          }
         }
       }
     }
@@ -2683,6 +2869,37 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           });
         }
       }
+      if (error instanceof DeliverySafetyGateError && error.error_code === "blocked_by_usage_limit" && textDispatched) {
+        // The bytes already belong to this delivery. A pre-Return quota veto
+        // must retain uncertainty and ownership, rather than terminalize or
+        // enqueue a replay of the original words.
+        const key = draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity);
+        const bytes = Buffer.byteLength(dispatchedText, "utf8");
+        const complete = dispatchedText === opts.chunks.join("");
+        if (!complete && opts.delivery_id) rememberDraftOwner(key, {
+          caller: resolveCurrentCallerAgent()?.agent_id ?? null, text: dispatchedText, at: Date.now(),
+          ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
+          fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: true,
+          deliveryIds: [opts.delivery_id], incomplete: true,
+        });
+        const owner = typedDraftOwners.get(key);
+        const boot = opts.source_event === "boot_prompt"
+          ? resolveLatestSurfaceAgentRecord(stateMgr, opts.surface, opts.stableSurfaceIdentity) : null;
+        if (owner && boot && owner.caller && owner.text === dispatchedText) {
+          owner.bootAgentId = boot.agent_id;
+          owner.bootInstanceId = boot.boot_instance_id ?? undefined;
+        }
+        if (opts.source_event) appendDeliveryEvent({ event_type: opts.source_event, source_agent: opts.source_agent ?? null,
+          target_surface: opts.surface, bytes, press_enter: opts.press_enter, submit_verified: null,
+          retry_count: 0, delivery_id: opts.delivery_id, delivery_state: "pending_verify" });
+        return { ...buildPublicDeliveryReceipt({ delivery_state: "pending_verify", delivery_id: opts.delivery_id,
+          typed: true, submit_attempted: opts.press_enter, submit_dispatched: submitDispatched,
+          submit_verified: null, retry_count: 0, rpc_methods: [...rpcMethods], timings_ms: opts.timings,
+          draft_complete: complete, owned_draft_recovery: complete && Boolean(owner?.caller),
+          needs_attention: true, attention_reason: complete ? "blocked_by_usage_limit" : "partial_draft",
+          WARNING: complete ? error.message : `Only ${bytes} UTF-8 bytes of this delivery were dispatched before quota blocked the next batch. The composer holds an incomplete prefix; full-draft ownership and automatic recovery are unavailable. Preserve those words; do not retype or submit the prefix as the original message.`,
+        }), bytes };
+      }
       throw preserveDeliveryEvidenceOnError(
         error,
         rpcMethods,
@@ -2697,6 +2914,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     workspace?: string;
     stableSurfaceIdentity?: string | null;
     initialUpdateMenuTextHash?: string;
+    deadline_ms?: number;
     cli?: CliType;
     text: string;
     timeout_ms: number;
@@ -2705,13 +2923,14 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     assertStableSurfaceIdentity?: () => Promise<void>;
   }): Promise<{
     delivery_state: "ready" | "queued";
+    deadline_ms: number;
     metrics: RawSubmitEvidenceMetrics | null;
     route: { surface: string; workspace?: string };
     cli: CliType;
     updateMenuTextHash?: string;
     observation?: NonNullable<PublicDeliveryReceipt["observation"]>;
   }> => {
-    let deadline = Date.now() + opts.timeout_ms;
+    let deadline = opts.deadline_ms ?? Date.now() + opts.timeout_ms;
     let lastText = "";
     let lastSurface = opts.surface;
     const consecutiveMatches = new Map<CliType, number>();
@@ -2937,6 +3156,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
           if (count >= requiredBootReadyObservations(candidate, screen.text)) {
             return {
               delivery_state: "ready",
+              deadline_ms: deadline,
               metrics: parseSubmitEvidenceMetrics(screen.text, parsed),
               route: target,
               cli: candidate,
@@ -2983,6 +3203,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
       return {
         delivery_state: "queued",
+        deadline_ms: deadline,
         ...queuedObservation,
       };
     }
@@ -3733,6 +3954,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         ? chunkTerminalInput(sanitizedText, SEND_INPUT_CHUNK_THRESHOLD)
         : [sanitizedText];
 
+    let bootDeadline = Date.now() + (opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS);
     let readiness = await waitForBootPromptReady({
       surface: opts.surface,
       workspace: opts.workspace,
@@ -3740,10 +3962,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       cli: opts.cli,
       text: sanitizedText,
       timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+      deadline_ms: opts.cli === "claude" ? bootDeadline : undefined,
       onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
       resolveRoute: opts.resolveRoute,
       assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
     });
+
+    if (opts.cli === "claude") bootDeadline = readiness.deadline_ms;
 
     let deliveryRoute = opts.resolveRoute
       ? await opts.resolveRoute()
@@ -3755,6 +3980,15 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       left.surface === right.surface &&
       (left.workspace ?? null) === (right.workspace ?? null);
     if (!sameRoute(readiness.route, deliveryRoute)) {
+      const remainingReadyBudget = opts.cli === "claude"
+        ? bootDeadline - Date.now()
+        : opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS;
+      if (opts.cli === "claude" && remainingReadyBudget <= 0) {
+        throw new BootPromptTimeoutError(
+          `Boot prompt readiness deadline expired before route re-read on ${deliveryRoute.surface}`,
+          [],
+        );
+      }
       readiness = await waitForBootPromptReady({
         surface: deliveryRoute.surface,
         workspace: deliveryRoute.workspace,
@@ -3762,11 +3996,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         initialUpdateMenuTextHash: readiness.updateMenuTextHash,
         cli: opts.cli,
         text: sanitizedText,
-        timeout_ms: opts.timeout_ms ?? BOOT_PROMPT_TIMEOUT_MS,
+        timeout_ms: remainingReadyBudget,
+        deadline_ms: opts.cli === "claude" ? bootDeadline : undefined,
         onUpdateShellRelaunch: opts.onUpdateShellRelaunch,
         resolveRoute: opts.resolveRoute,
         assertStableSurfaceIdentity: opts.assertStableSurfaceIdentity,
       });
+      if (opts.cli === "claude") bootDeadline = readiness.deadline_ms;
       deliveryRoute = opts.resolveRoute
         ? await opts.resolveRoute()
         : readiness.route;
@@ -3777,6 +4013,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       }
     }
     const assertDeliveryRouteCurrent = async (): Promise<void> => {
+      if (opts.cli === "claude") await opts.assertStableSurfaceIdentity?.();
       if (opts.resolveRoute) {
           const current = await opts.resolveRoute!();
           if (!sameRoute(deliveryRoute, current)) {
@@ -3836,6 +4073,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
             // readiness patterns decide when typing may begin; no CLI may turn
             // status alone into proof that cmuxlayer's payload was submitted.
             require_observed_payload_before_enter: true,
+            ...(opts.cli === "claude" ? { boot_payload_observe_deadline_ms: bootDeadline } : {}),
             submit_verify_timeout_ms: opts.timeout_ms
               ? Math.min(SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS, opts.timeout_ms)
               : undefined,
@@ -4195,7 +4433,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   }): boolean => {
     const owner = typedDraftOwners.get(draftOwnerKey(opts.surface, opts.workspace, opts.stableSurfaceIdentity));
     const caller = resolveCurrentCallerAgent()?.agent_id;
-    const owned = Boolean(caller) && owner !== undefined && owner.caller === caller &&
+    const owned = Boolean(caller) && owner !== undefined && !owner.incomplete && owner.caller === caller &&
       draftOwnerFingerprintMatches(owner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(owner) && (opts.deliveryId === undefined ||
         (owner.texts ?? [owner.text]).some((text, index) => text === opts.text && owner.deliveryIds?.[index] === opts.deliveryId));
@@ -4213,6 +4451,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     withSurfaceWrite,
     observedSurfaceUuid,
     observeDraftOwnership,
+    readParkedDeliverySnapshot,
     readParsedSurface,
     shouldVerifyRawSurfaceSubmit,
     executeDeliveryEngine,

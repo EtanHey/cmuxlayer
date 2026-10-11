@@ -1,4 +1,5 @@
 import { CODEX_FOOTER_RE } from "./codex-chrome.js";
+import { claudeUsageResetAt } from "./claude-usage-reset.js";
 import type {
   ParsedCliUpdateState,
   ParsedScreenAgentType,
@@ -524,6 +525,39 @@ function classifyClaudeGlyphLine(
     return entry("reply", "sentence_with_colon");
   }
   return entry("unknown", "unresolved_progress_verb");
+}
+
+/** Delivery veto only; a terminal refusal after activity is still current. */
+export function claudeUsageRefusal(text: string): { text: string; label?: string; episode: string } | null {
+  const frame = analyzeClaudeFrame(text);
+  let composer = -1;
+  frame.lines.forEach((line, index) => { if (/^\s*❯(?:\s|$)/u.test(line)) composer = index; });
+  if (composer < 0) return null;
+  let turnStart = -1;
+  let refusal = -1;
+  for (let index = 0; index < composer; index++) {
+    const line = frame.lines[index] ?? "";
+    if (/^❯(?:\s|$)/u.test(line)) { turnStart = index; refusal = -1; }
+    if (/^\s*⎿\s+You['’]ve hit your (?:weekly )?limit(?:\s*·\s*resets(?:\s+.*)?)?\s*$/iu.test(line)) refusal = index;
+  }
+  if (refusal < 0) return null;
+  const output = frame.glyphs.filter(glyph => glyph.lineIndex > turnStart && glyph.lineIndex < composer &&
+    ["reply", "action", "call"].includes(glyph.kind) && !/^How is Claude/i.test(glyph.value)).at(-1);
+  if (output && output.lineIndex > refusal) return null;
+  // A reply/tool quoting an error is not a harness refusal. The captured
+  // terminal refusal has the adjacent harness usage-credits instruction;
+  // an action spinner before a new refusal does not count as recovery.
+  const credits = /^\s*\/usage-credits to finish what you’re working on\.\s*$/u.test(frame.lines[refusal + 1] ?? "");
+  if (output && output.kind !== "action" && !credits) return null;
+  const label = /\breset[s]?\s+(.+)$/i.exec(frame.lines[refusal] ?? "")?.[1];
+  return { text: frame.lines[refusal].replace(/^\s*⎿\s+/u, "").trim(), label, episode: frame.lines.slice(0, refusal + 1).join("\n") };
+}
+
+export function hasCurrentClaudeUsageLimit(text: string, nowMs = Date.now(), timeZone?: string, refusalAt?: number): boolean {
+  const refusal = claudeUsageRefusal(text);
+  if (!refusal) return false;
+  const resetAt = refusal.label ? claudeUsageResetAt(refusal.label, nowMs, timeZone, refusalAt) : null;
+  return resetAt === null || nowMs < resetAt;
 }
 
 function analyzeClaudeFrame(text: string): ClaudeFrame {
