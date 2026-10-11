@@ -973,6 +973,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   };
 
   class ClaudeDraftChanged extends Error {}
+  class InitialBootReturnDeadlineExpired extends Error {}
 
   const assertDeliveryTargetIsSafe = async (opts: {
     surface: string;
@@ -1981,10 +1982,12 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
         if (bootReturnReady) {
           const snapshot = await readSafeInput();
           const region = snapshot ? extractComposerInputRegion(snapshot.text, undefined, "claude", true) : null;
-          if (Date.now() >= opts.boot_payload_observe_deadline_ms! || !snapshot || region === null ||
+          if (!snapshot || region === null ||
               !composerRegionMatchesPayload(region, opts.chunks.join(""), "claude", snapshot.text)) {
             throw new DeliverySafetyGateError("draft_ownership_unverified", snapshot?.parsed ?? parseScreen(""));
           }
+          const deadline = opts.boot_payload_observe_deadline_ms;
+          if (deadline !== undefined && Date.now() >= deadline) throw new InitialBootReturnDeadlineExpired();
         } else if (!inputSafetyObserved && securityCapable) await readSafeInput();
         inputSafetyObserved = false;
       } };
@@ -2544,84 +2547,97 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
               )
             : null;
         }
-        await timeDeliveryPhase(opts.timings, "type", async () => {
-          await delay(computeEnterDelayMs(bytes, opts.chunks.length));
-          const submitRpcMethod = await sendKeyWithRetry(
-            opts.surface,
-            codexRelay ? async () => {
-              submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
-              return submitSelection.key;
-            } : "return",
-            opts.workspace,
-            opts.beforeMutation,
-          );
-          submitDispatched = true;
-          if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
-        });
-        appendDeliveryEvent({
-          event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
-          source_agent: opts.source_agent ?? null,
-          target_surface: opts.surface,
-          bytes,
-          press_enter: submitSelection.key === "return",
-          submit_verified: null,
-          retry_count,
-        });
+        try {
+          await timeDeliveryPhase(opts.timings, "type", async () => {
+            await delay(computeEnterDelayMs(bytes, opts.chunks.length));
+            const submitRpcMethod = await sendKeyWithRetry(
+              opts.surface,
+              codexRelay ? async () => {
+                submitSelection.key = await currentCodexRelayKey(opts.surface, opts.workspace, opts.codex_busy_mode);
+                return submitSelection.key;
+              } : "return",
+              opts.workspace,
+              opts.beforeMutation,
+            );
+            submitDispatched = true;
+            // This guard belongs to the initial Return only. Recovery verification
+            // already rechecks binding and exact ownership, including late accepts.
+            bootReturnReady = false;
+            if (submitRpcMethod) rpcMethods.add(submitRpcMethod);
+          });
+        } catch (error) {
+          if (!(error instanceof InitialBootReturnDeadlineExpired) || submitDispatched) throw error;
+          // The exact draft is intact and only the initial budget expired.
+          // Continue through the existing unsubmitted receipt/boot-owner path.
+          bootReturnReady = false;
+          deliveryOutcome = "pending_verify";
+        }
+        if (submitDispatched) {
+          appendDeliveryEvent({
+            event_type: submitSelection.key === "tab" ? "send_key" : "press_enter",
+            source_agent: opts.source_agent ?? null,
+            target_surface: opts.surface,
+            bytes,
+            press_enter: submitSelection.key === "return",
+            submit_verified: null,
+            retry_count,
+          });
 
-        const verification = await timeDeliveryPhase(
-          opts.timings,
-          "verify",
-          () =>
-            verifySubmitAfterEnter({
-              surface: opts.surface,
-              workspace: opts.workspace,
-              text: submittedText,
-              bytes,
-              source_event: opts.source_event ?? "send_command",
-              source_agent: opts.source_agent,
-              verify_submit: verifySubmit,
-              allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
-              delivery_id: opts.delivery_id,
-              stableSurfaceIdentity: opts.stableSurfaceIdentity,
-              submit_key: submitSelection.key,
-              codex_busy_mode: opts.codex_busy_mode,
-              timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
-                ? opts.submit_verify_timeout_ms
-                : Math.min(
-                    opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
-                    opts.submit_verify_remaining_budget_ms(),
-                  ),
-              cursor_response_baseline: cursorResponseBaseline,
-              pre_type_screen: deliverySafetySnapshot?.text,
-              pre_return_screen: requireObservedPayloadBeforeEnter
-                ? preReturnBootEvidence?.screenText
-                : undefined,
-              pre_return_metrics: requireObservedPayloadBeforeEnter
-                ? preReturnBootEvidence?.metrics
-                : undefined,
-              require_attributable_submit_evidence:
-                requireObservedPayloadBeforeEnter,
-              require_working_status: opts.source_event === "boot_prompt",
-              beforeMutation: opts.beforeMutation,
-              beforeRead: async () => { await assertBinding?.(); },
-              rpcMethods,
-            }),
-        );
-        submit_verified = verification.submit_verified;
-        submit_evidence = verification.submit_evidence;
-        submit_verification_reason = verification.submit_verification_reason;
-        ownedDraftPending =
-          verification.submit_verification_reason === "input_still_pending";
-        retry_count = verification.retry_count;
-        deliveryOutcome = verification.delivery;
-        queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
-        if (
-          deliveryOutcome === "pending_verify" ||
-          deliveryOutcome === "queued_followup"
-        ) {
-          submit_verified = null;
-          submit_evidence = null;
-          if (deliveryOutcome !== "pending_verify") submit_verification_reason = null;
+          const verification = await timeDeliveryPhase(
+            opts.timings,
+            "verify",
+            () =>
+              verifySubmitAfterEnter({
+                surface: opts.surface,
+                workspace: opts.workspace,
+                text: submittedText,
+                bytes,
+                source_event: opts.source_event ?? "send_command",
+                source_agent: opts.source_agent,
+                verify_submit: verifySubmit,
+                allow_recovery_enter_retry: opts.allow_recovery_enter_retry,
+                delivery_id: opts.delivery_id,
+                stableSurfaceIdentity: opts.stableSurfaceIdentity,
+                submit_key: submitSelection.key,
+                codex_busy_mode: opts.codex_busy_mode,
+                timeout_ms: opts.submit_verify_remaining_budget_ms === undefined
+                  ? opts.submit_verify_timeout_ms
+                  : Math.min(
+                      opts.submit_verify_timeout_ms ?? SEND_INPUT_SUBMIT_VERIFY_TIMEOUT_MS,
+                      opts.submit_verify_remaining_budget_ms(),
+                    ),
+                cursor_response_baseline: cursorResponseBaseline,
+                pre_type_screen: deliverySafetySnapshot?.text,
+                pre_return_screen: requireObservedPayloadBeforeEnter
+                  ? preReturnBootEvidence?.screenText
+                  : undefined,
+                pre_return_metrics: requireObservedPayloadBeforeEnter
+                  ? preReturnBootEvidence?.metrics
+                  : undefined,
+                require_attributable_submit_evidence:
+                  requireObservedPayloadBeforeEnter,
+                require_working_status: opts.source_event === "boot_prompt",
+                beforeMutation: opts.beforeMutation,
+                beforeRead: async () => { await assertBinding?.(); },
+                rpcMethods,
+              }),
+          );
+          submit_verified = verification.submit_verified;
+          submit_evidence = verification.submit_evidence;
+          submit_verification_reason = verification.submit_verification_reason;
+          ownedDraftPending =
+            verification.submit_verification_reason === "input_still_pending";
+          retry_count = verification.retry_count;
+          deliveryOutcome = verification.delivery;
+          queueVerified = verification.delivery === "queued" || verification.delivery === "steer_pending" || verification.queue_verified === true;
+          if (
+            deliveryOutcome === "pending_verify" ||
+            deliveryOutcome === "queued_followup"
+          ) {
+            submit_verified = null;
+            submit_evidence = null;
+            if (deliveryOutcome !== "pending_verify") submit_verification_reason = null;
+          }
         }
       }
     }
