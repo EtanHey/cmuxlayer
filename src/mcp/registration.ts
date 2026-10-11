@@ -395,7 +395,8 @@ export function installToolRegistration(
             // while lifecycle initialization is unavailable. Never wait for
             // its topology scans; the handler refuses incompatible selectors.
             const ownershipDiagnostic = toolNameString === "wait_for" && rawArgs.diagnostic === "ownership";
-            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString) && !ownershipDiagnostic) {
+            const recoveryObservation = toolNameString === "send_to" && rawArgs.mode === "recover_delivery";
+            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString) && !ownershipDiagnostic && !recoveryObservation) {
               try {
                 await lifecycleGate();
               } catch (error) {

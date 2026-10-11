@@ -102,6 +102,7 @@ export function diagnoseDeliveryOwnership(id: string, deps: OwnershipDiagnosticD
     receipt: receipt ? { agent_id: receipt.agent_id, delivery_state: receipt.delivery_state, terminal: receipt.terminal } : null,
     target, predicates,
     evidence: { scope: "current_context_only", baseline_present: snapshot.baseline,
+      boot_token: Boolean(owner?.bootAgentId),
       boot_bound: Boolean(owner?.bootAgentId && owner.bootInstanceId),
       boot_first_capture_compatible: firstCapture, historical_loss_reason: "unavailable",
       live_route: "unavailable", composer: "unavailable" },

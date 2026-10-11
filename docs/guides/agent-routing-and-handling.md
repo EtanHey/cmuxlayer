@@ -42,7 +42,27 @@ metadata, not a live topology/composer check. Ownership evidence is bounded,
 in memory, and can disappear with context disposal or eviction; the diagnostic
 cannot identify why historical evidence was lost. `ownership_match:true` only
 models the duplicate ownership gate; it never authorizes Return or proves that
-this receipt can be recovered. No delivery-ID recovery operation is provided.
+this receipt can be recovered. `ownership_match:"unavailable"` means NOT_PROVEN,
+not the guard's boolean verdict. The route_surface/uuid/workspace_match fields
+are informational comparisons, not authorization conjuncts; a recycled ref
+with the same stable UUID may report route_surface_match:false alongside a
+true ownership match.
+
+`send_to({mode:"recover_delivery", delivery_id:"<original-id>"})` currently
+provides original-ID observation/refusal only. It accepts no replacement text
+or target, reads retained local evidence without pane input or topology reads,
+and never updates the receipt, claims ownership, types, or presses Return.
+`ok:false` and `recovery_eligible:false` mean this call cannot submit; nested
+`receipt` fields describe the original delivery, not input by this call.
+Terminal receipts remain terminal. Queued/accepted or previously dispatched
+uncertain submissions return `observe_only`. Every other case is unsupported:
+even an intact complete keyed owner plus submit_dispatched:false lacks proven
+durable pre-Return journalling across existing paths. Lost ownership cannot be
+rebuilt from screen or receipt text. Unresolved callers receive no receipt
+lookup, foreign owner evidence stays private, and worker upward-channel guards
+remain enforced. Concurrent calls perform no input or receipt mutation.
+This operation does not trigger the existing verifier; attributable late
+acceptance settled independently by that verifier appears on a later call.
 
 | Need | Use | Avoid |
 | --- | --- | --- |

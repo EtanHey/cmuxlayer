@@ -110,14 +110,15 @@ export const SendToArgsSchema = z.object({
   // essentially every caller means, so it is now a real default that the
   // runtime honours.
   mode: z
-    .enum(["agent", "surface", "command", "key"], {
+    .enum(["agent", "surface", "command", "key", "recover_delivery"], {
       errorMap: () => ({
         message:
-          'Expected one of "agent" | "surface" | "command" | "key". ' +
+          'Expected one of "agent" | "surface" | "command" | "key" | "recover_delivery". ' +
           SEND_TO_WORKING_EXAMPLE,
       }),
     })
     .default("agent"),
+  delivery_id: z.string().min(1).optional().describe("Original receipt ID for mode=recover_delivery only; currently observation/refusal, never sends input"),
   target: z
     .union([z.string(), z.number().transform((value) => String(value))])
     .optional(),
@@ -129,7 +130,7 @@ export const SendToArgsSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Text for every mode. In mode="key", this is the key name; submit aliases are normalized to "return".',
+      'Text for agent/surface/command/key modes. In mode="key", this is the key name; submit aliases are normalized to "return". Forbidden in recover_delivery mode.',
     ),
   workspace: z.string().optional(),
   chunk_size: z.number().int().min(1).optional().default(200),
@@ -283,6 +284,10 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
       ...BaseOutputShape,
       retry_count: BaseOutputShape.retry_count.optional(),
       ...DeliveryOutputShape,
+      recovery_outcome: z.enum(["unsupported", "observe_only", "terminal"]).optional(),
+      recovery_eligible: z.literal(false).optional(),
+      input_performed: z.literal(false).optional(),
+      never_dispatched_proof: z.literal("not_proven").optional(),
       agent_id: z.string().optional(),
       surface: z.string().optional(),
       command: z.string().optional(),

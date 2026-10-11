@@ -331,6 +331,7 @@ import type {
 } from "./mcp/shared-types.js";
 import { registerSpawnAgentTool } from "./mcp/tools/spawn.js";
 import { registerSendToTool, registerWaitForTool } from "./mcp/tools/send.js";
+import { observeOriginalDeliveryRecovery } from "./delivery/recovery-observation.js";
 
 
 // Public surface kept stable: these moved to ./mcp/tools/agent.ts (CX-3b S10a).
@@ -3966,6 +3967,12 @@ export function createServer(opts?: CreateServerOptions): McpServer {
     };
     // send_to (src/mcp/tools/send.ts, CX-3b S10b)
     registerSendToTool(server, {
+      observeRecovery: id => observeOriginalDeliveryRecovery(id, {
+        diagnose: () => diagnoseOwnership(id, {
+          getReceipt: id => engine.getDeliveryReceipt(id), getTarget: id => engine.getAgentState(id),
+        }),
+        getReceipt: () => engine.getDeliveryReceipt(id),
+      }),
       rawSend: {
         sendInput: (args) => sendInput(rawSendDeps, args),
         sendCommand: (args) => sendCommand(rawSendDeps, args),

@@ -78,6 +78,7 @@ import type {
 } from "../../delivery/receipts.js";
 import type { ParsedScreenResult } from "../../types.js";
 import type { diagnoseDeliveryOwnership } from "../../delivery/ownership-diagnostic.js";
+import type { observeOriginalDeliveryRecovery } from "../../delivery/recovery-observation.js";
 
 export interface WaitForToolDeps {
   diagnoseOwnership: (id: string) => ReturnType<typeof diagnoseDeliveryOwnership>;
@@ -507,6 +508,7 @@ export function registerWaitForTool(
 }
 
 export interface SendToToolDeps {
+  observeRecovery: (id: string) => ReturnType<typeof observeOriginalDeliveryRecovery>;
   assertWorkerUpwardChannel: (target: string) => void;
   awaitLifecycleStart: () => Promise<void>;
   broadcastSkipReason: (agent: AgentRecord) => Promise<string | null>;
@@ -547,7 +549,7 @@ export function registerSendToTool(
   // 17. send_to
   server.tool(
     "send_to",
-    "Send text or a key through the shared delivery engine. send_to submits new messages. Key-Return supports pickers, menus, permission prompts, and recovery of this caller's exact typed draft on the same agent/session once the displayed unambiguous reset time passes or new harness output confirms recovery; the old refusal may stay visible. Exact /usage, /usage-credits or /rate-limit-options navigation is also guarded. Read the pane and receipt first; never retype or repeat accepted input. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode; for shell commands use mode:command. Text success requires a verified submit or new matching queue proof. Otherwise ok=false with submit_unverified retains pending verification and ownership for retries without retyping. Verified text success returns only ok, target identity, delivery_id, delivery_state, submitted, caller_agent_id, and queued_behind_turn when applicable. Key success returns its key verification fields. Pass verbose=true for full diagnostics; failures always retain them.",
+    "Send text or a key through the shared delivery engine. send_to submits new messages. mode=recover_delivery accepts only original delivery_id and returns no-input local observation/refusal; it never submits, triggers verification, or changes the receipt. It requires resolved caller attribution. Key-Return supports pickers, menus, permission prompts, and recovery of this caller's exact typed draft on the same agent/session once the displayed unambiguous reset time passes or new harness output confirms recovery; the old refusal may stay visible. Exact /usage, /usage-credits or /rate-limit-options navigation is also guarded. Read the pane and receipt first; never retype or repeat accepted input. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed for regular sends. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode; for shell commands use mode:command. Text success requires a verified submit or new matching queue proof. Otherwise ok=false with submit_unverified retains pending verification and ownership for retries without retyping. Verified text success returns only ok, target identity, delivery_id, delivery_state, submitted, caller_agent_id, and queued_behind_turn when applicable. Key success returns its key verification fields. Pass verbose=true for full diagnostics; failures always retain them.",
     {
       ...SendToArgsSchema.shape,
       text: SendToArgsSchema.shape.text.describe(
@@ -593,6 +595,18 @@ export function registerSendToTool(
 
         const args = parsedArgs.data;
         const mode = args.mode;
+        if (mode === "recover_delivery") {
+          if (!args.delivery_id || [args.text, args.agent_id, args.surface, args.target, args.targeting,
+              args.workspace, args.rename_to_task, args.boot_prompt_path].some(value => value !== undefined) ||
+              !args.press_enter || args.chunk_size !== 200 ||
+              args.background || args.allow_busy || args.codex_busy_mode || args.allow_long_inline) {
+            throw new Error("send_to mode=recover_delivery requires only the original delivery_id; no replacement payload, target or delivery options");
+          }
+          const data = deps.observeRecovery(args.delivery_id);
+          if ("receipt" in data && data.receipt) assertWorkerUpwardChannel(data.receipt.agent_id);
+          return okFormatted(formatOk("send_to", data), data);
+        }
+        if (args.delivery_id) throw new Error("send_to delivery_id is supported only in mode=recover_delivery");
         if (!mode) {
           // Defensive only: the schema default makes this unreachable. If it
           // ever fires, say what to do rather than what went wrong (#611).
