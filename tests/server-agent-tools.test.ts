@@ -1,3 +1,4 @@
+import * as privateNet from "node:net";
 import "./helpers/pin-long-inline-cap.js";
 /**
  * Integration tests for the agent lifecycle MCP tools registered in server.ts.
@@ -3036,8 +3037,8 @@ describe("agent lifecycle tool handlers", () => {
     );
     const exec = makeLifecycleExec();
     const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
-    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [] });
-    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true }] });
+    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
+    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
     const server = createTrackedServer({ client, stateDir: TEST_DIR,
       inboxBaseDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
     await serverContexts.at(-1)?.lifecycleStartPromise;
@@ -3051,6 +3052,11 @@ describe("agent lifecycle tool handlers", () => {
     if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
     const parsed = parseToolResult(result) as Record<string, unknown>;
 
+    if (metadata === "legacy" && focus === false) {
+      expect(parsed.ok).toBe(false);
+      expect(parsed.error).toMatch(/surface_runtime_not_started/);
+      return;
+    }
     expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
     expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
       surface_id: "surface:new", state: "started", delivered: false });
@@ -5174,7 +5180,7 @@ describe("agent lifecycle tool handlers", () => {
     }
   });
 
-  it.each([{ alreadyReady: false, socketMode: false, missingFirst: false }, { alreadyReady: true, socketMode: false, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: true }])("#636 D4 initializes only cold owned surfaces without selecting a workspace (case=%j)", async ({ alreadyReady, socketMode, missingFirst }) => {
+  it.each([{ alreadyReady: false, socketMode: false, missingFirst: false }, { alreadyReady: true, socketMode: false, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: false }, { alreadyReady: false, socketMode: true, missingFirst: true }])("#636 D4 initializes owned surfaces using proven metadata or legacy focus (case=%j)", async ({ alreadyReady, socketMode, missingFirst }) => {
     vi.useFakeTimers();
     try {
       let ready = alreadyReady;
@@ -5182,7 +5188,7 @@ describe("agent lifecycle tool handlers", () => {
       const lifecycleExec = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
         if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: missingFirst && metadataReads++ === 0 ? [] : [{ surface_ref: "surface:new", runtime_surface_ready: ready, ghostty_surface_ptr: ready ? "0x1234" : "nil" }] }), stderr: "" };
-        if (args.includes("send-key") && args.includes("ctrl-u")) ready = true;
+        if ((args.includes("send-key") && args.includes("ctrl-u")) || (args.includes("surface.focus") && args.some((a: string) => a.includes("surface:new")))) ready = true;
         if (args.includes("read-screen") && !ready) throw new Error("internal_error: Failed to read terminal text");
         return lifecycleExec(cmd, args);
       });
@@ -5194,8 +5200,8 @@ describe("agent lifecycle tool handlers", () => {
       const result = (server as any)._registeredTools.spawn_agent.handler({ verbose: true, repo: "cmuxlayer", cli: "claude", role: "worker", boot_prompt_timeout_ms: 500 }, {});
       await vi.advanceTimersByTimeAsync(3_000);
       expect(parseToolResult(await result).ok).toBe(true);
-      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady ? 0 : 1);
-      expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(false);
+      expect(exec.mock.calls.filter(([, args]) => args.includes("ctrl-u"))).toHaveLength(alreadyReady || missingFirst ? 0 : 1);
+      expect(exec.mock.calls.some(([, args]) => args.includes("select-workspace"))).toBe(missingFirst);
       wrapped?.stop();
     } finally { vi.useRealTimers(); }
   });
@@ -5205,7 +5211,7 @@ describe("agent lifecycle tool handlers", () => {
     try {
       const base = makeLifecycleExec();
       const exec = vi.fn().mockImplementation(async (cmd, args) => {
-        if (args.includes("debug-terminals")) return { stdout: '{"terminals":[]}', stderr: "" };
+        if (args.includes("debug-terminals")) return { stdout: JSON.stringify({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: false, ghostty_surface_ptr: "nil" }] }), stderr: "" };
         if (closeFails && args.includes("close-surface")) throw new Error("cleanup close rejected");
         return base(cmd, args);
       });
@@ -14895,6 +14901,8 @@ describe("auto-focus discipline (focus target before split, restore after render
 
   function makeFocusLifecycleExec(opts?: {
     selectedWorkspace?: string;
+    runtimeMode?: "empty" | "unsupported" | "cold" | "ready" | "focus-only";
+    launchFails?: boolean;
     focusedSurface?: string;
     roleTopology?: boolean;
     focusGatesCreatedSurfaceReadiness?: boolean;
@@ -14911,9 +14919,33 @@ describe("auto-focus discipline (focus target before split, restore after render
     let focusedWorkspace = opts?.selectedWorkspace ?? "workspace:1";
     let focusedSurface = opts?.focusedSurface ?? "surface:origin";
     let spawnCreated = false;
+    let createdWorkspace: string | undefined;
+    let resumedLauncher = false;
+    let initialized = opts?.runtimeMode === "ready";
     let createdSurfaceReadStarted = false;
     const exec = vi.fn(async (cmd: string, args: string[]) => {
       calls.push(args);
+      const routeWorkspace = args.includes("--workspace") ? args[args.indexOf("--workspace") + 1] : focusedWorkspace;
+      if (opts?.runtimeMode && (args.includes("list-panes") || args.includes("list-pane-surfaces")) && (!spawnCreated || routeWorkspace !== createdWorkspace)) {
+        const witness = `surface:witness-${routeWorkspace}`;
+        return { stdout: JSON.stringify(args.includes("list-panes") ? {
+          workspace_ref: routeWorkspace, panes: [{ ref: "pane:witness", index: 0, focused: false,
+            surface_count: 1, surface_refs: [witness], selected_surface_ref: witness }],
+        } : { workspace_ref: routeWorkspace, pane_ref: "pane:witness", surfaces: [{
+          ref: witness, title: "plain shell", type: "terminal", index: 0, selected: true,
+        }] }), stderr: "" };
+      }
+      if (opts?.runtimeMode && args.includes("debug-terminals")) {
+        if (opts.runtimeMode === "unsupported") throw new Error("unknown command debug-terminals");
+        return { stdout: JSON.stringify({ terminals: opts.runtimeMode === "empty" ? [] : [{
+          surface_ref: spawnCreated ? "surface:new" : "surface:origin",
+          runtime_surface_ready: initialized,
+          ghostty_surface_ptr: initialized ? "0x123" : "nil",
+        }] }), stderr: "" };
+      }
+      if (spawnCreated && opts?.runtimeMode && args.includes("send-key") && args.includes("ctrl-u") && opts.runtimeMode === "cold") initialized = true;
+      if (spawnCreated && opts?.runtimeMode && args.includes("read-screen") && args.includes("surface:new") && !initialized) throw new Error("internal_error: Failed to read terminal text");
+      if (spawnCreated && opts?.launchFails && args.includes("send")) throw new Error("fixture launch failed");
       if (args.includes("list-windows")) {
         return {
           stdout: JSON.stringify({
@@ -14987,6 +15019,7 @@ describe("auto-focus discipline (focus target before split, restore after render
         }
         focusedWorkspace = payload.workspace_id ?? focusedWorkspace;
         focusedSurface = payload.surface_id ?? focusedSurface;
+        if (focusedSurface === "surface:new") initialized = true;
         return { stdout: "{}", stderr: "" };
       }
       if (args.includes("select-workspace")) {
@@ -15118,14 +15151,19 @@ describe("auto-focus discipline (focus target before split, restore after render
           stderr: "",
         };
       }
+      if (opts?.runtimeMode && args.includes("send") && /\bresume\b/.test(String(args.at(-1)))) resumedLauncher = true;
       const result = await lifecycleExec(cmd, args);
+      if (opts?.runtimeMode && (args.includes("list-panes") || args.includes("list-pane-surfaces"))) {
+        return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout), workspace_ref: routeWorkspace }) };
+      }
       if (args.includes("new-split") || args.includes("new-surface")) {
         spawnCreated = true;
+        createdWorkspace = routeWorkspace;
         return {
           ...result,
           stdout: JSON.stringify({
             ...(JSON.parse(result.stdout) as Record<string, unknown>),
-            workspace: focusedWorkspace,
+            workspace: args.includes("--workspace") ? args[args.indexOf("--workspace") + 1] : focusedWorkspace,
           }),
         };
       }
@@ -15137,10 +15175,445 @@ describe("auto-focus discipline (focus target before split, restore after render
         focusedWorkspace = opts.moveFocusDuringReadinessTo.workspace;
         focusedSurface = opts.moveFocusDuringReadinessTo.surface;
       }
+      if (opts?.runtimeMode && resumedLauncher && args.includes("read-screen")) {
+        // A resume launcher opens the captured CLI; it submits no user task.
+        return { ...result, stdout: JSON.stringify({ surface: "surface:new", text: "codex> ", lines: 20, scrollback_used: false }) };
+      }
       return result;
     }) as unknown as ExecFn;
     return { exec, calls };
   }
+
+
+  it.each([
+    "stable-null", "null-to-epoch", "epoch-to-null", "reconnect-refreuse",
+    "acquisition-reconnect", "restoration-reconnect", "restoration-refreuse",
+    "cleanup-reconnect", "cleanup-refreuse", "primary-failure", "user-move",
+    "stable-uuid", "stable-ref-only", "stable-new-surface", "reconnect-new-surface", "explicit-false", "split-anchor-reconnect",
+  ] as const)("bare creation ownership ratchet %s", async phase => {
+    const socketDir = mkdtempSync(join(tmpdir(), "cmux-bare-ownership-"));
+    const paths = [join(socketDir, "one.sock"), join(socketDir, "two.sock")];
+    const sockets = paths.map(() => privateNet.createServer());
+    await Promise.all(sockets.map((socket, i) => new Promise<void>((resolve, reject) => {
+      socket.once("error", reject); socket.listen(paths[i], resolve);
+    })));
+    try {
+      const uuidA = "11111111-1111-4111-8111-111111111111";
+      const uuidB = "22222222-2222-4222-8222-222222222222";
+      const unavailable = phase === "stable-null" || phase === "null-to-epoch";
+      const failure = ["primary-failure", "cleanup-reconnect", "cleanup-refreuse"].includes(phase);
+      const base = makeFocusLifecycleExec({ runtimeMode: phase === "explicit-false" ? "cold" : "unsupported",
+        focusCreatedSurfaceFails: failure,
+        ...(phase === "user-move" ? { moveFocusDuringReadinessTo: {
+          workspace: "workspace:1", surface: "surface:user-click",
+        } } : {}),
+      });
+      let client: CmuxClient;
+      let created = false, focused = false, changed = false, insideSplit = false;
+      let occupant = uuidA;
+      const rows: Array<{ args: string[]; path: string | null; stale: boolean }> = [];
+      const replaceObserver = () => { client.setEnv({ CMUX_SOCKET_PATH: paths[1] }); changed = true; occupant = uuidB; };
+      const exec = vi.fn(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+        if (!changed && created && args.includes("identify")) {
+          if (phase === "epoch-to-null") { client.setEnv({}); changed = true; }
+          if (phase === "null-to-epoch") { client.setEnv({ CMUX_SOCKET_PATH: paths[0] }); changed = true; }
+          if (phase === "acquisition-reconnect" || (focused && phase === "restoration-reconnect")) replaceObserver();
+          if (focused && phase === "restoration-refreuse") { occupant = uuidB; changed = true; }
+        }
+        if (phase === "split-anchor-reconnect" && insideSplit && args.includes("list-pane-surfaces")) replaceObserver();
+        const row = { args: [...args], path: env?.CMUX_SOCKET_PATH ?? null,
+          stale: (created || args.includes("new-split") || args.includes("new-surface")) &&
+            (client.currentSocketPath() !== paths[0] || occupant !== uuidA) };
+        rows.push(row);
+        // The synthetic backend accepts the returned UUID as the same surface;
+        // original focus fixtures continue to observe canonical ref handles.
+        const translated = args.map(a => a.replaceAll(uuidA, "surface:new"));
+        let result;
+        try { result = await base.exec(cmd, translated); }
+        catch (error) {
+          if (args.includes("surface.focus") && failure) {
+            if (phase === "cleanup-reconnect") replaceObserver();
+            if (phase === "cleanup-refreuse") { occupant = uuidB; changed = true; }
+          }
+          throw error;
+        }
+        if (args.includes("surface.focus") && translated.at(-1)?.includes("surface:new")) focused = true;
+        if (args.includes("new-split") || args.includes("new-surface")) {
+          created = true;
+          if (phase !== "stable-ref-only") result = { ...result,
+            stdout: JSON.stringify({ ...JSON.parse(result.stdout), surface_id: uuidA }) };
+          if (phase === "reconnect-refreuse" || phase === "reconnect-new-surface") replaceObserver();
+        }
+        if (!created && phase.endsWith("new-surface")) {
+          if (args.includes("list-panes")) {
+            const data = JSON.parse(result.stdout);
+            data.panes.push({ ref: "pane:vacant-worker", index: 1, focused: false,
+              surface_count: 0, surface_refs: [] });
+            result = { ...result, stdout: JSON.stringify(data) };
+          }
+          if (args.includes("list-pane-surfaces") && args.includes("pane:vacant-worker")) {
+            result = { ...result, stdout: JSON.stringify({ workspace_ref: "workspace:2",
+              pane_ref: "pane:vacant-worker", surfaces: [] }) };
+          }
+        }
+        if (created && args.includes("list-pane-surfaces")) {
+          const data = JSON.parse(result.stdout);
+          data.surfaces = data.surfaces.map((surface: any) => surface.ref === "surface:new"
+            ? { ...surface, id: occupant } : surface);
+          result = { ...result, stdout: JSON.stringify(data) };
+        }
+        return result;
+      }) as unknown as ExecFn;
+      client = new CmuxClient({ exec, bin: "cmux", env: unavailable ? {} : { CMUX_SOCKET_PATH: paths[0] } });
+      const newSplit = client.newSplit.bind(client);
+      client.newSplit = async (direction, options) => {
+        insideSplit = true;
+        try { return await newSplit(direction, options); }
+        finally { insideSplit = false; }
+      };
+      const opts: CreateServerOptions = { client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null };
+      // Exercise production defaults, not createTrackedServer's fake epoch.
+      const context = createServerContext(opts); serverContexts.push(context);
+      expect(context.surfaceObserverEpoch === null).toBe(unavailable);
+      const server = createServer({ ...opts, context });
+      const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+        type: "terminal", workspace: "workspace:2", boot_prompt_timeout_ms: 100,
+        ...(phase === "explicit-false" ? { focus: false } : {}),
+      }, {}));
+      const mutations = rows.filter(row => row.args.some(a =>
+        ["new-split", "new-surface", "select-workspace", "surface.focus", "close-surface", "send-key"].includes(a)));
+      expect(mutations.filter(row => row.stale), JSON.stringify({ result, rows })).toEqual([]);
+      const closes = rows.filter(row => row.args.includes("close-surface"));
+      const restores = rows.filter(row => row.args.includes("surface.focus") && row.args.at(-1)?.includes("surface:origin"));
+      if (phase === "split-anchor-reconnect") expect(changed).toBe(false);
+      if (phase.endsWith("new-surface")) expect(rows.some(row => row.args.includes("new-surface"))).toBe(true);
+      if (phase === "explicit-false") expect(rows.filter(row => row.args.includes("surface.focus") || row.args.includes("select-workspace"))).toEqual([]);
+      if (unavailable) {
+        expect(result.ok).toBe(false);
+        expect(created).toBe(false);
+        expect(mutations).toEqual([]);
+      } else if (["epoch-to-null", "reconnect-refreuse", "reconnect-new-surface", "acquisition-reconnect"].includes(phase)) {
+        expect(result.ok).toBe(false); expect(changed).toBe(true);
+        expect(closes).toEqual([]); expect(restores).toEqual([]);
+      } else if (failure) {
+        expect(result.ok).toBe(false); expect(result.error).toBe("cmux rpc failed: created surface focus failed");
+        expect(closes.length).toBe(phase === "primary-failure" ? 1 : 0);
+        if (closes.length) expect(closes[0].args).toContain(uuidA);
+      } else {
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+        expect(restores.length).toBe(["user-move", "restoration-reconnect", "restoration-refreuse", "explicit-false"].includes(phase) ? 0 : 1);
+        expect(closes).toEqual([]);
+      }
+    } finally {
+      // Stop synthetic lifecycle reads before removing their owned socket nodes.
+      await Promise.allSettled(serverContexts.map(context => context.lifecycleStartPromise ?? Promise.resolve()));
+      for (const context of serverContexts.splice(0)) context.dispose();
+      await Promise.all(sockets.map(socket => new Promise<void>(resolve => socket.close(() => resolve()))));
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(
+    (["ready", "demand"] as const).flatMap(mode =>
+      (["uuid", "ref-only"] as const).flatMap(identity =>
+        (["stable", "observer-unavailable", "observer-replaced", "uuid-reuse"] as const)
+          .filter(transition => identity === "uuid" || transition !== "uuid-reuse")
+          .map(transition => ({ mode, identity, transition })))),
+  )("bare runtime acceptance ratchet $mode $identity $transition", async ({ mode, identity, transition }) => {
+    const socketDir = mkdtempSync(join(tmpdir(), "cmux-bare-runtime-acceptance-"));
+    const paths = [join(socketDir, "one.sock"), join(socketDir, "two.sock")];
+    const sockets = paths.map(() => privateNet.createServer());
+    await Promise.all(sockets.map((socket, i) => new Promise<void>((resolve, reject) => {
+      socket.once("error", reject); socket.listen(paths[i], resolve);
+    })));
+    try {
+      const uuidA = "11111111-1111-4111-8111-111111111111";
+      const uuidB = "22222222-2222-4222-8222-222222222222";
+      const base = makeFocusLifecycleExec({ runtimeMode: mode === "ready" ? "ready" : "cold" });
+      let client: CmuxClient;
+      let created = false, demandCompleted = false, injected = false;
+      let occupant = uuidA;
+      const rows: Array<{ args: string[]; path: string | null; stale: boolean; metadata?: unknown }> = [];
+      const exec = vi.fn(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+        // Record the environment at dispatch, before the pending reply changes
+        // future routing. A later setEnv cannot make Ctrl-U retroactively stale.
+        const row = { args: [...args], path: env?.CMUX_SOCKET_PATH ?? null,
+          stale: client.currentSocketPath() !== paths[0] || occupant !== uuidA };
+        rows.push(row);
+        let result = await base.exec(cmd, args.map(arg => arg.replaceAll(uuidA, "surface:new")));
+        if (args.includes("new-split") || args.includes("new-surface")) {
+          created = true;
+          if (identity === "uuid") result = { ...result,
+            stdout: JSON.stringify({ ...JSON.parse(result.stdout), surface_id: uuidA }) };
+        }
+        if (args.includes("send-key") && args.includes("ctrl-u")) demandCompleted = true;
+        if (created && args.includes("list-pane-surfaces")) {
+          const data = JSON.parse(result.stdout);
+          data.surfaces = data.surfaces.map((surface: any) => surface.ref === "surface:new" && identity === "uuid"
+            ? { ...surface, id: occupant } : surface);
+          result = { ...result, stdout: JSON.stringify(data) };
+        }
+        if (created && args.includes("debug-terminals")) {
+          (row as { metadata?: unknown }).metadata = JSON.parse(result.stdout);
+          if (!injected && transition !== "stable" && (mode === "ready" || demandCompleted)) {
+            // Return a ready snapshot from A after losing its current identity.
+            // This is the awaited reply boundary in initializeNewSurfaceRuntime.
+            if (transition === "observer-unavailable") client.setEnv({});
+            if (transition === "observer-replaced") client.setEnv({ CMUX_SOCKET_PATH: paths[1] });
+            if (transition === "uuid-reuse") occupant = uuidB;
+            injected = true;
+          }
+        }
+        return result;
+      }) as unknown as ExecFn;
+      client = new CmuxClient({ exec, bin: "cmux", env: { CMUX_SOCKET_PATH: paths[0] } });
+      const opts: CreateServerOptions = { client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        lifecycleInitializer: async () => {} };
+      const context = createServerContext(opts); serverContexts.push(context);
+      expect(context.surfaceObserverEpoch).toBeTruthy();
+      const server = createServer({ ...opts, context });
+      const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+        type: "terminal", workspace: "workspace:2",
+      }, {}));
+      const mutations = rows.filter(row => row.args.some(arg =>
+        ["new-split", "new-surface", "select-workspace", "surface.focus", "close-surface", "send-key"].includes(arg)));
+      const evidence = { mode, identity, transition, injected, demandCompleted,
+        initialPath: paths[0], finalPath: client.currentSocketPath(), result, rows, mutations };
+      if (process.env.BARE_F1_OUTPUT_DIR) writeFileSync(
+        join(process.env.BARE_F1_OUTPUT_DIR, `${mode}-${identity}-${transition}.json`), JSON.stringify(evidence, null, 2) + "\n");
+      expect(injected, JSON.stringify(evidence)).toBe(transition !== "stable");
+      expect(demandCompleted).toBe(mode === "demand");
+      expect(rows.filter(row => row.args.includes("debug-terminals")).length).toBe(mode === "demand" ? 2 : 1);
+      expect(mutations.filter(row => row.stale), JSON.stringify(evidence)).toEqual([]);
+      expect(mutations.filter(row => row.args.includes("close-surface") || row.args.includes("surface.focus") || row.args.includes("select-workspace"))).toEqual([]);
+      const demand = mutations.filter(row => row.args.includes("send-key"));
+      expect(demand.length).toBe(mode === "demand" ? 1 : 0);
+      if (demand.length) {
+        expect(demand[0].path).toBe(paths[0]);
+        expect(demand[0].args).toContain(identity === "uuid" ? uuidA : "surface:new");
+      }
+      if (transition === "stable") expect(result, JSON.stringify(evidence)).toMatchObject({ ok: true });
+      else {
+        expect(result, JSON.stringify(evidence)).toMatchObject({ ok: false });
+        expect(result.error).toMatch(transition === "uuid-reuse" ? /UUID binding changed/ : /creation observer changed/);
+      }
+    } finally {
+      await Promise.allSettled(serverContexts.map(context => context.lifecycleStartPromise ?? Promise.resolve()));
+      for (const context of serverContexts.splice(0)) context.dispose();
+      await Promise.all(sockets.map(socket => new Promise<void>(resolve => socket.close(() => resolve()))));
+      rmSync(socketDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { mode: "empty", workspace: "workspace:2", focusNeeded: true },
+    { mode: "empty", workspace: "workspace:1", focusNeeded: true },
+    { mode: "unsupported", workspace: "workspace:2", focusNeeded: true },
+    { mode: "cold", workspace: "workspace:2", focusNeeded: false },
+    { mode: "ready", workspace: "workspace:2", focusNeeded: false },
+    { mode: "focus-only", workspace: "workspace:2", focusNeeded: true },
+  ] as const)("resume runtime witness $mode $workspace", async ({ mode, workspace, focusNeeded }) => {
+    const agentId = "cmuxlayerCodex-runtime-witness";
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: workspace,
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId }, {}));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, agent_id: agentId, surface_id: "surface:new" });
+    const focused = focusSurfaceIdx(calls, "surface:new");
+    expect(focused >= 0).toBe(focusNeeded);
+    const read = calls.findIndex(a => a.includes("read-screen") && a.includes("surface:new"));
+    const demand = calls.findIndex(a => a.includes("send-key") && a.includes("ctrl-u"));
+    if (focusNeeded) {
+      expect(read).toBeGreaterThan(focused);
+      if (workspace === "workspace:2") expect(selectIdx(calls, workspace)).toBeLessThan(focused);
+      expect(focusSurfaceIdx(calls, "surface:origin")).toBeGreaterThan(read);
+    } else {
+      expect(calls.some(a => a.includes("select-workspace"))).toBe(false);
+      if (mode === "cold") expect(read).toBeGreaterThan(demand);
+      else expect(demand).toBe(-1);
+    }
+  });
+
+  it.each(["failure", "user-move", "explicit-false"] as const)("resume runtime witness restoration $mode", async mode => {
+    const agentId = "cmuxlayerCodex-runtime-restore";
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: "empty", launchFails: mode === "failure",
+      ...(mode === "user-move" ? { moveFocusDuringReadinessTo: { workspace: "workspace:1", surface: "surface:user-click" } } : {}) });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId,
+      ...(mode === "explicit-false" ? { focus: false } : {}) }, {}));
+    expect(result.ok).toBe(mode === "user-move");
+    expect(focusSurfaceIdx(calls, "surface:origin") >= 0).toBe(mode === "failure");
+    if (mode === "explicit-false") {
+      expect(calls.some(a => a.includes("select-workspace") || a.includes("surface.focus"))).toBe(false);
+      expect(result.error).toMatch(/surface_runtime_not_started/);
+      expect(calls.some(a => a.includes("send"))).toBe(false);
+    }
+  });
+
+  it.each([
+    { type: "agent", mode: "empty" }, { type: "agent", mode: "cold" }, { type: "agent", mode: "ready" },
+    { type: "terminal", mode: "empty" }, { type: "terminal", mode: "cold" }, { type: "terminal", mode: "ready" },
+  ] as const)("new terminal runtime witness $type $mode", async ({ type, mode }) => {
+    const { exec, calls } = makeFocusLifecycleExec({ runtimeMode: mode });
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/resume-runtime-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({
+      type, workspace: "workspace:2", ...(type === "agent" ? { repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true } : {}),
+    }, {}));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, surface_id: "surface:new" });
+    expect(focusSurfaceIdx(calls, "surface:new") >= 0).toBe(mode === "empty");
+    expect(calls.some(a => a.includes("ctrl-u"))).toBe(mode === "cold");
+    expect(focusSurfaceIdx(calls, "surface:origin") >= 0).toBe(mode === "empty");
+  });
+
+  it.each([false, true])("scoped reviewer observer fallback race changed=%s", async change => {
+    const agentId = "cmuxlayerCodex-reviewer-epoch";
+    let epoch = "review-observer:1";
+    let demanded = false;
+    let switched = false;
+    const mutationEpochs: Array<{ args: string[]; epoch: string }> = [];
+    new StateManager(TEST_DIR).writeState(makeServerAgentRecord({ agent_id: agentId,
+      state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex" }));
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only" });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send-key") && args.includes("ctrl-u")) demanded = true;
+      if (change && demanded && args.includes("identify") && !switched) {
+        epoch = "review-observer:2";
+        switched = true;
+      }
+      if (args.includes("select-workspace") || args.includes("surface.focus")) mutationEpochs.push({ args, epoch });
+      return base.exec(cmd, args);
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/review-epoch-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "review-observer-owner",
+      surfaceObserverEpochProvider: () => epoch });
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler({ resume_agent_id: agentId }, {}));
+    if (change) {
+      expect(switched).toBe(true);
+      expect(result.ok, JSON.stringify(result)).toBe(false);
+      expect(result.error).toMatch(/surface observer changed/i);
+      expect(mutationEpochs.filter(row => row.epoch === "review-observer:2"), JSON.stringify(mutationEpochs)).toEqual([]);
+    } else {
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, agent_id: agentId });
+      expect(mutationEpochs.length).toBeGreaterThan(0);
+    }
+  });
+
+  it.each(
+    (["resume", "managed"] as const).flatMap(caller =>
+      (["placement-read", "selected-read", "restore-success", "restore-failure", "restore-ready-read", "restore-before-failure"] as const).flatMap(phase =>
+        [false, true].map(change => ({ caller, phase, change })))),
+  )("observer focus ratchet $caller $phase changed=$change", async ({ caller, phase, change }) => {
+    const agentId = "cmuxlayerCodex-observer-ratchet";
+    if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
+      agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex",
+    }));
+    let epoch = "ratchet:1";
+    let demanded = false;
+    let selected = false;
+    let launched = false;
+    let switched = false;
+    const mutations: Array<{ args: string[]; epoch: string }> = [];
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only", launchFails: phase.includes("failure") });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send-key") && args.includes("ctrl-u")) demanded = true;
+      if (args.includes("select-workspace")) selected = true;
+      if (args.includes("send")) launched = true;
+      const atPhase = phase === "placement-read" ? demanded && !selected
+        : phase === "selected-read" ? selected && !launched
+        : phase === "restore-success" || phase === "restore-failure" ? launched : false;
+      if (change && args.includes("identify") && atPhase && !switched) {
+        epoch = "ratchet:2";
+        switched = true;
+      }
+      if (args.includes("select-workspace") || args.includes("surface.focus") || args.includes("close-surface")) {
+        mutations.push({ args, epoch });
+      }
+      try {
+        return await base.exec(cmd, args);
+      } finally {
+        // Reconnect during render, or before failure unwinds into cleanup.
+        if (change && !switched && (
+          (phase === "restore-ready-read" && launched && args.includes("read-screen")) ||
+          (phase === "restore-before-failure" && args.includes("send"))
+        )) {
+          epoch = "ratchet:2";
+          switched = true;
+        }
+      }
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => epoch });
+    const args = caller === "resume" ? { resume_agent_id: agentId }
+      : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    if (change) {
+      expect(switched, JSON.stringify(result)).toBe(true);
+      expect(mutations.filter(row => row.epoch === "ratchet:2"), JSON.stringify(mutations)).toEqual([]);
+    }
+    const rejectedFocus = change && (phase === "placement-read" || phase === "selected-read");
+    expect(result.ok, JSON.stringify(result)).toBe(!rejectedFocus && !phase.includes("failure"));
+    if (rejectedFocus) expect(result.error).toMatch(/surface observer changed/i);
+    if (phase.includes("failure")) expect(result.error).toMatch(/fixture launch failed/);
+    const originRestores = mutations.filter(row => row.args.includes("surface.focus") && row.args.some(a => a.includes("surface:origin")));
+    expect(originRestores.length, JSON.stringify(mutations)).toBe(change ? 0 : 1);
+  });
+
+  it.each(
+    (["resume", "managed"] as const).flatMap(caller => [false, true].map(failure => ({ caller, failure }))),
+  )("observer focus ratchet user movement $caller failure=$failure", async ({ caller, failure }) => {
+    const agentId = "cmuxlayerCodex-observer-user";
+    if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
+      agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
+      cli_session_id: FIXTURE_SESSIONS[0], cli: "codex", launcher_name: "brainlayerCodex",
+    }));
+    let launched = false;
+    let moved = false;
+    const base = makeFocusLifecycleExec({ runtimeMode: "focus-only", launchFails: failure });
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (args.includes("send")) launched = true;
+      if (launched && args.includes("identify")) {
+        moved = true;
+        return { stdout: JSON.stringify({ focused: { workspace_ref: "workspace:1", surface_ref: "surface:user-click" } }), stderr: "" };
+      }
+      return base.exec(cmd, args);
+    }) as unknown as ExecFn;
+    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
+    client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
+    const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => "ratchet:1" });
+    const args = caller === "resume" ? { resume_agent_id: agentId }
+      : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
+    const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    expect(moved).toBe(true);
+    expect(result.ok, JSON.stringify(result)).toBe(!failure);
+    if (failure) expect(result.error).toMatch(/fixture launch failed/);
+    expect(focusSurfaceIdx(base.calls, "surface:origin")).toBe(-1);
+  });
 
   it("spawn_agent restores the prior surface after a same-workspace spawn", async () => {
     const { exec, calls } = makeFocusLifecycleExec();

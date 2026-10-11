@@ -2069,6 +2069,11 @@ describe("AgentEngine", () => {
         },
       );
 
+      Object.assign(mockClient, { listTerminalMetadata: vi.fn().mockImplementation(async () => ({
+        terminals: liveSurfaces.map(surface => ({ surface_id: surface.id, surface_ref: surface.ref,
+          runtime_surface_ready: true, ghostty_surface_ptr: "0x123" })),
+      })) });
+
       await Promise.all([
         engine.spawnAgent({
           repo: "brainlayer",
@@ -4859,7 +4864,10 @@ describe("AgentEngine", () => {
       { metadata: false, focus: false, expected: false },
       { metadata: false, focus: true, expected: true },
     ])("resume focus policy metadata=$metadata focus=$focus", async ({ metadata, focus, expected }) => {
-      Object.assign(mockClient, { supportsSurfaceRuntimeMetadata: metadata });
+      Object.assign(mockClient, { supportsSurfaceRuntimeMetadata: metadata,
+        listTerminalMetadata: metadata ? vi.fn().mockResolvedValue({ terminals: [{
+          surface_id: "11111111-2222-4333-8444-555555555555", runtime_surface_ready: true, ghostty_surface_ptr: "0x123",
+        }] }) : undefined });
       const sessionId = "019d9aa5-93c0-7a52-9c47-9be1f7625f3e";
       stateMgr.writeState(makeRecord({
         agent_id: "agent-focus-resume",
@@ -4876,6 +4884,13 @@ describe("AgentEngine", () => {
       await engine.getRegistry().reconstitute();
       liveSurfaces = [makeSurface("surface:witness")];
 
+      if (!metadata && focus === false) {
+        await expect(engine.resumeAgent("agent-focus-resume", { focus })).rejects.toThrow(/surface_runtime_not_started/);
+        expect(mockClient.focusSurface).not.toHaveBeenCalled();
+        expect(mockClient.selectWorkspace).not.toHaveBeenCalled();
+        expect(mockClient.send).not.toHaveBeenCalled();
+        return;
+      }
       const result = await engine.resumeAgent("agent-focus-resume", { focus });
 
       expect(result.surface_id).toBe("surface:new");
