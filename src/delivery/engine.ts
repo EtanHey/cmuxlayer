@@ -173,6 +173,8 @@ import {
   enrichParsedScreen,
 } from "./surface-state.js";
 import type { CmuxServerContext, TypedDraftOwner } from "../mcp/context.js";
+import { diagnoseDeliveryOwnership } from "./ownership-diagnostic.js";
+import type { OwnershipDiagnosticDeps } from "./ownership-diagnostic.js";
 
 export function tailLines(text: string, count: number): string[] {
   return text.split(/\r?\n/).filter(Boolean).slice(-count);
@@ -4410,6 +4412,13 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
   };
 
   return {
+    diagnoseOwnership: (id: string, readers: Pick<OwnershipDiagnosticDeps, "getReceipt" | "getTarget">) =>
+      diagnoseDeliveryOwnership(id, {
+        ...readers, resolveCaller: resolveCurrentCallerAgent,
+        getFingerprintTarget: target => resolveLatestSurfaceAgentRecord(stateMgr, target.surface_id, target.surface_uuid),
+        getBootInstance: id => stateMgr.readState(id)?.boot_instance_id,
+        owners: typedDraftOwners, baselines: deliveryPreTypeScreens,
+      }),
     callerOwnsTypedDraft,
     retryPendingClaudeDraft,
     settleVerifiedDeliveryDraft,

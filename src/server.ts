@@ -979,6 +979,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
   // ownership, surface-write locks, boot-prompt and background delivery) lives
   // in src/delivery/engine.ts; these are its bindings, names unchanged.
   const {
+    diagnoseOwnership,
     callerOwnsTypedDraft,
     retryPendingClaudeDraft,
     settleVerifiedDeliveryDraft,
@@ -3815,6 +3816,10 @@ export function createServer(opts?: CreateServerOptions): McpServer {
 
     // wait_for (src/mcp/tools/send.ts, CX-3b S10b)
     registerWaitForTool(server, {
+      diagnoseOwnership: id => diagnoseOwnership(id, {
+        getReceipt: id => engine.getDeliveryReceipt(id),
+        getTarget: id => engine.getAgentState(id),
+      }),
       collectSurfaceTopology,
       engine,
       evaluateServerAgentHealth,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { installToolRegistration } from "../src/mcp/registration.js";
 import { ok } from "../src/mcp/tool-result.js";
@@ -24,6 +24,19 @@ function install(client: Record<string, unknown> = {}) {
 }
 
 describe("installToolRegistration (mcp/registration.ts)", () => {
+  it("ownership diagnostics never await lifecycle scans; ordinary waits still gate", async () => {
+    const server = new McpServer({ name: "diagnostic-gate", version: "1" });
+    const lifecycleGate = vi.fn(async () => { throw new Error("not initialized"); });
+    const registration = installToolRegistration(server, { client: {}, palette: null,
+      resolveCallerAgentId: () => null, lifecycleGate });
+    server.tool("wait_for", "fixture", async () => ok({ diagnostic: "ownership" }));
+    const handler = registration.toolHandlersByName.get("wait_for")!;
+    expect((await handler({ diagnostic: "ownership", delivery_id: "fixture" }, {})).isError).not.toBe(true);
+    expect(lifecycleGate).not.toHaveBeenCalled();
+    expect((await handler({ delivery_id: "fixture" }, {})).isError).toBe(true);
+    expect(lifecycleGate).toHaveBeenCalledOnce();
+    await server.close();
+  });
   it("round 1 a mixed skipped batch stays lean on the registered MCP path", async () => {
     const { server, registration } = install();
     const skipped = { agent_id: "paused", skipped: "paused" };

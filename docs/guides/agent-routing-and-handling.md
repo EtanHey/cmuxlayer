@@ -28,6 +28,22 @@ boot whose Return was never dispatched, with recovery scoped to the draft owner.
 
 ## Tool Choice
 
+`wait_for({delivery_id:"<original-id>", diagnostic:"ownership"})` immediately
+reports local ownership predicates without waiting, reading the pane, sending
+input, binding a boot token, or updating a receipt. Caller attribution must
+resolve normally; there is no caller override. Receipt identity follows the
+existing delivery wait policy, but owner evidence is limited to the current
+caller's entries. `owner_present:false` means no entry was found for that
+caller/key or delivery ID; it says nothing about another caller's token.
+Predicates distinguish `false`, `unavailable`, and `not_applicable`. A changed
+snapshot returns `uncertain`. Boot first-capture compatibility is reported
+without pinning the session or boot instance. Route data is retained local
+metadata, not a live topology/composer check. Ownership evidence is bounded,
+in memory, and can disappear with context disposal or eviction; the diagnostic
+cannot identify why historical evidence was lost. `ownership_match:true` only
+models the duplicate ownership gate; it never authorizes Return or proves that
+this receipt can be recovered. No delivery-ID recovery operation is provided.
+
 | Need | Use | Avoid |
 | --- | --- | --- |
 | Find available agents | `list_agents` | `list_surfaces` plus title guessing |

@@ -335,6 +335,9 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
       results: z.array(z.record(z.unknown())).optional(),
       watch: z.record(z.unknown()).optional(),
       timed_out: z.boolean().optional(),
+      diagnostic: z.literal("ownership").optional(),
+      ownership_match: z.union([z.boolean(), z.enum(["unavailable", "not_applicable"])]).optional(),
+      predicates: z.record(z.union([z.boolean(), z.enum(["unavailable", "not_applicable"])] )).optional(),
     })
     .passthrough(),
   control_health: z

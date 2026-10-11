@@ -77,8 +77,10 @@ import type {
   SubmitKeyVerificationReason,
 } from "../../delivery/receipts.js";
 import type { ParsedScreenResult } from "../../types.js";
+import type { diagnoseDeliveryOwnership } from "../../delivery/ownership-diagnostic.js";
 
 export interface WaitForToolDeps {
+  diagnoseOwnership: (id: string) => ReturnType<typeof diagnoseDeliveryOwnership>;
   collectSurfaceTopology: (workspace?: string) => Promise<SurfaceTopologySnapshot | null>;
   engine: AgentEngine;
   evaluateServerAgentHealth: ServerAgentHealthEvaluator;
@@ -170,8 +172,9 @@ export function registerWaitForTool(
   // 12. wait_for
   server.tool(
     "wait_for",
-    "Block until one agent_id or every agent in ids reaches a target registry state and return health. Defaults to waiting for completion (`done`).",
+    "Block until one agent_id or every agent in ids reaches a target registry state and return health. Defaults to waiting for completion (`done`). With delivery_id and diagnostic:ownership, return immediate read-only local ownership predicates; no pane read, wait, input, ownership binding or receipt update. Requires resolved caller attribution and reveals only that caller's owner evidence. This does not prove live recovery eligibility.",
     {
+      diagnostic: z.literal("ownership").optional().describe("With delivery_id only: inspect this caller's retained ownership predicates without changing state"),
       watch: WatchSpecSchema.optional().describe(
         "Declared WatchSpec alternative to agent_id/ids",
       ),
@@ -244,6 +247,14 @@ export function registerWaitForTool(
           : null;
       progressTimer?.unref?.();
       try {
+        if (args.diagnostic) {
+          if (!args.delivery_id || args.watch || args.agent_id || args.ids || args.mine ||
+              args.target_state || args.condition || args.report_path || args.done_marker) {
+            throw new Error("wait_for diagnostic requires delivery_id only; incompatible with agent, watch, state and report selectors");
+          }
+          const data = deps.diagnoseOwnership(args.delivery_id);
+          return okFormatted(formatOk("wait_for", data), data);
+        }
         if (args.watch) {
           if (args.agent_id || args.ids || args.mine || args.delivery_id) {
             throw new Error(

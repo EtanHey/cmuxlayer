@@ -391,7 +391,11 @@ export function installToolRegistration(
                 ? (handlerArgs[0] as Record<string, unknown>)
                 : {};
             const verbose = rawArgs.verbose === true;
-            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString)) {
+            // The ownership diagnostic reads retained local evidence even
+            // while lifecycle initialization is unavailable. Never wait for
+            // its topology scans; the handler refuses incompatible selectors.
+            const ownershipDiagnostic = toolNameString === "wait_for" && rawArgs.diagnostic === "ownership";
+            if (lifecycleGate && !LIFECYCLE_FREE_TOOLS.has(toolNameString) && !ownershipDiagnostic) {
               try {
                 await lifecycleGate();
               } catch (error) {
