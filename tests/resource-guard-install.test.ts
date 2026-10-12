@@ -32,14 +32,28 @@ it('dry run is read-only and fresh defaults gate the host duties', () => {
 });
 it('migrates knobs and execute flag, archives all four old plists, and is idempotent', () => {
   const f = fixture();
-  for (const label of legacyLabels) {
-    writeFileSync(join(f.agents, label + '.plist'), JSON.stringify({Label:label, ProgramArguments:['/old/reaper', '--execute'], EnvironmentVariables:{[label.includes('sampler') ? 'CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS':'REAPER_MIN_AGE_SECONDS']:'3600'}}));
+  const knobs = [{REAPER_MIN_AGE_SECONDS:'1800'}, {CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS:'3600'},
+    {CMUX_MEM_WATCHDOG_THRESHOLD_GB:'12'}, {HEAVY_ML_SWAP_DANGER_PCT:'96'}];
+  for (const [index,label] of legacyLabels.entries()) {
+    writeFileSync(join(f.agents, label + '.plist'), JSON.stringify({Label:label, ProgramArguments:['/old/reaper', '--execute'], EnvironmentVariables:knobs[index]}));
     f.loaded.add(label);
   }
-  installGuard(f.root, true, f);
+  const run = (cmd:string,args:string[]) => {
+    if (args[0] === 'bootstrap' && args[2].endsWith('com.cmuxlayer.resource-guard.plist')) {
+      expect(f.loaded.has(legacyLabels[3])).toBe(false);
+    }
+    return f.run(cmd,args);
+  };
+  installGuard(f.root, true, {...f,run});
   const config = JSON.parse(readFileSync(join(f.home, '.config/cmuxlayer/resource-guard.json'), 'utf8'));
   expect(config.watchdog).toBe(true); expect(config.guardian).toBe(true); expect(config.env.REAPER_DRY_RUN).toBe('0');
   expect(config.env.CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS).toBe('3600');
+  expect(config.env.REAPER_MIN_AGE_SECONDS).toBe('1800');
+  expect(config.env.CMUX_MEM_WATCHDOG_THRESHOLD_GB).toBe('12');
+  expect(config.env.HEAVY_ML_SWAP_DANGER_PCT).toBe('96');
+  const guardianStop = f.calls.findIndex(call => call.includes('bootout') && call.endsWith('/' + legacyLabels[3]));
+  const guardStart = f.calls.findIndex(call => call.includes('bootstrap') && call.endsWith('com.cmuxlayer.resource-guard.plist'));
+  expect(guardianStop).toBeGreaterThanOrEqual(0); expect(guardianStop).toBeLessThan(guardStart);
   for (const label of legacyLabels) expect(existsSync(join(f.agents, label + '.plist'))).toBe(false);
   const original = JSON.stringify(config); installGuard(f.root, true, f);
   expect(JSON.stringify(JSON.parse(readFileSync(join(f.home, '.config/cmuxlayer/resource-guard.json'), 'utf8')))).toBe(original);
