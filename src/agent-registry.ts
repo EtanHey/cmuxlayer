@@ -1,3 +1,4 @@
+import { isManagedSurfaceProvenance } from "./agent-types.js";
 /**
  * In-memory agent registry.
  * Reconstituted from state files + cmux surface list.
@@ -452,7 +453,7 @@ function patchForRepairCandidate(
     seat_identity_status: candidate.seat.seat_identity_status,
     seat_identity_error: candidate.seat.seat_identity_error,
     role:
-      record.surface_provenance === "cmuxlayer_spawn" && record.role
+      isManagedSurfaceProvenance(record.surface_provenance) && record.role
         ? record.role
         : candidate.role,
   };
@@ -1348,7 +1349,7 @@ export class AgentRegistry {
   ): Promise<void> {
     // Full topology, not a screen scan's omission, proves the old seat absent.
     if (!snapshot.ownerId || !snapshot.epoch || !this.list().some(record =>
-      record.surface_provenance === "cmuxlayer_spawn" && record.cli_session_id)) return;
+      isManagedSurfaceProvenance(record.surface_provenance) && record.cli_session_id)) return;
     let surfaces: readonly CmuxSurface[];
     try { surfaces = await this.surfaceProvider(); } catch { return; }
     if (!this.isObserverSnapshotCurrent(snapshot) || surfaces.length === 0 ||
@@ -1365,7 +1366,7 @@ export class AgentRegistry {
           auto.surface_observer_id !== snapshot.ownerId || auto.workspace_id !== entry.workspace_id ||
           auto.cli !== entry.cli || auto.boot_prompt_pending || auto.blocked_on_prompt))) continue;
       const matches = this.list().filter(record => !isAutoAgentId(record.agent_id) &&
-        record.surface_provenance === "cmuxlayer_spawn" && record.cli_session_id && record.role &&
+        isManagedSurfaceProvenance(record.surface_provenance) && record.cli_session_id && record.role &&
         record.surface_observer_id === snapshot.ownerId &&
         (record.workspace_id ?? record.previous_surface_binding?.workspace_id) === entry.workspace_id &&
         (!record.previous_surface_binding || record.previous_surface_binding.observer_id === snapshot.ownerId) &&
@@ -1745,7 +1746,7 @@ export class AgentRegistry {
     ) {
       patch.surface_uuid = discoveredEntry.surface_uuid;
     }
-    if (record.surface_provenance !== "cmuxlayer_spawn" && explicitRole && record.role !== explicitRole) {
+    if (!isManagedSurfaceProvenance(record.surface_provenance) && explicitRole && record.role !== explicitRole) {
       patch.role = explicitRole;
     }
     const observerId = this.getObserverId();
@@ -2732,7 +2733,7 @@ export class AgentRegistry {
     const hasManagedContinuity = Boolean(
       continuityRecord?.cli_session_id ||
         continuityRecord?.parent_agent_id ||
-        continuityRecord?.surface_provenance === "cmuxlayer_spawn",
+        isManagedSurfaceProvenance(continuityRecord?.surface_provenance),
     );
     return {
       agent_id: candidate.agentId,

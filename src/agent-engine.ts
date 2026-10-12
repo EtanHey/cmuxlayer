@@ -1,3 +1,4 @@
+import { isManagedSurfaceProvenance } from "./agent-types.js";
 import { adoptManagedSession, type AdoptSessionRequest, type AdoptionOptions } from "./session-adoption.js";
 /**
  * AgentEngine — composable internals for agent lifecycle management.
@@ -2020,7 +2021,7 @@ export class AgentEngine {
   ): AgentRecord {
     const identity = this.normalizeCapturedSessionIdentity(capturedIdentity);
     const hasCapturedProcessEvidence = Boolean(
-      agent.surface_provenance === "cmuxlayer_spawn" &&
+      isManagedSurfaceProvenance(agent.surface_provenance) &&
       identity.pid &&
       identity.pid_registered_at,
     );
@@ -3598,7 +3599,7 @@ export class AgentEngine {
       return `${agent.surface_uuid.toLowerCase()}:${sessionId}`;
     };
     const eligibleForTrigger = (agent: AgentRecord): boolean => {
-      if (agent.surface_provenance !== "cmuxlayer_spawn") {
+      if (!isManagedSurfaceProvenance(agent.surface_provenance)) {
         return trigger !== "spawn" &&
           !TERMINAL_STATES.has(agent.state) &&
           selfRegistrationId(agent) !== null;
