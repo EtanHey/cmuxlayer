@@ -16,16 +16,17 @@ function atomic(file: string, text: string): void {
   writeFileSync(staged, text, {mode:0o600}); renameSync(staged, file);
 }
 
-export function installGuard(inputRoot: string, install: boolean, options: {home?: string; run?: Run} = {}): string {
+export function installGuard(inputRoot: string, install: boolean, options: {home?: string; run?: Run; warn?: (message:string)=>void} = {}): string {
   const root = realpathSync(inputRoot), home = options.home ?? homedir(), run = options.run ?? exec;
   if (!/\/Cellar\/cmuxlayer\/[^/]+\/libexec$/.test(root)) throw new Error('resource guard requires an installed Homebrew Cellar keg');
-  if (realpathSync(run(resolve(root,'../../../../bin/brew'),['--prefix','cmuxlayer']).trim()) !== dirname(root)) throw new Error('resource guard must use the active installed Homebrew keg');
-  const binary = join(root, '../bin/cmux-resource-guard'); accessSync(binary, constants.X_OK);
+  const prefix = run(resolve(root,'../../../../bin/brew'),['--prefix','cmuxlayer']).trim();
+  if (!prefix.endsWith('/opt/cmuxlayer') || realpathSync(prefix) !== dirname(root)) throw new Error('resource guard must use the active installed Homebrew keg');
+  const binary = join(prefix, 'bin/cmux-resource-guard'); accessSync(binary, constants.X_OK);
   accessSync(join(root, 'dist/resource-guard.js'));
   const agents = join(home, 'Library/LaunchAgents'), target = join(agents, label + '.plist');
   const configPath = join(home, '.config/cmuxlayer/resource-guard.json');
   const originalConfig = existsSync(configPath) ? readFileSync(configPath, 'utf8') : undefined;
-  const config: Config = originalConfig !== undefined ? JSON.parse(originalConfig) : {watchdog:false, guardian:false, env:{}};
+  const config: Config = originalConfig !== undefined ? JSON.parse(originalConfig) : {env:{}};
   if (!config || typeof config !== 'object' || Array.isArray(config) ||
       config.watchdog !== undefined && typeof config.watchdog !== 'boolean' ||
       config.guardian !== undefined && typeof config.guardian !== 'boolean' ||
@@ -44,27 +45,33 @@ export function installGuard(inputRoot: string, install: boolean, options: {home
       }
     }
     if (old === legacyLabels[0] && data.ProgramArguments?.includes('--execute')) env.REAPER_DRY_RUN = '0';
+    if (old === legacyLabels[1]) env.CMUX_RAM_SAMPLER_LOG_DIR ??= join(home,'Library/Logs/cmux-ram-sampler');
   }
   config.env = {...env, ...config.env}; // Explicit existing guard config wins on reruns.
+  config.env.REAPER_DRY_RUN ??= '1';
   const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${label}</string>\n<key>ProgramArguments</key><array><string>${xml(binary)}</string></array>\n<key>EnvironmentVariables</key><dict><key>CMUX_RESOURCE_GUARD_CONFIG</key><string>${xml(configPath)}</string></dict>\n<key>StartInterval</key><integer>60</integer>\n</dict></plist>\n`;
   if (!install) return plist;
   const domain = `gui/${process.getuid!()}`;
   run('launchctl', ['print', domain]); // Refuse a missing/inaccessible GUI domain.
   const loaded = (name: string) => { try { run('launchctl',['print',`${domain}/${name}`]); return true; } catch { return false; } };
   for (const old of legacyLabels) if (!legacy.includes(old) && loaded(old)) throw new Error(`loaded legacy job lacks its plist: ${old}`);
-  if (originalConfig === undefined) { config.watchdog = loaded(legacyLabels[2]); config.guardian = loaded(legacyLabels[3]); }
+  const originallyLoaded = legacy.filter(loaded);
+  for (const [key,old] of [['watchdog',legacyLabels[2]],['guardian',legacyLabels[3]]] as const) {
+    if (config[key] === undefined) config[key] = originallyLoaded.includes(old);
+    else if (config[key] === false && originallyLoaded.includes(old))
+      (options.warn ?? console.warn)(`${key} disabled by explicit false despite loaded legacy duty ${old}`);
+  }
   mkdirSync(agents, {recursive:true});
   const staged = target + '.staged'; writeFileSync(staged, plist, {mode:0o600});
   try { run('plutil',['-lint',staged]); } finally { rmSync(staged); }
   const originalPlist = existsSync(target) ? readFileSync(target,'utf8') : undefined;
-  const stopped: string[] = [], previouslyLoaded = loaded(label);
+  const previouslyLoaded = loaded(label);
   let newStarted = false;
   const moved: [string,string][] = [];
   try {
     for (const name of [...legacy, label]) {
       if (loaded(name)) {
         run('launchctl',['bootout',`${domain}/${name}`]);
-        stopped.push(name);
         if (loaded(name)) throw new Error(`job still loaded after bootout: ${name}`);
       }
     }
@@ -84,19 +91,26 @@ export function installGuard(inputRoot: string, install: boolean, options: {home
     const restore = (operation: () => void) => { try { operation(); } catch (e) { rollback.push(String(e)); } };
     for (const [from,to] of moved.reverse()) restore(() => renameSync(to,from));
     if (newStarted || loaded(label)) restore(() => { run('launchctl',['bootout',`${domain}/${label}`]); });
+    if (loaded(label)) {
+      rollback.push('new guard still loaded; legacy jobs left stopped; replacement config/plist retained');
+      throw new Error(`${String(error)}; rollback failed: ${rollback.join('; ')}`);
+    }
     restore(() => originalConfig === undefined ? rmSync(configPath,{force:true}) : atomic(configPath,originalConfig));
     restore(() => originalPlist === undefined ? rmSync(target,{force:true}) : atomic(target,originalPlist));
-    for (const name of stopped) {
-      if (name !== label || previouslyLoaded && originalPlist) restore(() => { run('launchctl',['bootstrap',domain,join(agents,name + '.plist')]); });
+    for (const name of originallyLoaded) {
+      if (!loaded(name)) restore(() => { run('launchctl',['bootstrap',domain,join(agents,name + '.plist')]); });
     }
+    if (previouslyLoaded && originalPlist && originallyLoaded.length === 0)
+      restore(() => { run('launchctl',['bootstrap',domain,target]); });
     throw new Error(`${String(error)}${rollback.length ? '; rollback failed: ' + rollback.join('; ') : '; previous jobs/config restored'}`);
   }
-  return plist;
+  const reaper = ['0','false','no'].includes(config.env.REAPER_DRY_RUN.trim().toLowerCase()) ? 'execute' : 'dry-run';
+  return `installed ${label}; watchdog=${config.watchdog ? 'on' : 'off'} guardian=${config.guardian ? 'on' : 'off'} sampler=on reaper=${reaper}; legacy plists archived`;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? '--dry-run';
   if (!['--dry-run','--install'].includes(mode)) throw new Error('usage: install-mcp-reaper.sh --resource-guard [--dry-run|--install]');
   const plist = installGuard(resolve(dirname(fileURLToPath(import.meta.url)), '..'), mode === '--install');
-  console.log(mode === '--install' ? 'installed com.cmuxlayer.resource-guard; legacy plists archived' : plist);
+  console.log(plist);
 }

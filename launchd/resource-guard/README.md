@@ -22,12 +22,18 @@ reclaims idle backfills and kills unprotected runaways under memory danger. Set
 `CMUX_MEM_WATCHDOG_DRY_RUN=1` / `HEAVY_ML_GUARD_ENABLE_KILL=0` for observation only.
 
 ```json
-{"watchdog":false,"guardian":false,"env":{"REAPER_DRY_RUN":"1"}}
+{"env":{}}
 ```
+
+During installation, omitted duty keys inherit the loaded legacy duties. Only
+explicit `false` opts a duty out; disabling a loaded legacy duty prints a warning.
+The sample above inherits migration settings and keeps fresh installs safe.
 
 All existing duty environment knobs remain supported under `env`; process env also
 works. `CMUX_RESOURCE_GUARD_CONFIG` selects another config file. Diagnostics and
-sampler data default to `~/Library/Logs/cmux-resource-guard/`. Output streams rotate
+sampler data default to `~/Library/Logs/cmux-resource-guard/` on fresh installs.
+Migration pins the legacy sampler default `~/Library/Logs/cmux-ram-sampler/`
+unless a configured path overrides it, preserving history and guardian samples. Output streams rotate
 at 5 MiB with one archive. Sampler JSONL and watchdog snapshots are capped after
 each invocation; when the watchdog is enabled, only its latest two timestamped
 snapshots remain. Explicit duty

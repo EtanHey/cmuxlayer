@@ -1,4 +1,4 @@
-import { accessSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { accessSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
@@ -11,21 +11,23 @@ function fixture() {
   mkdirSync(join(root, 'dist'), {recursive:true}); mkdirSync(join(root, '../bin'));
   writeFileSync(join(root, 'dist/resource-guard.js'), '');
   writeFileSync(join(root, '../bin/cmux-resource-guard'), ''); chmodSync(join(root, '../bin/cmux-resource-guard'), 0o755);
+  mkdirSync(join(home,'opt')); const opt=join(home,'opt/cmuxlayer'); symlinkSync(join(root,'..'),opt);
   const agents = join(home, 'Library/LaunchAgents'); mkdirSync(agents, {recursive:true});
   const loaded = new Set<string>(), calls: string[] = [];
   const run = (cmd: string, args: string[]) => {
     calls.push([cmd, ...args].join(' '));
-    if (cmd.endsWith('/bin/brew')) return join(root,'..');
+    if (cmd.endsWith('/bin/brew')) return opt;
     if (cmd === 'plutil' && args.includes('-convert')) return readFileSync(args.at(-1)!, 'utf8');
     if (args[0] === 'print' && args[1].split('/').length > 2) { if (!loaded.has(args[1].split('/').at(-1)!)) throw new Error('absent'); }
     if (args[0] === 'bootout') loaded.delete(args[1].split('/').at(-1)!);
     if (args[0] === 'bootstrap') loaded.add(args[2].split('/').at(-1)!.replace('.plist',''));
     return '';
   };
-  return {home, root, agents, loaded, calls, run};
+  return {home, root, opt, agents, loaded, calls, run};
 }
 it('dry run is read-only and fresh defaults gate the host duties', () => {
   const f = fixture(); const plist = installGuard(f.root, false, f);
+  expect(plist).toContain('/opt/cmuxlayer/bin/cmux-resource-guard'); expect(plist).not.toContain('/Cellar/');
   expect(plist).toContain('com.cmuxlayer.resource-guard'); expect(plist).toContain('<integer>60</integer>');
   expect(f.calls.every(call => !call.includes('launchctl'))).toBe(true);
   expect(existsSync(join(f.home, '.config/cmuxlayer/resource-guard.json'))).toBe(false);
@@ -44,7 +46,8 @@ it('migrates knobs and execute flag, archives all four old plists, and is idempo
     }
     return f.run(cmd,args);
   };
-  installGuard(f.root, true, {...f,run});
+  const success=installGuard(f.root, true, {...f,run});
+  expect(success).toContain('watchdog=on guardian=on sampler=on reaper=execute');
   const config = JSON.parse(readFileSync(join(f.home, '.config/cmuxlayer/resource-guard.json'), 'utf8'));
   expect(config.watchdog).toBe(true); expect(config.guardian).toBe(true); expect(config.env.REAPER_DRY_RUN).toBe('0');
   expect(config.env.CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS).toBe('3600');
@@ -95,7 +98,7 @@ it.skipIf(process.platform !== 'darwin')('renders XML that the real macOS plist 
   const f = fixture();
   const old = legacyLabels[0];
   writeFileSync(join(f.agents,old + '.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>' + old + '</string><key>ProgramArguments</key><array><string>reaper</string><string>--execute</string></array></dict></plist>');
-  const run = (cmd:string,args:string[]) => cmd.endsWith('/bin/brew') ? join(f.root,'..') : execFileSync(cmd,args,{encoding:'utf8'});
+  const run = (cmd:string,args:string[]) => cmd.endsWith('/bin/brew') ? f.opt : execFileSync(cmd,args,{encoding:'utf8'});
   const file = join(f.home,'preview.plist'); writeFileSync(file,installGuard(f.root,false,{...f,run}));
   expect(execFileSync('plutil',['-lint',file],{encoding:'utf8'})).toContain('OK');
 });
@@ -126,9 +129,9 @@ it.skipIf(process.platform !== 'darwin')('installed preview works through the op
   writeFileSync(join(f.root,'resource-guard-node-path'),process.execPath + '\n'); writeFileSync(join(f.root,'package.json'),'{"type":"module"}');
   writeFileSync(join(f.root,'dist/resource-guard-install.js'),ts.transpileModule(readFileSync(join(repo,'src/resource-guard-install.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
   const brew=join(f.home,'bin/brew');writeFileSync(brew,'#!/bin/sh\nprintf "%s\\n" "$BREW_TEST_PREFIX"\n');chmodSync(brew,0o755);
-  mkdirSync(join(f.home,'opt')); const opt=join(f.home,'opt/cmuxlayer'); symlinkSync(join(f.root,'..'),opt);
-  const result=spawnSync('/bin/bash',[join(opt,'libexec/scripts/install-mcp-reaper.sh'),'--resource-guard','--dry-run'],{env:{...process.env,HOME:f.home,PATH:'/usr/bin:/bin',BREW_TEST_PREFIX:join(f.root,'..')},encoding:'utf8'});
-  expect(result.status,result.stderr).toBe(0); expect(result.stdout).toContain('<integer>60</integer>');
+  const opt=f.opt;
+  const result=spawnSync('/bin/bash',[join(opt,'libexec/scripts/install-mcp-reaper.sh'),'--resource-guard','--dry-run'],{env:{...process.env,HOME:f.home,PATH:'/usr/bin:/bin',BREW_TEST_PREFIX:opt},encoding:'utf8'});
+  expect(result.status,result.stderr).toBe(0); expect(result.stdout).toContain('<integer>60</integer>'); expect(result.stdout).toContain('/opt/cmuxlayer/bin/'); expect(result.stdout).not.toContain('/Cellar/');
   expect(existsSync(join(f.home,'.config/cmuxlayer/resource-guard.json'))).toBe(false);
 });
 
@@ -140,4 +143,54 @@ it('restores moved plists and prior jobs if archival partially fails',()=>{
   try {expect(()=>installGuard(f.root,true,f)).toThrow('retained plists');} finally {Date.now=originalNow;}
   for(const old of legacyLabels.slice(0,2)){expect(existsSync(join(f.agents,old + '.plist'))).toBe(true);expect(f.loaded.has(old)).toBe(true);}
   expect(f.loaded.has('com.cmuxlayer.resource-guard')).toBe(false);
+});
+
+it.each(['throws','no-effect'])('keeps legacy guardians stopped when rollback bootout %s and the new job remains loaded',failure=>{
+  const f=fixture(), old=legacyLabels[3], newLabel='com.cmuxlayer.resource-guard', originalNow=Date.now;
+  writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(old);
+  mkdirSync(join(f.agents,'resource-guard-archive',`1234-${process.pid}`,old+'.plist'),{recursive:true});
+  const run=(cmd:string,args:string[])=>{
+    if(args[0]==='bootout' && args[1].endsWith('/'+newLabel)) {if(failure==='throws')throw new Error('rollback bootout denied');return '';}
+    return f.run(cmd,args);
+  };
+  Date.now=()=>1234;
+  try {expect(()=>installGuard(f.root,true,{...f,run})).toThrow('new guard still loaded; legacy jobs left stopped');}finally{Date.now=originalNow;}
+  expect([...f.loaded]).toEqual([newLabel]);expect(existsSync(join(f.agents,old+'.plist'))).toBe(true);
+  expect(JSON.parse(readFileSync(join(f.home,'.config/cmuxlayer/resource-guard.json'),'utf8')).guardian).toBe(true);
+  expect(f.calls.some(call=>call.includes('bootstrap') && call.endsWith(old+'.plist'))).toBe(false);
+});
+it('reconciles a legacy bootout that takes effect before throwing',()=>{
+  const f=fixture(), old=legacyLabels[3];writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(old);
+  const run=(cmd:string,args:string[])=>{if(args[0]==='bootout' && args[1].endsWith('/'+old)){f.run(cmd,args);throw new Error('bootout took effect');}return f.run(cmd,args);};
+  expect(()=>installGuard(f.root,true,{...f,run})).toThrow('previous jobs/config restored');expect([...f.loaded]).toEqual([old]);
+});
+it('derives missing duty keys from loaded legacy jobs in a partial config',()=>{
+  const f=fixture(), config=join(f.home,'.config/cmuxlayer/resource-guard.json');mkdirSync(join(f.home,'.config/cmuxlayer'),{recursive:true});writeFileSync(config,'{"env":{}}');
+  for(const old of legacyLabels.slice(2)){writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(old);}
+  installGuard(f.root,true,f);const migrated=JSON.parse(readFileSync(config,'utf8'));expect(migrated.watchdog).toBe(true);expect(migrated.guardian).toBe(true);
+});
+it('warns before explicitly opting a loaded legacy duty out',()=>{
+  const f=fixture(), old=legacyLabels[2], config=join(f.home,'.config/cmuxlayer/resource-guard.json');mkdirSync(join(f.home,'.config/cmuxlayer'),{recursive:true});writeFileSync(config,'{"watchdog":false}');
+  writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(old);const warn:string[]=[];
+  installGuard(f.root,true,{...f,warn:message=>{expect(f.calls.some(call=>call.includes('bootout'))).toBe(false);warn.push(message);}});
+  expect(warn.join(' ')).toContain('watchdog');expect(warn.join(' ')).toContain('disabled');expect(JSON.parse(readFileSync(config,'utf8')).watchdog).toBe(false);
+});
+it('preserves the legacy sampler default history and guardian sample path',async()=>{
+  const f=fixture(), history=join(f.home,'Library/Logs/cmux-ram-sampler');mkdirSync(history,{recursive:true});writeFileSync(join(history,'samples.jsonl'),'existing history');
+  for(const old of [legacyLabels[1],legacyLabels[3]]){writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(old);}
+  installGuard(f.root,true,f);const config=JSON.parse(readFileSync(join(f.home,'.config/cmuxlayer/resource-guard.json'),'utf8'));
+  expect(config.env.CMUX_RAM_SAMPLER_LOG_DIR).toBe(history);
+  const {runTick}=await import('../src/resource-guard.js');let sample:string|undefined;
+  await runTick({root:f.root,home:join(f.home,'state'),config,run:async(_duty,env)=>{sample=env.HEAVY_ML_SAMPLE_FILE;}});
+  expect(sample).toBe(join(history,'samples.jsonl'));expect(readFileSync(sample!,'utf8')).toBe('existing history');
+});
+it('reports the fresh resulting duties and dry-run reaper mode',()=>{
+  const f=fixture();expect(installGuard(f.root,true,f)).toContain('watchdog=off guardian=off sampler=on reaper=dry-run');
+});
+it('restores a prior new guard without activating an unloaded legacy guardian',()=>{
+  const f=fixture(), newLabel='com.cmuxlayer.resource-guard', old=legacyLabels[3], target=join(f.agents,newLabel+'.plist');
+  writeFileSync(target,'prior guard plist');writeFileSync(join(f.agents,old+'.plist'),JSON.stringify({Label:old}));f.loaded.add(newLabel);
+  let attempts=0;const run=(cmd:string,args:string[])=>{if(args[0]==='bootstrap' && args[2]===target && ++attempts===1)throw new Error('replacement failed');return f.run(cmd,args);};
+  expect(()=>installGuard(f.root,true,{...f,run})).toThrow('previous jobs/config restored');
+  expect([...f.loaded]).toEqual([newLabel]);expect(readFileSync(target,'utf8')).toBe('prior guard plist');
 });
