@@ -4,7 +4,7 @@
 // composer paints only its placeholder, and that Return becomes a newline. A
 // Return pressed while a turn runs queues the text as a steer message.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExecFn } from "../src/cmux-client.js";
@@ -269,8 +269,119 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       engine.getRegistry().set("other-seat", { ...engine.getRegistry().get("other-seat"), role: "worker", parent_agent_id: spawned.agent_id, collab_path: null });
       return parseToolResult(await server._registeredTools.report_to_parent.handler({ blocker }, {}));
     });
-    return { pane, exec, context, spawned, engine, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites, report };
+    return { pane, exec, context, spawned, engine, server, send, typeDraft, keyReturn, surfaceSend, readScreen, sendChunks, rawBoot, keyWrites, report };
   }
+
+  it.each(["surface-queue", "surface-pending", "agent", "background"] as const)("corrective report submission precedes actual %s dispatch and survives delayed verification", async mode => {
+    const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),
+      draft: fixture("midturn-draft-tab-to-queue"), after: mode === "surface-pending"
+        ? fixture("midturn-steer-queued").replace(/Working[^\n]*\n/, "") : fixture("midturn-steer-queued") });
+    try {
+      const id = target.spawned.agent_id;
+      const reportPath = join(testDir, "corrective-report.md");
+      writeFileSync(reportPath, "Old completion\nDONE_CORRECTIVE_REPORT\n");
+      utimesSync(reportPath, new Date(1000), new Date(1000));
+      const current = target.engine.stateMgr.readState(id)!;
+      const record = { ...current, state: "done" as const, parent_agent_id: "lead-seat",
+        report_path: reportPath, done_marker: "DONE_CORRECTIVE_REPORT",
+        report_done_notified_episode: current.report_episode_key };
+      target.engine.stateMgr.writeState(record); target.engine.getRegistry().set(id, record);
+      const baseline = statSync(reportPath).mtimeMs;
+      let beforeMutation: ReturnType<typeof target.engine.getDeliveryReceipt> = null;
+      let durableBeforeMutation: unknown;
+      const execute = target.exec.getMockImplementation();
+      target.exec.mockImplementation(async (cmd: string, args: string[], env?: NodeJS.ProcessEnv) => {
+        if (args.includes("send") || args.includes("set-buffer")) {
+          beforeMutation = target.engine.listDeliveryReceipts().find(receipt => receipt.agent_id === id && receipt.text === LIST) ?? null;
+          const receiptsPath = join(testDir, "delivery-receipts.json");
+          durableBeforeMutation = (existsSync(receiptsPath) ? JSON.parse(readFileSync(receiptsPath, "utf8")) : [])
+            .find((receipt: any) => receipt.delivery_id === beforeMutation?.delivery_id);
+        }
+        const result = await execute(cmd, args, env);
+        // The worker can finish before the transport result is persisted.
+        if (args.includes("send-key") && args.includes("return")) {
+          writeFileSync(reportPath, "Fast follow-up\nDONE_CORRECTIVE_REPORT\n");
+        }
+        return result;
+      });
+      target.pane.steerOnReturn = true;
+      const accepted = mode === "agent" ? await target.send(LIST, false, true, null)
+        : await target.surfaceSend(LIST, mode === "background", null);
+      expect(accepted, JSON.stringify(accepted)).toMatchObject({ delivery_id: expect.any(String) });
+      await vi.waitFor(() => expect(target.engine.getDeliveryReceipt(accepted.delivery_id)).toMatchObject({
+        delivery_state: mode === "surface-pending" ? "pending_verify" : "steer_pending",
+        terminal: false, submit_verified: null, typed: true, submit_dispatched: true,
+      }), { timeout: 10_000 });
+      const pending = target.engine.getDeliveryReceipt(accepted.delivery_id)!;
+      expect(beforeMutation).toMatchObject({ delivery_id: accepted.delivery_id,
+        report_submission: { mtime_ms: baseline, path: reportPath, marker: "DONE_CORRECTIVE_REPORT" } });
+      expect(durableBeforeMutation).toEqual(beforeMutation);
+      expect(pending.report_submission).toEqual(beforeMutation!.report_submission);
+      expect(pending.submission_started_at).toBe(beforeMutation!.submission_started_at);
+      expect(target.engine.stateMgr.readState(id)!.reopen_pending_at ?? null).toBeNull();
+      expect(target.pane.returns).toBe(1);
+      target.pane.frames.after = `OpenAI Codex\n${codexRows(LIST)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`;
+      await target.engine.verifyPendingDeliveries(); // Actual registered verifier, no retyping.
+      const verified = target.engine.getDeliveryReceipt(accepted.delivery_id)!;
+      expect(verified).toMatchObject({ delivery_state: "submitted", terminal: true, submit_verified: true, report_reopen_armed: true });
+      expect(verified.report_submission).toEqual(pending.report_submission);
+      expect(target.engine.stateMgr.readState(id)).toMatchObject({
+        reopen_pending_at: pending.submission_started_at, reopen_report_mtime_ms: baseline,
+      });
+      expect(statSync(reportPath).mtimeMs).toBeGreaterThan(baseline);
+      expect(statSync(reportPath).mtimeMs).toBeGreaterThanOrEqual(Date.parse(pending.submission_started_at!));
+      await target.engine.verifyPendingDeliveries();
+      expect(target.pane.returns).toBe(1);
+      expect(target.engine.getDeliveryReceipt(accepted.delivery_id)!.report_submission).toEqual(pending.report_submission);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["typed", "foreign", "unmanaged", "persistence"] as const)("corrective surface evidence preserves %s refusal and submission boundaries", async mode => {
+    const target = await setup({ empty: fixture("idle-empty"), buffered: fixture("idle-empty"),
+      draft: text => `OpenAI Codex\n${codexRows(text)}\n  GPT-6.1-Sol high · ~/repo`,
+      after: fixture("idle-submitted-working") });
+    try {
+      const id = target.spawned.agent_id;
+      const current = target.engine.stateMgr.readState(id)!;
+      const reportPath = join(testDir, "corrective-boundary.md");
+      writeFileSync(reportPath, "Old completion\nDONE_CORRECTIVE_BOUNDARY\n");
+      const record = { ...current, state: "done" as const, report_path: reportPath,
+        parent_agent_id: "lead-seat", done_marker: "DONE_CORRECTIVE_BOUNDARY" };
+      target.engine.stateMgr.writeState(record); target.engine.getRegistry().set(id, record);
+      if (mode === "foreign") target.pane.frames.empty = "OpenAI Codex\n› human draft\n  GPT-6.1-Sol high · ~/repo";
+      if (mode === "unmanaged") {
+        target.pane.extraSurfaces.push({ ref: "surface:unmanaged",
+          id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", title: "unmanaged",
+          type: "terminal", index: 3, selected: false });
+      }
+      if (mode === "persistence") vi.spyOn((target.engine as any).deliveryQueue, "persistDeliveryReceipts")
+        .mockImplementation(() => { throw new Error("injected surface evidence persistence failure"); });
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const result = mode === "unmanaged" ? parseToolResult(await runWithCallerContext(
+        { surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () => target.server._registeredTools.send_to.handler(
+          { mode: "surface", surface: "surface:unmanaged", text: LIST, press_enter: true }, {})))
+        : mode === "typed" ? await target.typeDraft(LIST, target.spawned.surface_id)
+          : await target.surfaceSend(LIST, false, null);
+      expect(target.pane.returns).toBe(mode === "unmanaged" ? 1 : 0);
+      if (mode === "foreign" || mode === "persistence") {
+        expect(result.ok).toBe(false);
+        expect(target.pane.text).toBe("");
+        if (mode === "foreign") {
+          expect(result.error_code).toBe("blocked_by_foreign_draft");
+          await target.engine.verifyPendingDeliveries();
+        } else expect(result.error).toContain("injected surface evidence persistence failure");
+      } else if (mode === "typed") {
+        expect(result).toMatchObject({ ok: true, typed: true, submit_dispatched: false });
+        expect(target.engine.getDeliveryReceipt(result.delivery_id)?.report_submission ?? null).toBeNull();
+      } else {
+        expect(result).toMatchObject({ surface: "surface:unmanaged", typed: true, submit_dispatched: true });
+        // An unmanaged draft may have an ephemeral ownership ID, but cannot
+        // own a managed report iteration or a lifecycle delivery receipt.
+        expect(target.engine.listDeliveryReceipts().filter(receipt => receipt.text === LIST)).toEqual([]);
+      }
+      expect(target.engine.stateMgr.readState(id)?.reopen_pending_at ?? null).toBeNull();
+    } finally { target.context.dispose(); }
+  }, 30_000);
 
   it.each([false, true])("P0 STEER default busy send lands at next tool boundary (targeting=%s)", async targeting => {
     const target = await setup({ empty: fixture("midturn-empty"), buffered: fixture("midturn-empty"),

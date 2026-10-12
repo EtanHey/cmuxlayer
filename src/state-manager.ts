@@ -36,6 +36,18 @@ type AgentRecordPatch = Partial<
   Omit<AgentRecord, "agent_id" | "created_at" | "updated_at" | "version" | "state">
 >;
 
+/** Managed boot or verified follow-up establishes an episode before notification. */
+function reportWorkEpisode(record: AgentRecord, bootId: string, startedAt: string): AgentRecordPatch {
+  if (!record.parent_agent_id || !record.report_path || !record.done_marker) return {};
+  return {
+    report_episode_key: `${bootId}:${record.reopen_count ?? 0}`,
+    report_episode_started_at: startedAt,
+    report_done_delivery_id: randomUUID(),
+    report_blocked_delivery_id: randomUUID(),
+    reopen_report_mtime_ms: null,
+  };
+}
+
 type PersistedAgentRecord = Omit<AgentRecord, "role"> & {
   role?: AgentRole | "ic";
 };
@@ -392,11 +404,15 @@ export class StateManager {
       assertValidTransition(current.state, toState);
     }
     const reopenedAt = verifiedReopen ? new Date().toISOString() : null;
+    const bootId = toState === "booting" ? randomUUID() : null;
 
     const updated: AgentRecord = {
       ...current,
       state: toState,
-      ...(toState === "booting" ? { boot_instance_id: randomUUID() } : {}),
+      ...(bootId ? {
+        boot_instance_id: bootId,
+        ...reportWorkEpisode(current, bootId, new Date().toISOString()),
+      } : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
       ...(extra?.error !== undefined ? { error: extra.error } : {}),
@@ -413,6 +429,9 @@ export class StateManager {
         reopen_pending_at: null,
         reopened_at: reopenedAt,
         reopen_count: (current.reopen_count ?? 0) + 1,
+        ...reportWorkEpisode({ ...current, reopen_count: (current.reopen_count ?? 0) + 1 },
+          current.boot_instance_id ?? current.created_at, current.reopen_pending_at!),
+        reopen_report_mtime_ms: current.reopen_report_mtime_ms ?? null,
         halt_last_active_at: reopenedAt,
       } : {}),
     };
@@ -500,6 +519,15 @@ export class StateManager {
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };
+
+    if (updated.boot_instance_id &&
+        (fields.report_path !== undefined || fields.done_marker !== undefined ||
+          updated.boot_instance_id !== current.boot_instance_id) &&
+        updated.report_episode_key !== `${updated.boot_instance_id}:${updated.reopen_count ?? 0}`) {
+      Object.assign(updated, reportWorkEpisode(updated, updated.boot_instance_id,
+        updated.boot_instance_id !== current.boot_instance_id ? updated.updated_at :
+          updated.report_episode_started_at ?? updated.boot_resumed_at ?? updated.created_at));
+    }
 
     const stateFile = this.stateFilePath(dirName!);
     atomicWriteJson(stateFile, updated, 2);
@@ -621,11 +649,15 @@ export class StateManager {
       throw new Error(`Agent not found: ${agentId}`);
     }
 
+    const bootId = toState === "booting" ? randomUUID() : null;
     const updated: AgentRecord = {
       ...current,
       ...fields,
       state: toState,
-      ...(toState === "booting" ? { boot_instance_id: randomUUID() } : {}),
+      ...(bootId ? {
+        boot_instance_id: bootId,
+        ...reportWorkEpisode({ ...current, ...fields }, bootId, new Date().toISOString()),
+      } : {}),
       version: current.version + 1,
       updated_at: new Date().toISOString(),
     };
