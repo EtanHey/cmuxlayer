@@ -5,5 +5,5 @@
            "-DGUARD_ENTRY=#{(libexec/"dist/resource-guard.js").to_s.dump}",
            "launchd/resource-guard/cmux-resource-guard.c", "-o", "cmux-resource-guard"
     bin.install "cmux-resource-guard"
-    libexec.install "launchd", "scripts"
+    libexec.install "launchd"
     # END cmux-resource-guard packaging

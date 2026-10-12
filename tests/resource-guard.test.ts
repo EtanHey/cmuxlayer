@@ -15,7 +15,7 @@ describe('resource guard', () => {
     for (let tick = 1; tick <= 30; tick++) {
       calls.length = 0;
       await runTick(options);
-      expect(calls).toEqual([...(tick % 30 === 0 ? ['sampler'] : []), 'watchdog', 'guardian', ...(tick % 5 === 0 ? ['reaper'] : [])]);
+      expect(calls).toEqual(['guardian', 'watchdog', ...(tick % 30 === 0 ? ['sampler'] : []), ...(tick % 5 === 0 ? ['reaper'] : [])]);
     }
   });
   it('fresh installs enable sampler and dry-run reaper; host duties require opt-in', async () => {
@@ -39,7 +39,7 @@ describe('resource guard', () => {
       run: async (name: string) => { calls.push(name); if (name === 'watchdog') throw new Error('broken'); } };
     await expect(runTick(options)).rejects.toThrow('watchdog');
     await expect(runTick(options)).rejects.toThrow('watchdog');
-    expect(calls).toEqual(['watchdog', 'guardian', 'watchdog', 'guardian']);
+    expect(calls).toEqual(['guardian', 'watchdog', 'guardian', 'watchdog']);
   });
 });
 
@@ -97,7 +97,7 @@ it('native lock prevents overlap and recovers after process termination', async 
   expect(result.status,result.stderr).toBe(0);
   const start = () => spawn(binary,[],{env:{...process.env,HOME:dir},stdio:['ignore','pipe','pipe']});
   const first = start(); await once(first.stdout,'data');
-  try { const second = spawnSync(binary,[],{env:{...process.env,HOME:dir},encoding:'utf8',timeout:2000}); expect(second.status).toBe(0); expect(second.stdout).toBe(''); }
+  try { const second = spawnSync(binary,[],{env:{...process.env,HOME:dir},encoding:'utf8',timeout:2000}); expect(second.status).toBe(0); expect(second.stdout).toBe(''); expect(readFileSync(join(dir,'Library/Logs/cmux-resource-guard/guard.lock.log'),'utf8')).toContain('lock busy'); }
   finally { first.kill('SIGTERM'); await once(first,'close'); }
   const third = start();
   try { const [out] = await once(third.stdout,'data'); expect(String(out)).toContain('ready'); }
@@ -121,3 +121,55 @@ it('caps JSONL at complete row boundaries without archive duplication', async ()
   expect(new Set(ids).size).toBe(ids.length);
   expect(ids.at(-1)).toBe(29999);
 });
+
+it('times out an uncooperative duty group while guardian runs on the same and next tick', async()=>{
+  const {mkdirSync}=await import('node:fs'); const root=scratch(), home=scratch();
+  mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
+  writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),'echo guardian-ran\n');
+  writeFileSync(join(root,'launchd/resource-guard/cmux-memory-watchdog.sh'),'trap "" TERM\nsleep 30 &\necho $! > "$CHILD_PID_FILE"\nwait\n');
+  const options={root,home,config:{watchdog:true,guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'100',CHILD_PID_FILE:join(home,'child')}}};
+  for(let tick=0;tick<2;tick++) {
+    await expect(runTick(options)).rejects.toThrow('timeout');
+    const pid=Number(readFileSync(join(home,'child'),'utf8'));
+    const {spawnSync}=await import('node:child_process');
+    const status=spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();
+    expect(status === '' || status.startsWith('Z')).toBe(true);
+  }
+  expect(readFileSync(join(home,'logs/guardian.out.log'),'utf8').trim().split('\n')).toEqual(['guardian-ran','guardian-ran']);
+  expect(readFileSync(join(home,'logs/watchdog.err.log'),'utf8')).toContain('timeout');
+},10000);
+it('recovers an invalid tick and leaves disabled watchdog snapshot directories untouched',async()=>{
+  const {mkdirSync}=await import('node:fs'); const home=scratch(), snapshots=join(home,'shared');mkdirSync(snapshots);
+  for(let i=0;i<4;i++)writeFileSync(join(snapshots,i + '.log'),'keep');writeFileSync(join(home,'tick'),'99');
+  const calls:string[]=[];await runTick({root:'/keg',home,config:{guardian:true,env:{CMUX_MEM_WATCHDOG_LOG_DIR:snapshots}},run:async name=>{calls.push(name);}});
+  expect(calls).toEqual(['guardian']);expect(readFileSync(join(home,'tick'),'utf8')).toBe('1');expect(readdirSync(snapshots)).toHaveLength(4);
+  expect(readFileSync(join(home,'logs/guard.err.log'),'utf8')).toContain('reset');
+});
+it('caps the archive of a corrupted file containing no newline',async()=>{
+  const home=scratch(), file=join(home,'samples');writeFileSync(file,Buffer.alloc(12 * 1024 * 1024,65));
+  await runTick({root:'/keg',home,config:{env:{CMUX_RAM_SAMPLER_SAMPLE_FILE:file}},run:async()=>{}});
+  expect(readFileSync(file + '.1').length).toBeLessThanOrEqual(5 * 1024 * 1024);
+});
+it('repeated CLI shutdown signals terminate detached duty descendants',async()=>{
+  const {mkdirSync,existsSync}=await import('node:fs'), {spawn,spawnSync}=await import('node:child_process'), {once}=await import('node:events'), ts=await import('typescript');
+  const root=scratch(), home=scratch();mkdirSync(join(root,'dist'));mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
+  writeFileSync(join(root,'package.json'),'{"type":"module"}');
+  const entry=join(root,'dist/resource-guard.js');writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  const pids=join(home,'pids');writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),'trap "" TERM\nsleep 5 &\necho $$ $! > "$PID_FILE"\nwait\n');
+  const config=join(home,'config');writeFileSync(config,JSON.stringify({guardian:true,env:{PID_FILE:pids}}));
+  const child=spawn(process.execPath,[entry],{env:{...process.env,HOME:home,CMUX_RESOURCE_GUARD_CONFIG:config},stdio:'ignore'}), closed=once(child,'close');
+  let owned:number[]=[], complete=false;
+  try {
+    for(let i=0;i<100 && !existsSync(pids);i++)await new Promise(r=>setTimeout(r,20));
+    owned=readFileSync(pids,'utf8').trim().split(' ').map(Number);child.kill('SIGTERM');await new Promise(r=>setTimeout(r,50));child.kill('SIGTERM');await closed;
+    for(const pid of owned){const state=spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();expect(state === '' || state.startsWith('Z')).toBe(true);}
+    complete=true;
+  } finally {
+    if (!complete) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      // The fixture expires itself even if a broken dispatcher orphaned it.
+      // Do not signal an orphan after it leaves this test's ancestry.
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+},10000);

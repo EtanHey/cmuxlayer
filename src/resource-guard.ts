@@ -29,7 +29,7 @@ function trimFile(file: string, archive = true): void {
   const currentStart = boundary < 0 ? bytes.length : boundary + 1;
   if (archive) {
     const start = Math.max(0, currentStart - cap);
-    const archiveStart = start === 0 ? 0 : bytes.indexOf(10, start) + 1;
+    const archiveStart = start === 0 ? 0 : Math.max(start, bytes.indexOf(10, start) + 1);
     writeFileSync(file + '.1', bytes.subarray(archiveStart, currentStart));
   }
   writeFileSync(file, bytes.subarray(currentStart));
@@ -55,25 +55,25 @@ export async function runTick(options: { root: string; home?: string; config?: G
     env.CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE ??= join(env.CMUX_RAM_SAMPLER_LOG_DIR, 'routed-alerts.jsonl');
     env.HEAVY_ML_SAMPLE_FILE ??= env.CMUX_RAM_SAMPLER_SAMPLE_FILE;
     const state = join(home, 'tick');
-    const previous = existsSync(state) ? Number(readFileSync(state, 'utf8')) : 0;
-    if (!Number.isInteger(previous) || previous < 0 || previous > 29) throw new Error('invalid resource guard tick');
+    let previous = existsSync(state) ? Number(readFileSync(state, 'utf8')) : 0;
+    if (!Number.isInteger(previous) || previous < 0 || previous > 29) {
+      appendCapped(join(logs,'guard.err.log'), Buffer.from('invalid resource guard tick; reset to 0\n')); previous = 0;
+    }
     const tick = previous + 1;
     const staged = state + '.tmp';
     writeFileSync(staged, String(tick % 30)); renameSync(staged, state);
-    const duties: Duty[] = [...(tick % 30 === 0 ? ['sampler' as const] : []),
-      ...(config.watchdog ? ['watchdog' as const] : []), ...(config.guardian ? ['guardian' as const] : []),
+    const duties: Duty[] = [...(config.guardian ? ['guardian' as const] : []),
+      ...(config.watchdog ? ['watchdog' as const] : []), ...(tick % 30 === 0 ? ['sampler' as const] : []),
       ...(tick % 5 === 0 ? ['reaper' as const] : [])];
-    const errors: string[] = [];
-    for (const duty of duties) {
-      try { await (options.run ?? ((name, dutyEnv) => runDuty(options.root, name, dutyEnv, logs)))(duty, env); }
-      catch (error) { errors.push(`${duty}: ${String(error)}`); }
-    }
+    const results = await Promise.allSettled(duties.map(duty =>
+      (options.run ?? ((name, dutyEnv) => runDuty(options.root, name, dutyEnv, logs)))(duty, env)));
+    const errors = results.flatMap((result,index) => result.status === 'rejected' ? [`${duties[index]}: ${String(result.reason)}`] : []);
     trimFile(env.REAPER_LOG_FILE);
     trimFile(env.CMUX_RAM_SAMPLER_SAMPLE_FILE);
     trimFile(env.CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE);
     const snapshots = env.CMUX_MEM_WATCHDOG_LOG_DIR;
-    if (existsSync(snapshots)) {
-      const files = readdirSync(snapshots).filter(name => /^\d.*\.log$/.test(name)).sort().reverse();
+    if (config.watchdog && existsSync(snapshots)) {
+      const files = readdirSync(snapshots).filter(name => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}[+-]\d{4}\.log$/.test(name)).sort().reverse();
       for (const name of files.slice(2)) { rmSync(join(snapshots, name)); rmSync(join(snapshots, name + '.1'), { force: true }); }
       for (const name of files.slice(0, 2)) trimFile(join(snapshots, name), false);
     }
@@ -81,6 +81,10 @@ export async function runTick(options: { root: string; home?: string; config?: G
   }
 }
 
+const activeGroups = new Set<number>();
+function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(-pid,signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+}
 function runDuty(root: string, duty: Duty, env: Env, logs: string): Promise<void> {
   const commands: Record<Duty, string[]> = {
     watchdog: ['/bin/bash', join(root, 'launchd/resource-guard/cmux-memory-watchdog.sh')],
@@ -90,15 +94,38 @@ function runDuty(root: string, duty: Duty, env: Env, logs: string): Promise<void
   };
   return new Promise((done, fail) => {
     const [cmd, ...args] = commands[duty];
-    const child = spawn(cmd, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { env, detached:true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const pid = child.pid;
+    if (pid) activeGroups.add(pid);
     child.stdout.on('data', bytes => appendCapped(join(logs, duty + '.out.log'), bytes));
     child.stderr.on('data', bytes => appendCapped(join(logs, duty + '.err.log'), bytes));
-    child.once('error', fail);
-    child.once('close', code => code === 0 ? done() : fail(new Error(`exit ${code}`)));
+    let closed = false, timedOut = false, escalated = false, exitCode: number | null = null;
+    const budget = Number(env.CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS ?? 45000);
+    const finish = () => {
+      if (!closed || timedOut && !escalated) return;
+      clearTimeout(timer); if (pid) activeGroups.delete(pid);
+      timedOut ? fail(new Error(`timeout after ${timeout}ms`)) : exitCode === 0 ? done() : fail(new Error(`exit ${exitCode}`));
+    };
+    const timeout = Number.isFinite(budget) && budget > 0 ? Math.min(45000,budget) : 45000;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      appendCapped(join(logs,duty + '.err.log'),Buffer.from(`timeout after ${timeout}ms; terminating duty group\n`));
+      if (pid) signalGroup(pid,'SIGTERM');
+      setTimeout(() => { if (pid) signalGroup(pid,'SIGKILL'); escalated = true; finish(); },2000);
+    },timeout);
+    child.once('error', error => { clearTimeout(timer); if (pid) activeGroups.delete(pid); fail(error); });
+    child.once('close', code => { closed = true; exitCode = code; finish(); });
   });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let stopping = false;
+  for (const signal of ['SIGTERM','SIGINT'] as const) process.on(signal, () => {
+    if (stopping) return;
+    stopping = true;
+    const groups = [...activeGroups]; groups.forEach(pid => signalGroup(pid,'SIGTERM'));
+    setTimeout(() => { groups.forEach(pid => signalGroup(pid,'SIGKILL')); process.exit(signal === 'SIGTERM' ? 143 : 130); },2000);
+  });
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const configPath = process.env.CMUX_RESOURCE_GUARD_CONFIG ?? join(homedir(), '.config/cmuxlayer/resource-guard.json');
   try {
