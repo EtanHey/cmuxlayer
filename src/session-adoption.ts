@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { AgentRecord } from "./agent-types.js";
+import { normalizeSpawnAxes } from "./mcp/schemas.js";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { StateManager } from "./state-manager.js";
 import type { CmuxWorkspace } from "./types.js";
@@ -44,7 +45,9 @@ export async function readAdoptionProcess(pid: number): Promise<AdoptionProcessP
   if (liveness !== "alive") return { liveness, started_at, cwd: null, cli: null };
   try {
     const opts = { timeout: 500, maxBuffer: 65536, encoding: "utf8" as const };
-    const command = (await exec("ps", ["-p", String(pid), "-o", "ucomm="], opts)).stdout.trim();
+    // macOS ucomm exposes Claude's versioned binary basename (e.g. 2.1.296).
+    // comm retains the CLI command name needed by the exact hook/process gate.
+    const command = (await exec("ps", ["-p", String(pid), "-o", "comm="], opts)).stdout.trim();
     const lines = (await exec("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], opts)).stdout.split("\n");
     const paths = lines.filter(line => line.startsWith("n/")).map(line => line.slice(1));
     if (processStartedAtMs(pid) !== started_at || processLiveness(pid) !== "alive") throw new Error("PID changed");
@@ -72,9 +75,17 @@ function readPinnedWitness(request: AdoptSessionRequest): { historical: AgentRec
 export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessionRequest) {
   const request = AdoptSessionSchema.parse(input), requestHash = digest(JSON.stringify(request));
   const { registry, stateMgr } = host, agent = stateMgr.readState(request.managed_agent_id);
-  if (!agent || agent.agent_id.startsWith("auto-") || agent.surface_provenance !== "cmuxlayer_spawn" ||
-      !agent.role || !agent.authority || !agent.placement || agent.cli !== "codex" || !agent.launch_cwd ||
+  if (!agent || agent.agent_id.startsWith("auto-") ||
+      !["codex", "claude"].includes(agent.cli) ||
       agent.cli_session_id !== request.session_id || agent.user_killed || agent.deletion_intent) throw new Error("Original managed identity disagrees");
+  const legacy = agent.surface_provenance !== "cmuxlayer_spawn";
+  if (legacy && agent.surface_provenance !== undefined &&
+      !["unknown", "session_registration"].includes(agent.surface_provenance)) throw new Error("Unknown recovery provenance");
+  if (!["orchestrator", "worker", "ic"].includes(agent.role ?? "")) throw new Error("Recovery requires a known registry role");
+  const axes = normalizeSpawnAxes({ role: agent.role, authority: undefined, placement: undefined });
+  if ((!legacy && (!agent.authority || !agent.placement || !agent.launch_cwd)) ||
+      (agent.authority && agent.authority !== axes.authority) ||
+      (agent.placement && agent.placement !== axes.placement)) throw new Error("Original managed authority disagrees");
   const repeat = agent.session_adoption?.request_sha256 === requestHash;
   if (!repeat && agent.version !== request.expected_agent_version) throw new Error("Original record version changed");
   const owner = registry.getObserverId(), epoch = registry.getObserverEpoch();
@@ -84,12 +95,35 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
   const witness = readPinnedWitness(request), historical = witness.historical[0];
   if (!historical || witness.historical.some(row => row.surface_uuid !== historical.surface_uuid ||
       row.workspace_id !== historical.workspace_id || row.surface_observer_id !== request.observer_transition.historical_owner_id ||
-      row.cli_session_id !== agent.cli_session_id || row.launch_cwd !== agent.launch_cwd ||
-      row.role !== agent.role || row.authority !== agent.authority || row.placement !== agent.placement ||
-      row.surface_provenance !== "cmuxlayer_spawn") || !historical.surface_uuid || !historical.workspace_id) throw new Error("Historical binding disagrees");
+      row.cli !== agent.cli || row.cli_session_id !== agent.cli_session_id ||
+      (legacy ? row.launch_cwd && row.launch_cwd !== agent.launch_cwd : row.launch_cwd !== agent.launch_cwd) ||
+      row.role !== agent.role ||
+      (legacy ? (row.authority ?? axes.authority) !== (agent.authority ?? axes.authority) : row.authority !== agent.authority) ||
+      (legacy ? (row.placement ?? axes.placement) !== (agent.placement ?? axes.placement) : row.placement !== agent.placement) ||
+      (!legacy && row.surface_provenance !== "cmuxlayer_spawn") ||
+      (legacy && row.surface_provenance !== "unknown" && row.surface_provenance !== undefined && row.surface_provenance !== "session_registration")) ||
+      !historical.surface_uuid || !historical.workspace_id) throw new Error("Historical binding disagrees");
+  // A retained pre-reboot row may still name its historical seat. Only the
+  // pinned historical binding can authorize that transition; a different
+  // cached UUID/workspace/owner must not borrow this session's proof.
+  const retainedHistoricalBinding = key(agent.surface_uuid) === key(historical.surface_uuid) &&
+    agent.workspace_id === historical.workspace_id &&
+    agent.surface_observer_id === request.observer_transition.historical_owner_id;
   const registration = host.options?.currentRegistration ?? makeSelfRegistrationContinuityResolver();
   const history = host.options?.sessionHistory ?? makeSelfRegistrationSessionHistoryLookup();
   const readProcess = host.options?.processProof ?? readAdoptionProcess;
+  const knownHistory = history(request.session_id);
+  if (!knownHistory) throw new Error("Known registration history is unreadable");
+  let launchCwd = agent.launch_cwd;
+  if (legacy && !launchCwd) {
+    const candidates = knownHistory.filter(row => row.session_id === request.session_id && key(row.surface_uuid) === key(request.surface));
+    const hook = candidates.at(-1);
+    if (!hook?.pid) throw new Error("Legacy recovery requires an exact-session hook registration");
+    const process = await readProcess(hook.pid);
+    if (process.liveness !== "alive" || process.cli !== agent.cli || !process.cwd || process.cwd !== hook.cwd) throw new Error("Legacy process CLI/cwd disagrees");
+    launchCwd = process.cwd;
+  }
+  const proofAgent = { ...agent, launch_cwd: launchCwd, surface_uuid: request.surface };
   const observe = async () => {
     const observed = await host.observe(), topology = observed.topology;
     if (!topology?.complete || topology.observerId !== owner || topology.observerEpoch !== epoch ||
@@ -100,11 +134,13 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
     const binding = resolveAgentSurfaceBinding({ surface_id: "surface:unbound", surface_uuid: request.surface }, topology);
     if (workspaces.length !== 1 || !binding || binding.workspaceId !== workspaces[0]!.ref ||
         topology.surfaces.some(surface => key(surface.id) === key(historical.surface_uuid)) ||
-        (agent.surface_uuid && key(agent.surface_uuid) !== key(request.surface))) throw new Error("Selected seat or old-seat absence disagrees");
+        (agent.surface_uuid && key(agent.surface_uuid) !== key(request.surface) &&
+          !retainedHistoricalBinding)) throw new Error("Selected seat or old-seat absence disagrees");
     return { binding, uuids: topology.surfaces.map(surface => surface.id!) };
   };
-  const first = await observe(), proof = registration({ ...agent, surface_uuid: request.surface }, first.uuids);
-  if (!proof?.pid || !proof.ts) throw new Error("Current exact registration is missing or conflicting");
+  const first = await observe(), proof = registration(proofAgent, first.uuids);
+  if (!proof?.pid || !proof.ts || proof.session_id !== request.session_id ||
+      key(proof.surface_uuid) !== key(request.surface) || proof.cli !== agent.cli || proof.cwd !== launchCwd) throw new Error("Current exact registration is missing or conflicting");
   const qualified = async (row: SelfRegistrationEntry) => {
     if (!row.pid || row.pid < 1 || !row.ts) throw new Error("Relevant registration lacks qualified PID evidence");
     const process = await readProcess(row.pid);
@@ -114,9 +150,7 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
     return { ...process, liveness };
   };
   const current = await qualified(proof);
-  if (current.liveness !== "alive" || current.cli !== agent.cli || current.cwd !== agent.launch_cwd) throw new Error("Current process CLI/cwd disagrees");
-  const knownHistory = history(request.session_id);
-  if (!knownHistory) throw new Error("Known registration history is unreadable");
+  if (current.liveness !== "alive" || current.cli !== agent.cli || current.cwd !== launchCwd) throw new Error("Current process CLI/cwd disagrees");
   const recordedClaimants: SelfRegistrationEntry[] = [agent, ...witness.historical]
     .filter(row => row.pid && row.pid !== proof.pid).map(row => ({ ...proof, pid: row.pid!,
       ts: Date.parse(row.pid_registered_at ?? "") }));
@@ -146,8 +180,8 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
   if (JSON.stringify(history(request.session_id)) !== JSON.stringify(knownHistory) ||
       last.binding.surfaceRef !== first.binding.surfaceRef || finalProcess.liveness !== "alive" ||
       finalProcess.started_at !== current.started_at ||
-      finalProcess.cli !== agent.cli || finalProcess.cwd !== agent.launch_cwd ||
-      JSON.stringify(registration({ ...agent, surface_uuid: request.surface }, last.uuids)) !== JSON.stringify(proof) ||
+      finalProcess.cli !== agent.cli || finalProcess.cwd !== launchCwd ||
+      JSON.stringify(registration(proofAgent, last.uuids)) !== JSON.stringify(proof) ||
       stateMgr.readState(agent.agent_id)?.version !== agent.version || registry.getObserverEpoch() !== epoch) throw new Error("Adoption proof changed before persistence");
   if (repeat && (agent.surface_id !== last.binding.surfaceRef || key(agent.surface_uuid) !== key(request.surface) ||
       agent.workspace_id !== last.binding.workspaceId || agent.surface_observer_id !== owner ||
@@ -159,6 +193,9 @@ export async function adoptManagedSession(host: AdoptionHost, input: AdoptSessio
     if (!repeat) result = stateMgr.updateRecord(agent.agent_id, { surface_id: last.binding.surfaceRef,
       surface_uuid: request.surface, workspace_id: last.binding.workspaceId, surface_observer_id: owner,
       pid: proof.pid, pid_registered_at: new Date(proof.ts).toISOString(), cli_session_path: proof.session_path ?? agent.cli_session_path,
+      ...(legacy ? { authority: agent.authority ?? axes.authority, placement: agent.placement ?? axes.placement,
+        launch_cwd: launchCwd, surface_provenance: "session_registration" as const,
+        session_recovery_audit: `SessionStart exact-session=${proof.session_id} surface=${proof.surface_uuid} pid=${proof.pid} ts=${proof.ts}; prior=${historical.surface_uuid}` } : {}),
       session_continuity_aliases: [...new Set([...(agent.session_continuity_aliases ?? []), ...(auto ? [auto.agent_id] : [])])], session_adoption: receipt });
     // state.json may survive a later index failure, even with an adopted marker.
     const index = stateMgr.getSurfaceSessionIndex();

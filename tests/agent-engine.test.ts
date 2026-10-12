@@ -7678,7 +7678,7 @@ Session ID: ${sessionId}`,
       expect(registry.get(child.agent_id)).toMatchObject({ parent_agent_id: lead.agent_id, role: "worker", workspace_id: "ws:placement" });
     });
 
-    it.each(["legacy", "retained-observer", "repeat", "interrupted", "marker-interrupted", "old-live", "unknown", "cwd", "cli", "reused-pid",
+    it.each(["legacy", "retained-observer", "claude-retained", "codex-retained", "claude-legacy", "claude-legacy-worker", "claude-legacy-role-missing", "claude-legacy-role-unknown", "claude-legacy-old-live", "claude-legacy-session-mismatch", "claude-duplicate-old", "claude-duplicate-target", "claude-foreign-binding", "claude-witness-cli", "repeat", "interrupted", "marker-interrupted", "old-live", "unknown", "cwd", "cli", "reused-pid",
       "observer", "old-seat", "digest", "version", "authority", "pending", "claimant", "hook-race", "row-race", "ref-recycle"])(
       "adopts the supplied legacy case safely (%s)", async mode => {
       const lead = makeRecord({ agent_id: "brainlayerCodex-834383b9", state: "idle", surface_id: "surface:unbound",
@@ -7688,13 +7688,55 @@ Session ID: ${sessionId}`,
         surface_provenance: "cmuxlayer_spawn", parent_agent_id: "orcClaude", collab_path: "/synthetic/collab",
         boot_prompt_pending: true, prompt_delivered: false });
       if (mode === "retained-observer") lead.surface_observer_id = "observer-last-unbound";
+      if (mode.startsWith("claude-")) lead.cli = "claude";
       const target = { ...lead, surface_id: "surface:506", surface_uuid: "046E9CEC-E253-4870-9BB8-942DCE7CC0EC" };
       const workspaceUuid = "19F83CA8-2598-4BB3-AC57-2D6C4460A22E";
       installTwoColumnTopology(target);
       const hook = { session_id: lead.cli_session_id!, surface_uuid: target.surface_uuid,
-        cwd: lead.launch_cwd, cli: "codex", pid: 4242, ts: Date.now(), session_path: "/synthetic/current.jsonl" };
+        cwd: lead.launch_cwd, cli: lead.cli, pid: 4242, ts: Date.now(), session_path: "/synthetic/current.jsonl" };
+      const legacy = mode.startsWith("claude-legacy");
+      if (legacy) {
+        lead.surface_provenance = "unknown";
+        if (mode === "claude-legacy-worker") lead.role = "worker";
+        delete lead.authority; delete lead.placement; delete lead.launch_cwd;
+        if (mode === "claude-legacy-role-missing") delete lead.role;
+        if (mode === "claude-legacy-role-unknown") (lead as any).role = "unknown";
+        if (mode === "claude-legacy-session-mismatch") hook.session_id = "foreign-session";
+      }
       const historical = { ...lead, surface_id: "surface:64", workspace_id: "workspace:1",
         surface_uuid: "0F4C12C6-7185-4723-9FA5-19328AD81192", surface_observer_id: "observer-historical" };
+      const retained = (mode.includes("retained") && mode !== "retained-observer") || mode.startsWith("claude-");
+      if (retained) Object.assign(lead, { surface_id: historical.surface_id, surface_uuid: historical.surface_uuid,
+        workspace_id: historical.workspace_id, surface_observer_id: historical.surface_observer_id });
+      if (mode === "claude-foreign-binding") lead.surface_uuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      if (mode === "claude-witness-cli") historical.cli = "codex";
+      if (mode === "claude-legacy-old-live") liveSurfaces.push(
+        { ...makeSurface("surface:old-live"), id: historical.surface_uuid!, workspace_ref: "ws:placement" });
+      if (mode === "claude-duplicate-old") liveSurfaces.push(
+        { ...makeSurface("surface:old-one"), id: historical.surface_uuid!, workspace_ref: "ws:placement" },
+        { ...makeSurface("surface:old-two"), id: historical.surface_uuid!, workspace_ref: "ws:placement" });
+      if (mode === "claude-duplicate-target") liveSurfaces.push(
+        { ...makeSurface("surface:duplicate-target"), id: target.surface_uuid, workspace_ref: "ws:placement" });
+      if (retained) {
+        // Observe the actual evolving fixture, including duplicate identities
+        // and the surface created by the post-adoption spawn.
+        (mockClient.listPanes as any).mockImplementation(async () => ({ workspace_ref: "ws:placement",
+          panes: ["pane:left", "pane:right"].map((ref, index) => ({ ref, index,
+            surface_count: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).length,
+            pixel_frame: index === 0 ? leftFrame : rightFrame,
+            surface_refs: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).map(s => s.ref),
+            surface_ids: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).map(s => s.id) })) }));
+        (mockClient.listPaneSurfaces as any).mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", pane_ref: pane,
+          surfaces: liveSurfaces.filter(s => (s.ref === target.surface_id) === (pane === "pane:left")) }));
+        (mockClient.newSurface as any).mockImplementation(async (opts: { pane: string; workspace: string }) => {
+          const created = (mockClient.newSurface as any).mock.calls.length === 1 ? makeSpawnSurface()
+            : { ...makeSurface("surface:resumed-child"), id: "22222222-3333-4444-8555-666666666666" };
+          liveSurfaces.push({ ...created, workspace_ref: opts.workspace });
+          return { workspace: opts.workspace, surface: created.ref, surface_id: created.id,
+            pane: opts.pane, title: "", type: "terminal" };
+        });
+      }
       const witnessPath = join(TEST_DIR, "history.json");
       if (mode === "authority") historical.authority = "worker";
       if (mode === "old-seat") historical.surface_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -7708,10 +7750,10 @@ Session ID: ${sessionId}`,
       const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, { observerId: "observer-current" });
       stateMgr.writeState(lead); registry.set(lead.agent_id, lead);
       const discoveryRow = { surface_id: target.surface_id, surface_uuid: target.surface_uuid,
-        workspace_id: "ws:placement", surface_title: "brainlayer-lead", cli: "codex", model: "GPT-6",
+        workspace_id: "ws:placement", surface_title: "brainlayer-lead", cli: lead.cli, model: "preserved-model",
         has_agent: true, read_error: false, parsed_status: "idle", control_state: "active",
         current_directory: "/synthetic/home", working_directory_source: "workspace_fallback" };
-      const autoId = "auto-codex-046E9CEC-E253-4870-9BB8-942DCE7CC0EC";
+      const autoId = `auto-${lead.cli}-046E9CEC-E253-4870-9BB8-942DCE7CC0EC`;
       const auto = stateMgr.ensureAutoRecord(autoId, discoveryRow as any, "observer-current");
       registry.set(autoId, auto);
       writeFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), '{"text":"preserve these words","delivery":"pending_verify"}\n');
@@ -7740,22 +7782,30 @@ Session ID: ${sessionId}`,
       }
       engine.dispose();
       engine = new AgentEngine(stateMgr, registry, mockClient, { sessionProcessScanner: async () => [],
+        spawnPreflight: async () => {},
         adoptionOptions: { currentRegistration: (agent, uuids) => {
           if (mode === "hook-race" && hookReads++ > 0) return null;
           return registration(agent, uuids);
-        }, sessionHistory: () => [], processProof: async pid => {
+        }, sessionHistory: () => legacy ? [hook as any] : [], processProof: async pid => {
           if (mode === "row-race" && ++reads === 2) stateMgr.updateRecord(lead.agent_id, { task: "changed meanwhile" });
           return { liveness: mode === "unknown" ? "unknown" : pid === hook.pid || mode === "old-live" ? "alive" : "gone",
             started_at: mode === "reused-pid" ? hook.ts + 10000 : hook.ts - 200000,
-            cli: mode === "cli" ? "claude" : "codex", cwd: mode === "cwd" ? "/synthetic/home" : lead.launch_cwd! };
+            cli: mode === "cli" ? "claude" : lead.cli, cwd: mode === "cwd" ? "/synthetic/home" : (lead.launch_cwd ?? "/synthetic/brainlayer") };
         } },
         selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver({ readFile: () => JSON.stringify(hook) }),
         inboxOpts: { baseDir: TEST_DIR } });
       const discovery = { scan: async () => [discoveryRow] } as any;
-      const accepted = ["legacy", "retained-observer", "repeat", "interrupted", "marker-interrupted"].includes(mode);
+      const spawn = { repo: lead.repo, cli: "codex" as const, model: "gpt-6.1-sol", effort: "high",
+        prompt: "Verify recovered parent placement", parent_agent_id: lead.agent_id, focus: false };
+      if (retained && mode !== "claude-legacy-old-live") {
+        await expect(engine.spawnAgent(spawn)).rejects.toThrow(/Stable surface UUID/);
+        expect(mockClient.newSurface).not.toHaveBeenCalled();
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+      }
+      const accepted = ["legacy", "retained-observer", "claude-retained", "codex-retained", "claude-legacy", "claude-legacy-worker", "repeat", "interrupted", "marker-interrupted"].includes(mode);
       if (!accepted) {
         await expect(engine.adoptResumedSession(request)).rejects.toThrow();
-        expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBeNull();
+        expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBe(lead.surface_uuid);
       } else {
         const result = await engine.adoptResumedSession(request);
         expect(result.status).toBe(mode.includes("interrupted") ? "pending_verify" : "adopted");
@@ -7764,21 +7814,43 @@ Session ID: ${sessionId}`,
         const stableVersion = stateMgr.readState(lead.agent_id)!.version;
         expect((await engine.adoptResumedSession(request)).idempotent).toBe(true);
         expect(stateMgr.readState(lead.agent_id)!.version).toBe(stableVersion);
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < (mode === "claude-legacy-worker" ? 0 : 3); i++) {
           await registry.recoverSessionContinuityFromDiscovery([discoveryRow] as any, registry.getObserverEpoch());
           registry.repairFromDiscovery([discoveryRow] as any, { orphansOnly: true });
           await registry.listMerged(discovery);
           await engine.reconcileRolePlacements("idle");
         }
         expect(registry.get(lead.agent_id)).toMatchObject({ surface_uuid: target.surface_uuid,
-          role: lead.role, authority: lead.authority, parent_agent_id: lead.parent_agent_id,
+          role: lead.role, authority: legacy ? (lead.role === "worker" ? "worker" : "lead") : lead.authority, parent_agent_id: lead.parent_agent_id,
           collab_path: lead.collab_path, boot_prompt_pending: true, prompt_delivered: false });
         expect(stateMgr.readState(child.agent_id)).toEqual(child);
+        if (legacy) expect(registry.get(lead.agent_id)).toMatchObject({ authority: lead.role === "worker" ? "worker" : "lead", placement: lead.role === "worker" ? "right" : "left",
+          launch_cwd: "/synthetic/brainlayer", surface_provenance: "session_registration",
+          session_recovery_audit: expect.stringContaining(lead.cli_session_id!) });
       }
       expect(mockClient.moveSurface).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(readFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), "utf8")).toContain("preserve these words");
+      if (accepted && retained) {
+        const spawned = await engine.spawnAgent(spawn);
+        expect(spawned.workspace_id).toBe("ws:placement");
+        expect(registry.get(spawned.agent_id)?.parent_agent_id).toBe(lead.agent_id);
+        expect(mockClient.newSurface).toHaveBeenCalledWith(expect.objectContaining({ pane: "pane:right", workspace: "ws:placement" }));
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        if (mode === "claude-legacy") {
+          const dormant = makeRecord({ agent_id: "dormant-child", parent_agent_id: lead.agent_id,
+            state: "done", surface_id: "surface:unbound", surface_uuid: null, workspace_id: "ws:placement",
+            cli: "codex", cli_session_id: "33333333-4444-4555-8666-777777777777", pid: null });
+          harnessHome.give(dormant.cli, dormant.cli_session_id!);
+          stateMgr.writeState(dormant); registry.set(dormant.agent_id, dormant);
+          const resumed = await engine.resumeAgent(dormant.agent_id, { force: true, focus: false });
+          expect(resumed).toMatchObject({ agent_id: dormant.agent_id, parent_agent_id: lead.agent_id,
+            workspace_id: "ws:placement", surface_id: "surface:resumed-child" });
+          expect(mockClient.newSurface).toHaveBeenLastCalledWith(expect.objectContaining({ pane: "pane:right", workspace: "ws:placement" }));
+          expect(mockClient.newSplit).not.toHaveBeenCalled();
+        }
+      }
     });
 
     it("does not repeat a move when final marker persistence fails", async () => {

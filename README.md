@@ -138,7 +138,12 @@ All public tools include [ToolAnnotations](https://modelcontextprotocol.io/speci
 | `update_surface` | Move or rename a surface; explicitly adopt an existing managed session with pinned evidence |
 | `list_surfaces` | List all surfaces across workspaces |
 
-`update_surface` with `action: "adopt_session"` requires the current stable surface and workspace UUIDs,
+`update_surface` with `action: "adopt_session"` supports Claude and Codex after a restart, including
+retained old bindings. Legacy rows require a known registry role and exact-session hook/process proof;
+missing authority and placement use the same role aliases as spawn, and process cwd supplies missing
+launch cwd. Legacy recovery records `surface_provenance: "session_registration"` and a one-line audit.
+The old UUID must be absent and the new UUID uniquely live; titles never grant recovery authority.
+Adoption requires the current stable surface and workspace UUIDs,
 `managed_agent_id`, the same recorded `session_id`, `expected_agent_version`, an `observer_transition`
 with explicit `historical_owner_id` and `current_owner_id`, and an absolute `binding_evidence_path`
 plus its `binding_evidence_sha256`. The selected historical witness must establish the original

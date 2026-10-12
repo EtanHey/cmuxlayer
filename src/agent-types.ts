@@ -19,7 +19,10 @@ export type AgentRole = "orchestrator" | "worker";
 export type AgentAuthority = "lead" | "worker";
 export type AgentFunction = "implementor" | "reviewer" | "gatherer";
 export type AgentPlacement = "left" | "right";
-export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
+export type SurfaceProvenance = "cmuxlayer_spawn" | "session_registration" | "unknown";
+export function isManagedSurfaceProvenance(value: SurfaceProvenance | undefined): boolean {
+  return value === "cmuxlayer_spawn" || value === "session_registration";
+}
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 // `disk` is a filesystem observation (today: the harness session artifact
 // behind `resumable`, #482), as opposed to a remembered registry field.
@@ -54,6 +57,8 @@ export interface AgentRecord {
   session_continuity_aliases?: string[];
   /** Durable receipt for explicit, evidence-pinned existing-session adoption. */
   session_adoption?: { request_sha256: string; evidence_sha256: string; observer_epoch?: string; status: "pending_verify" | "adopted" };
+  /** Exact SessionStart proof used to recover a legacy registry binding. */
+  session_recovery_audit?: string;
 
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;

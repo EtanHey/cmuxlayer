@@ -786,7 +786,7 @@ export function registerUpdateSurfaceTool(
 ): void {
   server.tool(
     "update_surface",
-    "Move or rename a surface, or adopt_session to rebind an existing managed Codex identity using pinned historical evidence and fresh process/topology proof. Adoption changes no pane or input; layout reconciliation follows separately.",
+    "Move or rename a surface, or adopt_session to rebind an existing managed Claude or Codex identity after a restart using pinned historical evidence and fresh process/topology proof. Adoption changes no pane or input; layout reconciliation follows separately.",
     {
       action: z.enum(["move", "rename", "adopt_session"]),
       managed_agent_id: AdoptSessionSchema.shape.managed_agent_id.optional(),
