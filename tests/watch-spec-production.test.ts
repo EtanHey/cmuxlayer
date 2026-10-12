@@ -109,7 +109,7 @@ describe("WatchSpec production wiring", () => {
       owner: "lead-a",
       target,
       marker: "DONE",
-      deadline: 10_000,
+      deadline: 1_000 + 3 * 86_400_000,
       provenance: "public",
     });
     expect(
@@ -125,8 +125,11 @@ describe("WatchSpec production wiring", () => {
       liveness_source: target,
     });
     // This owner is absent from both daemon registries. The lifecycle sweep
-    // expires its aged watch without delivering a stale upgrade notification.
+    // confirms absence across two sweeps before silently expiring its aged watch.
     now = 1_000 + 86_400_000;
+    await context.lifecycleSweepEngine?.runSweep();
+    expect(readWatchRegistry({ registryPath, now: () => now }).watches[0]?.state).toBe("armed");
+    now += 5 * 60_000;
     await context.lifecycleSweepEngine?.runSweep();
     expect(readWatchRegistry({ registryPath, now: () => now }).watches[0]).toMatchObject({
       state: "failed", terminal_reason: "owner_gone", notification_pending: false,

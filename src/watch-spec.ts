@@ -59,6 +59,8 @@ export interface WatchRecord extends WatchSpec {
   pending_content_fingerprint?: string;
   pending_content_at_ms?: number;
   missing_since_at_ms?: number;
+  /** First confirmed absent owner sample; reset on live/unknown evidence or renewal. */
+  owner_missing_since_at_ms?: number;
   armed_at_ms: number;
   last_heartbeat_at_ms: number;
   liveness_source: string;
@@ -215,6 +217,7 @@ const NOTIFY_RETRY_BASE_MS = 1_000;
 const NOTIFY_RETRY_MAX_MS = 60_000;
 const NOTIFY_RETRY_LIMIT = 8;
 const FILE_MISSING_DEBOUNCE_MS = 2_000;
+const OWNER_MISSING_DEBOUNCE_MS = 5 * 60_000;
 const REPORT_CONTENT_QUIET_MS = 1_000;
 export const WATCH_TERMINAL_TTL_MS = 24 * 60 * 60 * 1_000;
 export const WATCH_OWNER_GRACE_MS = WATCH_TERMINAL_TTL_MS;
@@ -367,6 +370,8 @@ function isWatchRecord(value: unknown): value is WatchRecord {
   ) {
     return false;
   }
+  if (value.owner_missing_since_at_ms !== undefined &&
+    !isFiniteNumber(value.owner_missing_since_at_ms)) return false;
   if (
     value.watermark !== undefined &&
     (!Number.isInteger(value.watermark) || (value.watermark as number) < 0)
@@ -724,6 +729,7 @@ function rolledEngineContentDeadline(
   );
   return {
     armed_at_ms: observedAt,
+    owner_missing_since_at_ms: undefined,
     deadline: Math.min(Number.MAX_SAFE_INTEGER, observedAt + intervalMs),
     deadline_notified_at_ms: undefined,
   };
@@ -1074,6 +1080,7 @@ export function updateWatchDeadline(watchId: string, deadline: number,
       return {
         ...row,
         armed_at_ms: armedAt,
+        owner_missing_since_at_ms: undefined,
         deadline: cappedDeadline(deadline, armedAt),
         deadline_notified_at_ms: undefined,
       };
@@ -1174,12 +1181,13 @@ export async function sweepWatches(
   };
 
   const snapshot = readRegistryState(path, opts);
-  const absentOwnerSnapshots = new Map<string, string>();
+  const ownerSnapshots = new Map<string, string>();
   const ownerObservations = new Map<string, boolean | null>();
   for (const record of snapshot.watches) {
     if (
       record.state !== "armed" ||
       observedAt - record.armed_at_ms < WATCH_OWNER_GRACE_MS ||
+      (record.waiter_expires_at_ms ?? 0) > observedAt ||
       !opts.ownerObservation
     ) continue;
     if (!ownerObservations.has(record.owner)) {
@@ -1189,9 +1197,7 @@ export async function sweepWatches(
         ownerObservations.set(record.owner, null);
       }
     }
-    if (ownerObservations.get(record.owner) === false) {
-      absentOwnerSnapshots.set(record.watch_id, JSON.stringify(record));
-    }
+    ownerSnapshots.set(record.watch_id, JSON.stringify(record));
   }
   const agentObservations = new Map<string, WatchAgentObservation>();
   for (const record of snapshot.watches) {
@@ -1212,11 +1218,23 @@ export async function sweepWatches(
     // skipcq: JS-R1005
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
-      if (absentOwnerSnapshots.get(row.watch_id) === JSON.stringify(row)) {
-        result.failed.push(row.watch_id);
-        return expireSilently(row, "owner_gone", observedAt);
+      let record = recoverInterruptedEngineDeadlineClaim(row, observedAt);
+      if (record.state === "armed") {
+        const protectedOwner = (record.waiter_expires_at_ms ?? 0) > observedAt ||
+          observedAt - record.armed_at_ms < WATCH_OWNER_GRACE_MS || !opts.ownerObservation;
+        // Match the full snapshot under the lock so a concurrent renewal wins.
+        const observedOwner = ownerSnapshots.get(row.watch_id) === JSON.stringify(row);
+        if (!protectedOwner && observedOwner && ownerObservations.get(record.owner) === false) {
+          const missingSince = record.owner_missing_since_at_ms ?? observedAt;
+          if (observedAt - missingSince >= OWNER_MISSING_DEBOUNCE_MS) {
+            result.failed.push(row.watch_id);
+            return expireSilently(record, "owner_gone", observedAt);
+          }
+          record = { ...record, owner_missing_since_at_ms: missingSince };
+        } else if (protectedOwner || observedOwner) {
+          record = { ...record, owner_missing_since_at_ms: undefined };
+        }
       }
-      const record = recoverInterruptedEngineDeadlineClaim(row, observedAt);
       if (record.state === "firing" && record.terminal_reason) {
         const migrated: WatchRecord = {
           ...record,

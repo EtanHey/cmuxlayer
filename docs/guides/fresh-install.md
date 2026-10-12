@@ -244,7 +244,8 @@ reports the problem instead of failing.
 
 Watch deadlines are capped at seven days per arm or renewal. Terminal rows expire
 after 24 hours; an armed watch with no observable live owner expires after a
-24-hour grace period. Uncertain owner observations retain the watch. Registry
+24-hour grace period and confirmed absence across two sweeps at least five
+minutes apart. Active waiter leases and uncertain owner observations retain the watch. Registry
 loads normalize legacy deadlines and hide aged terminal rows; sweeps persist
 cleanup under the write lock without notifying for GC or legacy expiry.
 

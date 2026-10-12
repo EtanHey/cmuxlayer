@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { armWatch, readWatchRegistry, sweepWatches, updateWatchDeadline } from "../src/watch-spec.js";
+import { armWatch, readWatchRegistry, sweepWatches, updateWatchDeadline, releaseWatchWaiter } from "../src/watch-spec.js";
 import { observeWatchOwner } from "../src/engine/sweep.js";
 import { StateManager } from "../src/state-manager.js";
 
@@ -86,6 +86,12 @@ describe("watch registry retention", () => {
     expect(ownerObservation).not.toHaveBeenCalled();
     now += 1;
     await sweepWatches({ ...opts(), ownerObservation, notify });
+    expect(disk().find((r: any) => r.owner === "gone")).toMatchObject({ state: "armed", owner_missing_since_at_ms: now });
+    now += 5 * 60_000 - 1;
+    await sweepWatches({ ...opts(), ownerObservation, notify });
+    expect(disk().find((r: any) => r.owner === "gone").state).toBe("armed");
+    now += 1;
+    await sweepWatches({ ...opts(), ownerObservation, notify });
     expect(disk().find((r: any) => r.owner === "gone")).toMatchObject({ state: "failed", terminal_reason: "owner_gone", terminal_at_ms: now, notification_pending: false });
     expect(disk().filter((r: any) => r.state === "armed").map((r: any) => r.owner)).toEqual(["live", "uncertain", "probe-error"]);
     expect(notify).not.toHaveBeenCalled();
@@ -94,14 +100,62 @@ describe("watch registry retention", () => {
     expect(disk().some((r: any) => r.owner === "gone")).toBe(false);
   });
 
+  // Reviewer P1: the caller supplies an owner absent from cmux state, but is still waiting here.
+  it("retains a live blocked public wait_for waiter at 25h", async () => {
+    const host = { registry: { list: () => [] }, stateMgr: new StateManager(join(dir, "states")),
+      watchAgentObservation: vi.fn(async () => ({ exists: false })) };
+    const ownerObservation = (owner: string) => observeWatchOwner.call(host as any, owner);
+    expect(await ownerObservation("maintenanceClaude")).toBe(false);
+    const row = await armWatch({ owner: "maintenanceClaude", target, marker: "DONE",
+      deadline: now + 3 * DAY, provenance: "public" },
+      { ...opts(), waiterExpiresAtMs: now + 3 * DAY + 60_000 });
+    now += 25 * 3_600_000;
+    const notify = vi.fn();
+    for (let sweep = 0; sweep < 2; sweep++, now += 5 * 60_000) {
+      await sweepWatches({ ...opts(), ownerObservation, notify });
+      expect(readWatchRegistry(opts()).watches.find(w => w.watch_id === row.watch_id)?.state).toBe("armed");
+      expect(disk()[0]).not.toHaveProperty("owner_missing_since_at_ms");
+    }
+    expect(notify).not.toHaveBeenCalled();
+    await releaseWatchWaiter(row.watch_id, opts());
+    await sweepWatches({ ...opts(), ownerObservation, notify });
+    expect(disk()[0]).toMatchObject({ state: "armed", owner_missing_since_at_ms: now });
+    now += 5 * 60_000;
+    await sweepWatches({ ...opts(), ownerObservation, notify });
+    expect(disk()[0]).toMatchObject({ state: "failed", terminal_reason: "owner_gone" });
+  });
+
+  it.each(["live", "unknown", "error", "unobserved", "renewed"])("restarts absent-owner confirmation after %s evidence", async (evidence) => {
+    const row = await arm(); now += DAY;
+    await sweepWatches({ ...opts(), ownerObservation: () => false });
+    expect(disk()[0]).toMatchObject({ state: "armed", owner_missing_since_at_ms: now });
+    now += 5 * 60_000;
+    if (evidence === "renewed") await updateWatchDeadline(row.watch_id, now + 2 * DAY, opts());
+    await sweepWatches({ ...opts(), ownerObservation: evidence === "unobserved" ? undefined : () => {
+      if (evidence === "error") throw new Error("transport down");
+      return evidence === "live" ? true : evidence === "renewed" ? false : null;
+    } });
+    expect(disk()[0].state).toBe("armed");
+    expect(disk()[0]).not.toHaveProperty("owner_missing_since_at_ms");
+    if (evidence === "renewed") now += DAY;
+    await sweepWatches({ ...opts(), ownerObservation: () => false });
+    expect(disk()[0]).toMatchObject({ state: "armed", owner_missing_since_at_ms: now });
+    now += 5 * 60_000;
+    await sweepWatches({ ...opts(), ownerObservation: () => false });
+    expect(disk()[0]).toMatchObject({ state: "failed", terminal_reason: "owner_gone" });
+  });
+
   it("does not expire a watch re-armed during an owner probe", async () => {
     const row = await arm();
     now += DAY;
+    await sweepWatches({ ...opts(), ownerObservation: () => false });
+    now += 5 * 60_000;
     await sweepWatches({ ...opts(), ownerObservation: async () => {
       await updateWatchDeadline(row.watch_id, now + DAY, opts());
       return false;
     } });
     expect(disk()[0]).toMatchObject({ state: "armed", armed_at_ms: now });
+    expect(disk()[0]).not.toHaveProperty("owner_missing_since_at_ms");
   });
 
   it("resolves exact, seat and ambiguous prefix owners across registry and persisted states", async () => {
