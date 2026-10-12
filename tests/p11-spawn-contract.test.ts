@@ -211,6 +211,9 @@ function makeExec(
       if (
         text.trim() &&
         (text.includes("cmuxlayer contract for") ||
+          // Inline mailbox text contains generated harness IDs too; it is
+          // composer input, even when that ID resembles a launcher name.
+          text.includes("cmuxlayer mailbox contract for") ||
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
@@ -232,6 +235,26 @@ function makeExec(
       stderr: "",
     };
   }));
+}
+
+/** The inline payload must have painted and been read before its task Return. */
+async function expectInlinePaintBeforeReturn(exec: ExecFn) {
+  const mock = exec as ReturnType<typeof vi.fn>;
+  const inputIndex = mock.mock.calls.findIndex(([, args]: [string, string[]]) =>
+    args.includes("send") && String(args.at(-1)).includes("cmuxlayer mailbox contract for"));
+  expect(inputIndex).toBeGreaterThanOrEqual(0);
+  const text = String(mock.mock.calls[inputIndex]![1].at(-1));
+  const returnIndex = mock.mock.calls.findIndex(([, args]: [string, string[]], index: number) =>
+    index > inputIndex && args.includes("send-key") && args.includes("return"));
+  expect(returnIndex).toBeGreaterThan(inputIndex);
+  const frames: string[] = [];
+  for (let index = inputIndex + 1; index < returnIndex; index++) {
+    if (mock.mock.calls[index]![1].includes("read-screen")) {
+      const result = await mock.mock.results[index]!.value;
+      frames.push(JSON.parse(result.stdout).text);
+    }
+  }
+  expect(frames).toContain(`Claude Code\n❯ ${text}`);
 }
 
 /** Everything typed or pasted at the pane, however it was routed. */
@@ -284,8 +307,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   let exec: ExecFn;
   let server: any;
   let watchRegistryPath: string;
+  let bootContractBefore: string | undefined;
 
   beforeEach(() => {
+    bootContractBefore = process.env.CMUXLAYER_BOOT_CONTRACT;
     rmSync(STATE_DIR, { recursive: true, force: true });
     mkdirSync(STATE_DIR, { recursive: true });
     inboxDir = mkdtempSync(join(tmpdir(), "p11-inbox-"));
@@ -305,6 +330,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   afterEach(() => {
     rmSync(STATE_DIR, { recursive: true, force: true });
     rmSync(inboxDir, { recursive: true, force: true });
+    expect(process.env.CMUXLAYER_BOOT_CONTRACT).toBe(bootContractBefore);
   });
 
   async function spawn(
@@ -4235,6 +4261,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       // failure.
       expect(parsed.ok).toBe(true);
       expect(parsed.contract_path).toBeUndefined();
+      await expectInlinePaintBeforeReturn(blockedExec);
       // No dangling pointer on the wire, and the mailbox contract still got
       // through: the worker loses the report half, not its inbox.
       const wire = sentText(blockedExec);
@@ -4258,9 +4285,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   });
 
   it("P11b: CMUXLAYER_BOOT_CONTRACT=inline restores the pre-P11b inline contract", async () => {
+    const previous = process.env.CMUXLAYER_BOOT_CONTRACT;
     process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
     try {
       const parsed = await spawn();
+      await expectInlinePaintBeforeReturn(exec);
       expect(sentText(exec)).toContain("cmuxlayer mailbox contract for");
       expect(parsed.contract_path).toBeUndefined();
       // Provenance follows the mode: inline cannot carry the report contract,
@@ -4269,7 +4298,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       expect(parsed.coordination_footer_note).toMatch(/not_wired/);
       expect(sentText(exec)).not.toContain(parsed.report_path);
     } finally {
-      delete process.env.CMUXLAYER_BOOT_CONTRACT;
+      if (previous === undefined) delete process.env.CMUXLAYER_BOOT_CONTRACT;
+      else process.env.CMUXLAYER_BOOT_CONTRACT = previous;
     }
   });
 
