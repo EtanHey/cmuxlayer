@@ -28,9 +28,26 @@ function createAuditServer(exec: ExecFn, client?: Record<string, unknown>) {
 
 function makeSpawnReadyExec(): ExecFn {
   let launchSent = false;
+  let draft = "";
+  let accepted = "";
+  let paste = "";
   return vi.fn().mockImplementation(async (_cmd, args) => {
+    if (args.includes("new-split") || args.includes("new-surface")) {
+      launchSent = false;
+      draft = accepted = paste = "";
+    }
     if (args.includes("send")) {
-      launchSent = true;
+      if (launchSent) draft += String(args.at(-1) ?? "");
+      else launchSent = true;
+    }
+    if (args.includes("set-buffer")) paste = String(args.at(-1) ?? "");
+    if (args.includes("paste-buffer")) {
+      draft += paste;
+      paste = "";
+    }
+    if (args.includes("send-key") && args.includes("return") && draft) {
+      accepted = draft;
+      draft = "";
     }
     if (args.includes("list-workspaces")) {
       return { stdout: JSON.stringify({ workspaces: [] }), stderr: "" };
@@ -42,7 +59,9 @@ function makeSpawnReadyExec(): ExecFn {
       return {
         stdout: JSON.stringify({
           surface: "surface:new",
-          text: launchSent ? "What can I help you with?\n>" : "$ ",
+          text: launchSent
+            ? `Claude Code\n${accepted ? `⏺ ${accepted}\n✻ Working… (esc to interrupt)\n` : "What can I help you with?\n"}❯ ${draft}\n  ⎇ main | 🔧 9`
+            : "$ ",
           lines: 20,
           scrollback_used: false,
         }),

@@ -1,0 +1,74 @@
+{
+  "before": [
+    42
+  ],
+  "after": [
+    42
+  ],
+  "processes": [
+    {
+      "pid": 42,
+      "ppid": 7,
+      "uid": 501,
+      "startSeconds": "123",
+      "startMicroseconds": "10",
+      "cwd": "/synthetic",
+      "identityAfter": {
+        "pid": 42,
+        "ppid": 7,
+        "uid": 501,
+        "startSeconds": "123",
+        "startMicroseconds": "10",
+        "cwd": "/synthetic"
+      },
+      "sessionId": null,
+      "errors": [],
+      "failures": []
+    }
+  ],
+  "reason": null,
+  "membershipReads": [
+    {
+      "operation": "membership-before",
+      "observedPids": [
+        42
+      ],
+      "membership": [
+        42
+      ],
+      "queryBytes": 4,
+      "bytes": 4,
+      "capacityBytes": 1028,
+      "errno": 0,
+      "reason": null,
+      "invalidEntries": []
+    },
+    {
+      "operation": "membership-after",
+      "observedPids": [
+        42
+      ],
+      "membership": [
+        42
+      ],
+      "queryBytes": 4,
+      "bytes": 4,
+      "capacityBytes": 1028,
+      "errno": 0,
+      "reason": null,
+      "invalidEntries": []
+    }
+  ],
+  "rejectedRows": [],
+  "rejectedMembershipReads": [],
+  "helperOutputDigest": "213a221901ca04a02cc32996dd6c031190a18cd051f68a2efffdd0746a930781",
+  "helperExitCode": 0,
+  "runnerProvenance": {
+    "deadlineMs": 10000,
+    "cancellation": "not-requested",
+    "callbackSettled": true,
+    "stderrDigest": null,
+    "errorCode": null,
+    "signal": null
+  }
+}

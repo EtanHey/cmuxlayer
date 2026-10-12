@@ -48,7 +48,7 @@ function bootUnsubmittedNextAction(
   // #793: advise the key-Return only when the engine recorded this caller as
   // the draft's owner; otherwise the ownership guard refuses it.
   const recovery = callerOwnsDraft
-    ? `if the exact boot prompt still occupies the composer, submit your owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}) within 5 minutes (ownership lapses after that, or if the draft changes). Otherwise stop and`
+    ? `from this same caller, if the exact boot prompt still occupies the same agent/session composer and no current quota, permission prompt or picker blocks input (a displayed reset may already have passed), submit your owned draft with send_to({mode:"key",surface:"${surfaceRef}",text:"return"}). Inspect the resulting receipt before any retry; never retype or repeat accepted input. Otherwise stop and`
     : "this caller does not own the draft, so do not send a key Return (the ownership guard refuses it); stop and";
   return `${status} Read the pane with read_screen({surface:"${surfaceRef}"}); ${recovery} report boot_unsubmitted with this agent ID to the lead using the contract collab path. Keep the existing brief intact; never re-spawn.`;
 }

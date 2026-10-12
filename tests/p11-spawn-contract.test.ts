@@ -165,7 +165,7 @@ function makeExec(
     }
     if (args.includes("read-screen")) {
       const surface =
-        surfaces.find(({ ref }) => args.includes(ref)) ?? surfaces[0]!;
+        surfaces.find(({ ref, id }) => args.includes(ref) || Boolean(id && args.includes(id))) ?? surfaces[0]!;
       return {
         stdout: JSON.stringify({
           surface: surface.ref,
@@ -211,6 +211,9 @@ function makeExec(
       if (
         text.trim() &&
         (text.includes("cmuxlayer contract for") ||
+          // Inline mailbox text contains generated harness IDs too; it is
+          // composer input, even when that ID resembles a launcher name.
+          text.includes("cmuxlayer mailbox contract for") ||
           !/[A-Za-z0-9_.-]+(?:Claude|Codex|Cursor|Gemini|Kiro)\b/.test(text))
       ) {
         promptPending = true;
@@ -232,6 +235,26 @@ function makeExec(
       stderr: "",
     };
   }));
+}
+
+/** The inline payload must have painted and been read before its task Return. */
+async function expectInlinePaintBeforeReturn(exec: ExecFn) {
+  const mock = exec as ReturnType<typeof vi.fn>;
+  const inputIndex = mock.mock.calls.findIndex(([, args]: [string, string[]]) =>
+    args.includes("send") && String(args.at(-1)).includes("cmuxlayer mailbox contract for"));
+  expect(inputIndex).toBeGreaterThanOrEqual(0);
+  const text = String(mock.mock.calls[inputIndex]![1].at(-1));
+  const returnIndex = mock.mock.calls.findIndex(([, args]: [string, string[]], index: number) =>
+    index > inputIndex && args.includes("send-key") && args.includes("return"));
+  expect(returnIndex).toBeGreaterThan(inputIndex);
+  const frames: string[] = [];
+  for (let index = inputIndex + 1; index < returnIndex; index++) {
+    if (mock.mock.calls[index]![1].includes("read-screen")) {
+      const result = await mock.mock.results[index]!.value;
+      frames.push(JSON.parse(result.stdout).text);
+    }
+  }
+  expect(frames).toContain(`Claude Code\n❯ ${text}`);
 }
 
 /** Everything typed or pasted at the pane, however it was routed. */
@@ -284,8 +307,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   let exec: ExecFn;
   let server: any;
   let watchRegistryPath: string;
+  let bootContractBefore: string | undefined;
 
   beforeEach(() => {
+    bootContractBefore = process.env.CMUXLAYER_BOOT_CONTRACT;
     rmSync(STATE_DIR, { recursive: true, force: true });
     mkdirSync(STATE_DIR, { recursive: true });
     inboxDir = mkdtempSync(join(tmpdir(), "p11-inbox-"));
@@ -305,6 +330,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   afterEach(() => {
     rmSync(STATE_DIR, { recursive: true, force: true });
     rmSync(inboxDir, { recursive: true, force: true });
+    expect(process.env.CMUXLAYER_BOOT_CONTRACT).toBe(bootContractBefore);
   });
 
   async function spawn(
@@ -595,7 +621,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           (arg) => arg.includes("[report]") && arg.includes(child.report_path),
         ),
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     const afterFirstWake = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
     watchNow = 2_000;
@@ -641,8 +667,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   }
 
-  it("warns once at the report deadline, then wakes once per distinct content after restart", () => verifyReportWatchDelivery(false));
-  it("#636 D3 engine watch pushes bypass worker collab routing through deadline and report changes", () => verifyReportWatchDelivery(true));
+  it("warns once at the report deadline, then keeps report revisions quiet after restart", () => verifyReportWatchDelivery(false));
+  it("#636 D3 engine deadlines bypass worker collab routing while report changes stay quiet", () => verifyReportWatchDelivery(true));
 
 
 
@@ -778,7 +804,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
             arg.includes("[report]") && arg.includes(child.report_path),
         ),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("drops a child-scoped report watch when close_surface closes the agent", async () => {
@@ -2038,6 +2064,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: "cmuxlayerClaude",
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -2053,7 +2080,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
         args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+          (arg) => arg.includes("[watch]") && arg.includes(reportPath),
         ),
       ),
     ).toBe(true);
@@ -2126,6 +2153,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: exactOwnerId,
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -2139,7 +2167,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(before);
     const isReportWake = ([, args]: [string, string[]]) =>
-      args.some((arg) => arg.includes("[report]") && arg.includes(reportPath));
+      args.some((arg) => arg.includes("[watch]") && arg.includes(reportPath));
     expect(
       wakeCalls.some(
         (call: [string, string[]]) =>
@@ -2205,6 +2233,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: "cmuxlayerClaude",
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -2221,7 +2250,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       wakeCalls.some(([, args]: [string, string[]]) =>
           args.includes("surface:new") &&
           args.some(
-            (arg) => arg.includes("[report]") && arg.includes(reportPath),
+            (arg) => arg.includes("[watch]") && arg.includes(reportPath),
           ),
       ),
     ).toBe(true);
@@ -2710,6 +2739,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     engine.stateMgr.writeState(child);
     engine.getRegistry().set(child.agent_id, child);
     await engine.armWatch({
+      provenance: "public",
       owner: "retired-lead-seat",
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -2772,6 +2802,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     engine.stateMgr.writeState(child);
     engine.getRegistry().set(child.agent_id, child);
     await engine.armWatch({
+      provenance: "public",
       owner: ownerId,
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -2818,7 +2849,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       resumedWakeCalls.some(([, args]: [string, string[]]) =>
         args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+          (arg) => arg.includes("[watch]") && arg.includes(reportPath),
         ),
       ),
     ).toBe(true);
@@ -3033,6 +3064,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: parent.agent_id,
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -3050,7 +3082,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
         args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+          (arg) => arg.includes("[watch]") && arg.includes(reportPath),
         ),
       ),
     ).toBe(true);
@@ -3104,6 +3136,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: parent.agent_id,
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -3125,7 +3158,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(
       localWakeCalls.filter(([, args]: [string, string[]]) =>
         args.some(
-          (arg) => arg.includes("[report]") && arg.includes(reportPath),
+          (arg) => arg.includes("[watch]") && arg.includes(reportPath),
         ),
       ),
     ).toHaveLength(1);
@@ -3284,7 +3317,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     ]);
   });
 
-  it("keeps a delivered content watch armed while a terminal record still has a live pane", async () => {
+  it("keeps a diagnostic report watch armed without waking for terminal report edits", async () => {
     await server.close();
     const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -3360,7 +3393,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
           (arg) => arg.includes("[report]") && arg.includes(reportPath),
         ),
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
     ).toMatchObject({
@@ -3952,6 +3985,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: owner.agent_id,
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -3970,7 +4004,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     expect(
       wakeCalls.some(([, args]: [string, string[]]) =>
-        args.some((arg) => arg.includes("[report]")),
+        args.some((arg) => arg.includes("[watch]")),
       ),
     ).toBe(false);
   });
@@ -4227,6 +4261,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       // failure.
       expect(parsed.ok).toBe(true);
       expect(parsed.contract_path).toBeUndefined();
+      await expectInlinePaintBeforeReturn(blockedExec);
       // No dangling pointer on the wire, and the mailbox contract still got
       // through: the worker loses the report half, not its inbox.
       const wire = sentText(blockedExec);
@@ -4250,9 +4285,11 @@ describe("P11 spawn_agent issues the coordination contract", () => {
   });
 
   it("P11b: CMUXLAYER_BOOT_CONTRACT=inline restores the pre-P11b inline contract", async () => {
+    const previous = process.env.CMUXLAYER_BOOT_CONTRACT;
     process.env.CMUXLAYER_BOOT_CONTRACT = "inline";
     try {
       const parsed = await spawn();
+      await expectInlinePaintBeforeReturn(exec);
       expect(sentText(exec)).toContain("cmuxlayer mailbox contract for");
       expect(parsed.contract_path).toBeUndefined();
       // Provenance follows the mode: inline cannot carry the report contract,
@@ -4261,7 +4298,8 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       expect(parsed.coordination_footer_note).toMatch(/not_wired/);
       expect(sentText(exec)).not.toContain(parsed.report_path);
     } finally {
-      delete process.env.CMUXLAYER_BOOT_CONTRACT;
+      if (previous === undefined) delete process.env.CMUXLAYER_BOOT_CONTRACT;
+      else process.env.CMUXLAYER_BOOT_CONTRACT = previous;
     }
   });
 
@@ -4522,6 +4560,141 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(detail.report_path).toBe(override);
   });
 
+  it.each(["normal", "marker-write failure"])("relays fast spawned BLOCKED then DONE once each and preserves public change watches (%s)", async (mode) => {
+    await server.close();
+    const parentUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const childUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const childSurface = {
+      id: childUuid, ref: "surface:child", title: "child-pane",
+      text: "Claude Code\nWhat can I help you with?\n❯ ",
+    };
+    const baseExec = makeExec("Claude Code\nWhat can I help you with?\n❯ ",
+      "parent-pane", undefined, [childSurface], parentUuid);
+    exec = withFakeRightSplitTopology(vi.fn().mockImplementation(async (cmd, args: string[]) => {
+      if (args.includes("new-split")) return { stdout: JSON.stringify({
+        workspace: "workspace:1", surface: childSurface.ref, surface_id: childUuid,
+        pane: "pane:1", title: "", type: "terminal",
+      }), stderr: "" };
+      return baseExec(cmd, args);
+    }));
+    const options = withTestSurfaceObserver({
+      exec, stateDir: STATE_DIR, disableSpawnPreflight: true,
+      inboxBaseDir: inboxDir, watchRegistryPath,
+    });
+    server = createServer(options);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    let engine = engineForTests(server);
+    const useCapturedTransport = () => vi.spyOn(
+      (engine as unknown as { client: { getTransportHealth: () => unknown } }).client,
+      "getTransportHealth",
+    ).mockReturnValue({ mode: "socket", degraded: false });
+    useCapturedTransport();
+    const parent = parentRecord(parentUuid);
+    const reportPath = join(inboxDir, "verified-report.md");
+    engine.stateMgr.writeState(parent);
+    engine.getRegistry().set(parent.agent_id, parent);
+    const child = await spawn({ parent_agent_id: parent.agent_id, report_path: reportPath }, server, parentUuid);
+    expect(child.ok, JSON.stringify(child)).toBe(true);
+    const booted = engine.stateMgr.readState(child.agent_id)!;
+    expect(booted.report_episode_key).toBe(`${booted.boot_instance_id}:0`);
+    expect(booted.report_done_delivery_id).not.toBe(booted.report_blocked_delivery_id);
+    const blockedPings = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[report] ${child.agent_id} blocked — read ${reportPath}`)),
+    );
+    const blockedMarker = child.done_marker.replace(/^DONE_/, "BLOCKED_");
+    expect(readFileSync(child.contract_path, "utf8")).toContain(blockedMarker);
+    // The captured launcher submits the task; the worker finishes before its first sweep.
+    childSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
+    writeFileSync(reportPath, `${blockedMarker}\n`);
+    await engine.runSweep();
+    await engine.runSweep();
+    expect(blockedPings()).toHaveLength(1);
+    expect(engine.assessHarvestability(engine.stateMgr.readState(child.agent_id)!).closeable).toBe(false);
+    childSurface.text = "Claude Code\n✻ Thinking… (esc to interrupt)";
+    writeFileSync(reportPath, "Working\n");
+    await engine.armWatch({ owner: parent.agent_id, subject_agent_id: child.agent_id,
+      provenance: "engine", target: reportPath, change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    await engine.runSweep();
+    expect(engine.stateMgr.readState(child.agent_id)?.report_episode_key,
+      JSON.stringify(engine.stateMgr.readState(child.agent_id))).toBeTruthy();
+    const pings = () => (exec as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[report] ${child.agent_id} done — read ${reportPath}`)),
+    );
+    writeFileSync(reportPath, "Still working\n");
+    await engine.sweepWatchesBestEffort();
+    expect(pings()).toHaveLength(0);
+    writeFileSync(reportPath, `Complete\n${child.done_marker}\n`);
+    engine.stateMgr.transition(child.agent_id, "done");
+    engine.getRegistry().set(child.agent_id, engine.stateMgr.readState(child.agent_id)!);
+    await engine.runSweep();
+    expect(pings()).toHaveLength(0);
+    // Pending DONE survives a daemon restart before the worker becomes resting.
+    await server.close();
+    server = createServer(options);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    engine = engineForTests(server);
+    useCapturedTransport();
+    childSurface.text = "Claude Code\nWhat can I help you with?\n❯ ";
+    const updateRecord = engine.stateMgr.updateRecord.bind(engine.stateMgr);
+    const markerWrite = vi.spyOn(engine.stateMgr, "updateRecord").mockImplementation((id, patch) => {
+      if (mode === "marker-write failure" && id === child.agent_id && patch.report_done_notified_episode) {
+        expect(pings()).toHaveLength(1); // The real in-process relay has already submitted.
+        throw new Error("injected relay report marker write failure");
+      }
+      return updateRecord(id, patch);
+    });
+    await engine.runSweep();
+    expect(pings()).toHaveLength(1);
+    if (mode === "marker-write failure") {
+      const pending = engine.stateMgr.readState(child.agent_id)!;
+      expect(pending.report_done_notified_episode ?? null).toBeNull();
+      expect(engine.getRegistry().get(child.agent_id)!.report_done_notified_episode ?? null).toBeNull();
+      const receipt = engine.getDeliveryReceipt(pending.report_done_delivery_id!)!;
+      expect(receipt.agent_id).toBe(parent.agent_id);
+      expect(receipt.text).toBe(`[report] ${child.agent_id} done — read ${reportPath}`);
+      expect(receipt.delivery_state).toBe("submitted");
+      await engine.runSweep();
+      expect(pings()).toHaveLength(1); // In-memory delivery dedupe; persistence still fails.
+      markerWrite.mockRestore();
+      await server.close();
+      server = createServer(options);
+      await server._registeredTools.list_agents.handler({}, {} as never);
+      engine = engineForTests(server);
+      useCapturedTransport();
+      await engine.runSweep(); // Persistent relay receipt suppresses the retransmission.
+      expect(pings()).toHaveLength(1);
+      expect(engine.stateMgr.readState(child.agent_id)!.report_done_delivery_id).toBe(pending.report_done_delivery_id);
+    } else {
+      markerWrite.mockRestore();
+    }
+    const episode = engine.stateMgr.readState(child.agent_id)!;
+    expect(episode.report_done_notified_episode).toBe(episode.report_episode_key);
+    await engine.sweepWatchesBestEffort();
+    await engine.runSweep();
+    writeFileSync(reportPath, `Edited complete\n${child.done_marker}\n`);
+    await engine.runSweep();
+    expect(pings()).toHaveLength(1);
+    await server.close();
+    server = createServer(options);
+    await server._registeredTools.list_agents.handler({}, {} as never);
+    engine = engineForTests(server);
+    useCapturedTransport();
+    await engine.runSweep();
+    expect(pings()).toHaveLength(1);
+    writeFileSync(reportPath, `${blockedMarker}\n`);
+    await engine.runSweep();
+    expect(blockedPings()).toHaveLength(1);
+    await engine.armWatch({ owner: parent.agent_id, provenance: "public", target: reportPath,
+      change: "content", deadline: Number.MAX_SAFE_INTEGER });
+    const beforePublic = (exec as ReturnType<typeof vi.fn>).mock.calls.length;
+    writeFileSync(reportPath, `Public file revision\n${child.done_marker}\n`);
+    await engine.sweepWatchesBestEffort();
+    expect((exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforePublic).some(
+      ([, args]: [string, string[]]) => args.some((arg) => arg.includes(`[watch] file changed — inspect ${reportPath}`)),
+    )).toBe(true);
+    expect(pings()).toHaveLength(1);
+  });
+
   it("W5 refuses a shared collab as a worker report target before launch", async () => {
     const collab = join(inboxDir, "shared-collab.md");
     await server.close();
@@ -4608,7 +4781,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const reportCalls = (exec as ReturnType<typeof vi.fn>).mock.calls.slice(beforeReport);
     expect(reportCalls.some(([, args]: [string, string[]]) =>
       args.some((arg) => arg.includes("[report] changed") && arg.includes(child.report_path)),
-    )).toBe(true);
+    )).toBe(false);
   });
 
   it("never repurposes or lifecycle-deletes a public aliased watch when a child adopts its report path", async () => {
@@ -5042,6 +5215,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       engine.getRegistry().set(record.agent_id, record);
     }
     await engine.armWatch({
+      provenance: "public",
       owner: "cmuxlayerClaude",
       subject_agent_id: child.agent_id,
       target: reportPath,
@@ -5061,7 +5235,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const wakeCalls = (exec as ReturnType<typeof vi.fn>).mock.calls
       .slice(beforeWake)
       .filter(([, args]: [string, string[]]) =>
-        args.some((arg) => arg.includes("[report]") && arg.includes(reportPath)),
+        args.some((arg) => arg.includes("[watch]") && arg.includes(reportPath)),
       );
     const watch = readWatchRegistry({
       registryPath: watchRegistryPath,

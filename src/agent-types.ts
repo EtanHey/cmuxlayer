@@ -19,7 +19,10 @@ export type AgentRole = "orchestrator" | "worker";
 export type AgentAuthority = "lead" | "worker";
 export type AgentFunction = "implementor" | "reviewer" | "gatherer";
 export type AgentPlacement = "left" | "right";
-export type SurfaceProvenance = "cmuxlayer_spawn" | "unknown";
+export type SurfaceProvenance = "cmuxlayer_spawn" | "session_registration" | "unknown";
+export function isManagedSurfaceProvenance(value: SurfaceProvenance | undefined): boolean {
+  return value === "cmuxlayer_spawn" || value === "session_registration";
+}
 export type SeatIdentityStatus = "ok" | "mismatch" | "unknown";
 // `disk` is a filesystem observation (today: the harness session artifact
 // behind `resumable`, #482), as opposed to a remembered registry field.
@@ -48,6 +51,15 @@ export interface AgentRecord {
   surface_uuid?: string | null;
   /** cmux app/socket instance that is authoritative for surface absence. */
   surface_observer_id?: string | null;
+  /** Scope evidence retained on unbind; never used as a resume destination. */
+  previous_surface_binding?: { surface_uuid: string; workspace_id: string; observer_id: string } | null;
+  /** Retired discovery IDs still route receipts to this managed identity. */
+  session_continuity_aliases?: string[];
+  /** Durable receipt for explicit, evidence-pinned existing-session adoption. */
+  session_adoption?: { request_sha256: string; evidence_sha256: string; observer_epoch?: string; status: "pending_verify" | "adopted" };
+  /** Exact SessionStart proof used to recover a legacy registry binding. */
+  session_recovery_audit?: string;
+
   /** Durable authority for automated role-placement mutations. */
   surface_provenance?: SurfaceProvenance;
   /** One automatic move is allowed for this stable surface and registration. */
@@ -133,6 +145,15 @@ export interface AgentRecord {
   /** Last confirmed return from done to working on the same live surface. */
   reopened_at?: string | null;
   reopen_count?: number;
+  /** Artifact version at verified delivery; unchanged reports cannot prove new work. */
+  reopen_report_mtime_ms?: number | null;
+  /** Verified working episode and durable completion receipt for parent reports. */
+  report_episode_key?: string | null;
+  report_episode_started_at?: string | null;
+  report_done_delivery_id?: string | null;
+  report_done_notified_episode?: string | null;
+  report_blocked_delivery_id?: string | null;
+  report_blocked_notified_episode?: string | null;
   /** First-connect skipped transcript identity resolution; retry on bounded sweeps. */
   transcript_session_capture_deferred?: boolean;
   /** Failed deferred transcript resolver calls, persisted across restarts. */

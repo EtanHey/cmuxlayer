@@ -77,6 +77,27 @@ export type AgentDeliveryState =
   | "failed_confirmed"
   | "stalled_queue";
 
+/** Private, pre-submit report evidence; never expose report contents in receipts. */
+export interface ReportSubmissionEvidence {
+  boot: string;
+  parent: string;
+  path: string;
+  marker: string;
+  mtime_ms: number;
+  outcome: "done" | "blocked" | null;
+  prior: {
+    key: string;
+    started_at: string;
+    floor: number | null;
+    done_id: string | null;
+    blocked_id: string | null;
+    done_notified: boolean;
+    blocked_notified: boolean;
+  };
+  done_id: string;
+  blocked_id: string;
+}
+
 export interface AgentDeliveryReceipt {
   delivery_id: string;
   agent_id: string;
@@ -102,10 +123,28 @@ export interface AgentDeliveryReceipt {
   boot_recovery?: boolean;
   /** The exact boot generation whose pointer the receipt verifies. */
   boot_instance_id?: string;
+  /** Owned recovery's immutable attribution, captured before awaiting its ACK. */
+  boot_recovery_context?: {
+    caller_agent_id: string | null;
+    surface_uuid: string | null;
+    workspace_id: string | null;
+    cli_session_id: string | null;
+    pre_type_screen: string | null;
+  };
   /** Durable one-time completion after the matching boot state is repaired. */
   boot_recovery_finalized_at?: string;
   /** Persisted before terminal mutation; a nonterminal value is never replayed after restart. */
   submission_started_at?: string | null;
+  /** Captured before this input; stable across late ACKs and receipt updates. */
+  report_submission?: ReportSubmissionEvidence | null;
+  report_reopen_armed?: boolean;
+  report_done_notified?: boolean;
+  report_blocked_notified?: boolean;
+  report_prior_done_notified?: boolean;
+  report_prior_blocked_notified?: boolean;
+  /** Frozen terminal observations, persisted before parent send; ACK bits govern replay. */
+  report_pending_done?: { mtime_ms: number; delivery_id: string };
+  report_pending_blocked?: { mtime_ms: number; delivery_id: string };
   /** Earliest wall-clock time at which a known pre-mutation rejection may retry. */
   next_attempt_at?: string | null;
   /** The receiving TUI visibly accepted this into its own queue; never replay it. */
@@ -379,6 +418,8 @@ export type CodexModelListRunner = (
 ) => Promise<{ stdout: string; stderr?: string }>;
 
 export interface AgentEngineOptions {
+  /** Disable on observer-only runtimes that have no parent report relay. */
+  reportOutcomeNotifications?: boolean;
   /** Debug-only sweep phase timings. Defaults to stderr-safe console.debug. */
   sweepDebugLog?: (message: string) => void;
   spawnPreflight?: (
@@ -410,6 +451,7 @@ export interface AgentEngineOptions {
   ) => SelfRegistrationSessionEntry | null;
   /** #926: resume's process-table proof; defaults to a `ps` argv scan. */
   sessionProcessScanner?: SessionProcessScanner;
+  adoptionOptions?: import("../session-adoption.js").AdoptionOptions;
   roleSurfaceIdsProvider?: (
     liveSurfaceIds?: ReadonlySet<string>,
     workspace?: string,
@@ -529,7 +571,7 @@ export interface RolePlacementReconcileSummary {
   }>;
 }
 
-export type AgentLifecycleEvent = "spawned" | "done" | "errored" | "health";
+export type AgentLifecycleEvent = "spawned" | "done" | "blocked" | "errored" | "health";
 
 export const TERMINAL_STATES = new Set<AgentState>(["done", "error"]);
 
@@ -938,6 +980,7 @@ export const STATE_SIDEBAR: Record<AgentState, { icon: string; color: string }> 
 export const LIFECYCLE_LOGS = {
   spawned: { message: "spawned", level: "info" },
   done: { message: "done", level: "success" },
+  blocked: { message: "blocked", level: "warning" },
   errored: { message: "errored", level: "error" },
   health: { message: "health", level: "warning" },
 } as const;

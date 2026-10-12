@@ -365,7 +365,7 @@ export const PUBLIC_TOOL_OUTPUT_SCHEMAS: Readonly<Record<string, z.ZodTypeAny>> 
   update_surface: z
     .object({
       ...BaseOutputShape,
-      action: z.enum(["move", "rename"]).optional(),
+      action: z.enum(["move", "rename", "adopt_session"]).optional(),
       surface: z.string().optional(),
       pane: z.string().optional(),
       workspace: z.string().optional(),

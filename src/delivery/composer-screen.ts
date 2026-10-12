@@ -304,6 +304,19 @@ export function extractComposerInputRegion(
   if (isPickerOrMenuScreen(screenText, cli ?? undefined)) return null;
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
+  // Captured Claude footer: a damaged rule is chrome only when separated
+  // from the draft by a blank row and followed by its known branch footer.
+  // Never discard replacement characters or rule-shaped authored rows alone.
+  if (cli === "claude") {
+    for (let index = start + 1; index < end - 1; index++) {
+      if (!lines[index - 1]?.trim() && /^─{8,}�{1,3}─{8,}$/u.test(lines[index] ?? "") &&
+          /^\s*⎇\s/u.test(lines[index + 1] ?? "") &&
+          lines.slice(index + 2).every(isComposerFooterOrChromeLine)) {
+        end = index - 1;
+        break;
+      }
+    }
+  }
   while (end > start && isComposerFooterOrChromeLine(lines[end - 1] ?? "")) {
     end -= 1;
   }
@@ -548,12 +561,14 @@ function codexWrapFragment(text: string, from: number): string {
  * renderer's; any other whitespace at a row break (two spaces, a tab, spaces
  * before a newline) cannot be proven from the screen and never matches.
  */
-function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): boolean {
+function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1, splitHyphens = true): boolean {
   const text = normalizeTerminalText(payload).trimEnd();
   const visible = rows.map((row) => row.trimEnd());
   while (visible.length > 0 && !visible[visible.length - 1]) visible.pop();
   if (!text || visible.length === 0) return false;
   const width = (value: string) => [...value].length;
+  const fragment = (from: number) => splitHyphens ? codexWrapFragment(text, from)
+    : /^[^\s]*/.exec(text.slice(from))?.[0] ?? "";
   let low = Math.max(1, minWidth);
   let high = Number.POSITIVE_INFINITY;
   let position = 0;
@@ -583,10 +598,10 @@ function codexRenderedRowsMatch(rows: string[], payload: string, minWidth = 1): 
     }
     if (!row) return false;
     if (whitespace) {
-      high = Math.min(high, width(row) + width(whitespace) + width(codexWrapFragment(text, next)));
+      high = Math.min(high, width(row) + width(whitespace) + width(fragment(next)));
       position = next;
-    } else if (/[\p{L}\p{N}]-$/u.test(row) && /^[\p{L}\p{N}]/u.test(text.slice(position))) {
-      high = Math.min(high, width(row) + width(codexWrapFragment(text, position)));
+    } else if (splitHyphens && /[\p{L}\p{N}]-$/u.test(row) && /^[\p{L}\p{N}]/u.test(text.slice(position))) {
+      high = Math.min(high, width(row) + width(fragment(position)));
     } else {
       high = Math.min(high, width(row) + 1);
     }
@@ -615,7 +630,7 @@ export function composerRegionMatchesPayload(
   // renderer wraps qualify; short rows, edited spacing and paste placeholders
   // cannot establish ownership of the original payload.
   if (cli === "claude" && screenText !== undefined && region.includes("\n")) {
-    return codexRenderedRowsMatch(region.split("\n"), payload, codexWrapWidthFloor(screenText));
+    return codexRenderedRowsMatch(region.split("\n"), payload, codexWrapWidthFloor(screenText), false);
   }
   if (cli !== "codex") return false;
   if (!region.trim()) return expected === "";
@@ -1385,13 +1400,14 @@ export function composeBootDeliveryText(
 ): string {
   if (!hasInlinePrompt(injectedPrompt)) return callerDeliveryText;
   if (!hasInlinePrompt(callerDeliveryText)) return injectedPrompt;
-  // Claude and Antigravity (cli "gemini", #801) can treat a paragraph break in
-  // a pasted boot payload as a submit boundary. Keep the brief and pointer in
+  // Codex initialization, Claude and Antigravity (cli "gemini", #801) can
+  // treat a paragraph break in a pasted boot payload as a submit boundary.
+  // Keep the brief and pointer in
   // one composer message so the brief cannot run while the engine-issued
   // contract remains unsent. A multi-line brief without a paragraph break has
   // the same boundary risk.
   if (
-    (cli === "claude" || cli === "gemini") &&
+    (cli === "codex" || cli === "claude" || cli === "gemini") &&
     !/\r?\n\s*\r?\n/.test(callerDeliveryText) &&
     !/\r?\n\s*\r?\n/.test(injectedPrompt)
   ) {

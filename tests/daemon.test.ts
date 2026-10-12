@@ -1,8 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { describe, it, expect, vi, beforeAll, afterEach, afterAll } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { StateManager } from "../src/state-manager.js";
 import { dirname, join } from "node:path";
 import { defaultDaemonSocketPath } from "../src/daemon-socket-path.js";
@@ -26,7 +26,8 @@ import { AgentDiscovery } from "../src/agent-discovery.js";
 import { inboxPath, readInbox } from "../src/inbox.js";
 import { engineForTests } from "../src/server.js";
 
-const TEST_ROOT = join("/tmp", "cmuxlayer-daemon-test");
+// Reserve a short root for this run; another suite must never share its cleanup.
+let TEST_ROOT: string;
 const TEST_OBSERVER_OWNER = "cmux:/tmp/cmux-daemon-test.sock";
 
 function normalizeObservationTimes(value: unknown): unknown {
@@ -495,13 +496,21 @@ describe("CmuxLayerDaemon", () => {
     return daemon;
   };
 
+  beforeAll(() => {
+    TEST_ROOT = mkdtempSync(join("/tmp", "cmuxd-"));
+  });
+
   afterEach(async () => {
     await Promise.all(
       [...intervalDaemons].map((daemon) => daemon.shutdown().catch(() => {})),
     );
     intervalDaemons.clear();
-    rmSync(TEST_ROOT, { recursive: true, force: true });
+    for (const entry of readdirSync(TEST_ROOT)) {
+      rmSync(join(TEST_ROOT, entry), { recursive: true, force: true });
+    }
   });
+
+  afterAll(() => rmSync(TEST_ROOT, { recursive: true, force: true }));
 
   it("runDaemon persists only inside the configured state sandbox", async () => {
     const sandbox = stateDir("env-state-sandbox");
@@ -1351,7 +1360,10 @@ describe("CmuxLayerDaemon", () => {
         },
       });
 
-      expect(response.result?.structuredContent).toMatchObject({
+      expect(
+        response.result?.structuredContent,
+        `spawn_agent structuredContent: ${JSON.stringify(response.result?.structuredContent)}`,
+      ).toMatchObject({
         ok: true,
         workspace_id: "workspace:1",
       });
@@ -1451,11 +1463,17 @@ describe("CmuxLayerDaemon", () => {
         }),
       ]);
 
-      expect(xResponse.result?.structuredContent).toMatchObject({
+      expect(
+        xResponse.result?.structuredContent,
+        `spawn_agent X structuredContent: ${JSON.stringify(xResponse.result?.structuredContent)}`,
+      ).toMatchObject({
         ok: true,
         workspace_id: "workspace:10",
       });
-      expect(yResponse.result?.structuredContent).toMatchObject({
+      expect(
+        yResponse.result?.structuredContent,
+        `spawn_agent Y structuredContent: ${JSON.stringify(yResponse.result?.structuredContent)}`,
+      ).toMatchObject({
         ok: true,
         workspace_id: "workspace:11",
       });

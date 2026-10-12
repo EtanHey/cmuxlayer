@@ -287,10 +287,26 @@ export async function sendInput(
       );
     }
 
+    const receiptEngine = context.lifecycleSweepEngine;
     const delivery = await withSurfaceWrite(
       route.surface,
       async () => {
         await route.assertCurrent();
+        if (sourceEvent === "send_to" && args.press_enter && deliveryId && targetRecord && receiptEngine) {
+          // Capture and persist the report baseline before a fast worker can
+          // replace it. Later transport updates preserve this first evidence.
+          receiptEngine.acceptPendingVerify({
+            delivery_id: deliveryId,
+            agent_id: targetRecord.agent_id,
+            text: sanitizedText,
+            press_enter: true,
+            codex_busy_mode: args.codex_busy_mode,
+            source_event: "send_to",
+            retry_count: 0,
+            typed: false,
+            submit_dispatched: false,
+          });
+        }
         return executeDeliveryEngine({
           surface: route.surface,
           workspace: route.workspace,
@@ -322,7 +338,6 @@ export async function sendInput(
       },
     );
 
-    const receiptEngine = context.lifecycleSweepEngine;
     if (
       sourceEvent === "send_to" &&
       deliveryId &&

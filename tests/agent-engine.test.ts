@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { parseScreen } from "../src/screen-parser.js";
 import { resolveLiveAgentState } from "../src/live-agent-state.js";
 import {
@@ -37,6 +38,7 @@ import {
 } from "../src/agent-engine.js";
 import { launcherNameCandidates } from "../src/launcher-registry.js";
 import { toAgentStatePayload } from "../src/agent-facade.js";
+import { makeSelfRegistrationContinuityResolver, makeSelfRegistrationSessionResolver } from "../src/self-registration.js";
 import { StateManager } from "../src/state-manager.js";
 import {
   AgentRegistry,
@@ -7553,6 +7555,343 @@ Session ID: ${sessionId}`,
       });
       return record;
     }
+
+    it.each([
+      "fresh",
+      "existing-auto-unbound",
+      "late-hook",
+      "old-live",
+      "multiple-live",
+      "stale",
+      "future",
+      "session-mismatch",
+      "cli-swap",
+      "cwd-swap",
+      "cross-workspace",
+      "observer-swap",
+      "observer-race",
+      "ref-recycle",
+      "managed-collision",
+      "legacy-unscoped",
+      "auto-pending",
+      "fresh-conflict",
+      "mixed-topology",
+      "dead-pid",
+      "pid-conflict",
+    ])(
+      "recovers a resumed managed lead safely (%s)", async mode => {
+      const lead = makeRecord({
+        agent_id: "brainlayerCodex-managed", cli: "codex", cli_session_id: "resumed-session",
+        surface_id: "surface:old", surface_uuid: "old-uuid", workspace_id: "ws:placement",
+        surface_observer_id: "observer-A", surface_provenance: "cmuxlayer_spawn",
+        launch_cwd: "/synthetic/brainlayer", role: "orchestrator", authority: "lead", placement: "left",
+        parent_agent_id: "orc", collab_path: "/synthetic/collab.md", pid: null,
+        boot_prompt_pending: true, prompt_delivered: false,
+      });
+      const current = { ...lead, surface_id: "surface:resumed", surface_uuid: "new-uuid" };
+      installTwoColumnTopology(current);
+      const child = makeRecord({
+        agent_id: "child", surface_id: "surface:right-target", surface_uuid: liveSurfaces[1]!.id,
+        workspace_id: "ws:placement", surface_observer_id: "observer-A", parent_agent_id: lead.agent_id,
+        surface_provenance: "cmuxlayer_spawn", role: "worker", state: "working",
+      });
+      execFileSyncMock.mockReturnValue(new Date(Date.now() - 10_000).toString());
+      const hook = { session_id: lead.cli_session_id,
+        surface_uuid: current.surface_uuid, cwd: lead.launch_cwd, cli: "codex", pid: process.pid, ts: Date.now() };
+      if (mode === "stale") hook.ts -= 86_400_001;
+      if (mode === "future") hook.ts += 10_000;
+      if (mode === "session-mismatch") hook.session_id = "foreign-session";
+      if (mode === "cli-swap") hook.cli = "claude";
+      if (mode === "cwd-swap") hook.cwd = "/synthetic/foreign";
+      if (mode === "dead-pid") hook.pid = DEAD_PID;
+      let registration = mode === "late-hook" ? "" : JSON.stringify(hook);
+      if (mode === "multiple-live") registration += "\n" + JSON.stringify({ ...hook, surface_uuid: child.surface_uuid });
+      if (mode === "fresh-conflict") registration += "\n" + JSON.stringify({ ...hook, session_id: "other", ts: hook.ts + 1 });
+      if (mode === "pid-conflict") registration += "\n" + JSON.stringify({ ...hook, pid: hook.pid + 1, ts: hook.ts + 1 });
+      const resolver = makeSelfRegistrationSessionResolver({ readFile: () => registration });
+      let epoch = "epoch-A";
+      const registry = new AgentRegistry(stateMgr, async () => {
+        if (mode === "observer-race") epoch = "epoch-B";
+        return liveSurfaces;
+      }, {
+        observerId: "observer-A", observerEpochProvider: () => epoch,
+        sessionContinuityResolver: makeSelfRegistrationContinuityResolver({ readFile: () => registration }),
+      });
+      for (const record of [lead, child]) { stateMgr.writeState(record); registry.set(record.agent_id, record); }
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, registry, mockClient, {
+        selfRegistrationSessionResolver: resolver, sessionProcessScanner: async () => [],
+        sessionIdentityResolver: () => null, inboxOpts: { baseDir: TEST_DIR },
+      });
+      const discovered = [{
+        surface_id: current.surface_id, surface_uuid: current.surface_uuid, workspace_id: "ws:placement",
+        surface_title: "brainlayer-lead", cli: "codex", model: "GPT-6", parsed_status: "idle",
+        control_state: "active", has_agent: true, read_error: false,
+        current_directory: lead.launch_cwd, working_directory_source: "terminal_metadata",
+      }];
+      let autoId: string | undefined;
+      if (["existing-auto-unbound", "auto-pending"].includes(mode)) {
+        autoId = "auto-codex-new-uuid";
+        const auto = stateMgr.ensureAutoRecord(autoId, discovered[0] as any, "observer-A");
+        if (mode === "auto-pending") auto.boot_prompt_pending = true;
+        stateMgr.writeState(auto); registry.set(autoId, auto);
+        mkdirSync(join(TEST_DIR, autoId), { recursive: true });
+        writeFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), '{"delivery":"pending_verify"}\n');
+        discovered[0] = { ...discovered[0]!, managed_role: "worker" } as any;
+        registry.set(lead.agent_id, stateMgr.unbindSurface(lead.agent_id, "testClosedTab"));
+      }
+      if (mode === "old-live") liveSurfaces.push({ ...makeSurface(lead.surface_id), id: lead.surface_uuid!, workspace_ref: lead.workspace_id! });
+      if (mode === "cross-workspace") lead.workspace_id = "ws:foreign";
+      if (mode === "observer-swap") lead.surface_observer_id = "observer-B";
+      if (mode === "legacy-unscoped") { lead.surface_id = "surface:unbound"; lead.surface_uuid = null; lead.workspace_id = null; }
+      if (mode === "mixed-topology") delete liveSurfaces[1]!.id;
+      if (mode === "ref-recycle") liveSurfaces[0] = { ...liveSurfaces[0]!, ref: "surface:recycled" };
+      if (mode === "managed-collision") {
+        const duplicate = { ...lead, agent_id: "second-managed" };
+        stateMgr.writeState(duplicate); registry.set(duplicate.agent_id, duplicate);
+      }
+      if (!["existing-auto-unbound", "auto-pending"].includes(mode)) { stateMgr.writeState(lead); registry.set(lead.agent_id, lead); }
+      const discovery = { scan: vi.fn().mockResolvedValue(discovered) } as any;
+      if (!["fresh", "existing-auto-unbound", "late-hook"].includes(mode)) {
+        const before = stateMgr.readState(lead.agent_id);
+        await registry.listMerged(discovery, { nonDestructive: true });
+        expect(stateMgr.readState(lead.agent_id)).toEqual(before);
+        expect(registry.list().find(r => r.surface_uuid === current.surface_uuid)?.role).not.toBe("orchestrator");
+        return;
+      }
+      if (mode === "late-hook") {
+        await registry.listMerged(discovery);
+        registration = JSON.stringify(hook);
+      }
+      for (const trigger of ["idle", "boot", "idle"] as const) {
+        await registry.recoverSessionContinuityFromDiscovery(discovered as any, registry.getObserverEpoch());
+        registry.repairFromDiscovery(discovered as any, { orphansOnly: true });
+        await registry.listMerged(discovery);
+        await engine.reconcileRolePlacements(trigger);
+      }
+      registration = JSON.stringify({ ...hook, ts: Date.now() });
+      await registry.listMerged(discovery);
+      await engine.reconcileRolePlacements("boot");
+      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.newSurface).not.toHaveBeenCalled();
+      expect(mockClient.send).not.toHaveBeenCalled();
+      expect(registry.get(lead.agent_id)).toMatchObject({
+        surface_id: current.surface_id, surface_uuid: current.surface_uuid,
+        cli_session_id: lead.cli_session_id, role: "orchestrator", authority: "lead", placement: "left",
+        parent_agent_id: "orc", collab_path: lead.collab_path,
+        boot_prompt_pending: true, prompt_delivered: false,
+      });
+      expect(registry.list().filter(r => r.surface_uuid === current.surface_uuid)).toHaveLength(1);
+      expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBe(current.surface_uuid);
+      if (autoId) {
+        expect(readFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), "utf8")).toContain("pending_verify");
+        expect(existsSync(join(TEST_DIR, autoId, "state.continuity-retired.json"))).toBe(true);
+        await registry.reconstitute();
+        expect(registry.get(autoId)?.agent_id).toBe(lead.agent_id);
+        expect(stateMgr.readState(autoId)?.agent_id).toBe(lead.agent_id);
+      }
+      expect(registry.get(child.agent_id)).toMatchObject({ parent_agent_id: lead.agent_id, role: "worker", workspace_id: "ws:placement" });
+    });
+
+    it.each(["legacy", "retained-observer", "claude-retained", "codex-retained", "claude-legacy", "claude-legacy-worker", "claude-legacy-role-missing", "claude-legacy-role-unknown", "claude-legacy-old-live", "claude-legacy-session-mismatch", "claude-duplicate-old", "claude-duplicate-target", "claude-foreign-binding", "claude-witness-cli", "repeat", "interrupted", "marker-interrupted", "old-live", "unknown", "cwd", "cli", "reused-pid",
+      "observer", "old-seat", "digest", "version", "authority", "pending", "claimant", "hook-race", "row-race", "ref-recycle"])(
+      "adopts the supplied legacy case safely (%s)", async mode => {
+      const lead = makeRecord({ agent_id: "brainlayerCodex-834383b9", state: "idle", surface_id: "surface:unbound",
+        surface_uuid: null, workspace_id: null, surface_observer_id: "observer-current", pid: null,
+        cli: "codex", cli_session_id: "01a1164a-c243-71e2-a7c0-71de28f7632f",
+        launch_cwd: "/synthetic/brainlayer", role: "orchestrator", authority: "lead", placement: "left",
+        surface_provenance: "cmuxlayer_spawn", parent_agent_id: "orcClaude", collab_path: "/synthetic/collab",
+        boot_prompt_pending: true, prompt_delivered: false });
+      if (mode === "retained-observer") lead.surface_observer_id = "observer-last-unbound";
+      if (mode.startsWith("claude-")) lead.cli = "claude";
+      const target = { ...lead, surface_id: "surface:506", surface_uuid: "046E9CEC-E253-4870-9BB8-942DCE7CC0EC" };
+      const workspaceUuid = "19F83CA8-2598-4BB3-AC57-2D6C4460A22E";
+      installTwoColumnTopology(target);
+      const hook = { session_id: lead.cli_session_id!, surface_uuid: target.surface_uuid,
+        cwd: lead.launch_cwd, cli: lead.cli, pid: 4242, ts: Date.now(), session_path: "/synthetic/current.jsonl" };
+      const legacy = mode.startsWith("claude-legacy");
+      if (legacy) {
+        lead.surface_provenance = "unknown";
+        if (mode === "claude-legacy-worker") lead.role = "worker";
+        delete lead.authority; delete lead.placement; delete lead.launch_cwd;
+        if (mode === "claude-legacy-role-missing") delete lead.role;
+        if (mode === "claude-legacy-role-unknown") (lead as any).role = "unknown";
+        if (mode === "claude-legacy-session-mismatch") hook.session_id = "foreign-session";
+      }
+      const historical = { ...lead, surface_id: "surface:64", workspace_id: "workspace:1",
+        surface_uuid: "0F4C12C6-7185-4723-9FA5-19328AD81192", surface_observer_id: "observer-historical" };
+      const retained = (mode.includes("retained") && mode !== "retained-observer") || mode.startsWith("claude-");
+      if (retained) Object.assign(lead, { surface_id: historical.surface_id, surface_uuid: historical.surface_uuid,
+        workspace_id: historical.workspace_id, surface_observer_id: historical.surface_observer_id });
+      if (mode === "claude-foreign-binding") lead.surface_uuid = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+      if (mode === "claude-witness-cli") historical.cli = "codex";
+      if (mode === "claude-legacy-old-live") liveSurfaces.push(
+        { ...makeSurface("surface:old-live"), id: historical.surface_uuid!, workspace_ref: "ws:placement" });
+      if (mode === "claude-duplicate-old") liveSurfaces.push(
+        { ...makeSurface("surface:old-one"), id: historical.surface_uuid!, workspace_ref: "ws:placement" },
+        { ...makeSurface("surface:old-two"), id: historical.surface_uuid!, workspace_ref: "ws:placement" });
+      if (mode === "claude-duplicate-target") liveSurfaces.push(
+        { ...makeSurface("surface:duplicate-target"), id: target.surface_uuid, workspace_ref: "ws:placement" });
+      if (retained) {
+        // Observe the actual evolving fixture, including duplicate identities
+        // and the surface created by the post-adoption spawn.
+        (mockClient.listPanes as any).mockImplementation(async () => ({ workspace_ref: "ws:placement",
+          panes: ["pane:left", "pane:right"].map((ref, index) => ({ ref, index,
+            surface_count: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).length,
+            pixel_frame: index === 0 ? leftFrame : rightFrame,
+            surface_refs: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).map(s => s.ref),
+            surface_ids: liveSurfaces.filter(s => (s.ref === target.surface_id) === (index === 0)).map(s => s.id) })) }));
+        (mockClient.listPaneSurfaces as any).mockImplementation(async ({ pane }: { pane: string }) => ({
+          workspace_ref: "ws:placement", pane_ref: pane,
+          surfaces: liveSurfaces.filter(s => (s.ref === target.surface_id) === (pane === "pane:left")) }));
+        (mockClient.newSurface as any).mockImplementation(async (opts: { pane: string; workspace: string }) => {
+          const created = (mockClient.newSurface as any).mock.calls.length === 1 ? makeSpawnSurface()
+            : { ...makeSurface("surface:resumed-child"), id: "22222222-3333-4444-8555-666666666666" };
+          liveSurfaces.push({ ...created, workspace_ref: opts.workspace });
+          return { workspace: opts.workspace, surface: created.ref, surface_id: created.id,
+            pane: opts.pane, title: "", type: "terminal" };
+        });
+      }
+      const witnessPath = join(TEST_DIR, "history.json");
+      if (mode === "authority") historical.authority = "worker";
+      if (mode === "old-seat") historical.surface_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const witness = JSON.stringify({ historical_tool_receipts: [{ tool_result: [historical] }],
+        exact_session_registrations: [{ registration: { ...hook, surface_uuid: historical.surface_uuid, pid: 91583, ts: Date.now()-100000 } }] });
+      writeFileSync(witnessPath, witness);
+      const request = { surface: target.surface_uuid, workspace: workspaceUuid,
+        managed_agent_id: lead.agent_id, session_id: lead.cli_session_id!, expected_agent_version: lead.version,
+        observer_transition: { historical_owner_id: "observer-historical", current_owner_id: "observer-current" },
+        binding_evidence_path: witnessPath, binding_evidence_sha256: createHash("sha256").update(witness).digest("hex") };
+      const registry = new AgentRegistry(stateMgr, async () => liveSurfaces, { observerId: "observer-current" });
+      stateMgr.writeState(lead); registry.set(lead.agent_id, lead);
+      const discoveryRow = { surface_id: target.surface_id, surface_uuid: target.surface_uuid,
+        workspace_id: "ws:placement", surface_title: "brainlayer-lead", cli: lead.cli, model: "preserved-model",
+        has_agent: true, read_error: false, parsed_status: "idle", control_state: "active",
+        current_directory: "/synthetic/home", working_directory_source: "workspace_fallback" };
+      const autoId = `auto-${lead.cli}-046E9CEC-E253-4870-9BB8-942DCE7CC0EC`;
+      const auto = stateMgr.ensureAutoRecord(autoId, discoveryRow as any, "observer-current");
+      registry.set(autoId, auto);
+      writeFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), '{"text":"preserve these words","delivery":"pending_verify"}\n');
+      (mockClient.listWorkspaces as any).mockResolvedValue({ workspaces: [{ ref: "ws:placement", id: workspaceUuid }] });
+      const child = makeRecord({ agent_id: "retained-child", parent_agent_id: lead.agent_id,
+        surface_id: "surface:right-target", surface_uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        workspace_id: "ws:placement", surface_observer_id: "observer-current", role: "worker", authority: "worker", placement: "right" });
+      stateMgr.writeState(child); registry.set(child.agent_id, child);
+      if (mode === "observer") request.observer_transition.current_owner_id = "another-observer";
+      if (mode === "digest") request.binding_evidence_sha256 = "0".repeat(64);
+      if (mode === "version") request.expected_agent_version++;
+      if (mode === "pending") stateMgr.updateRecord(autoId, { boot_prompt_pending: true });
+      if (mode === "claimant") stateMgr.writeState(makeRecord({ agent_id: "another-managed", cli_session_id: lead.cli_session_id }));
+      if (mode === "ref-recycle") (mockClient.listPanes as any).mockResolvedValue({ workspace_ref: "ws:placement", panes: [{ ref: "pane:left", index: 0, surface_refs: [target.surface_id], surface_ids: ["other-uuid"] }] });
+      let reads = 0;
+      const registration = makeSelfRegistrationContinuityResolver({ readFile: () => JSON.stringify(hook) });
+      let hookReads = 0;
+      const retire = stateMgr.retireDiscoveryState.bind(stateMgr);
+      if (mode === "interrupted") vi.spyOn(stateMgr, "retireDiscoveryState").mockImplementationOnce(() => { throw new Error("archive interrupted"); }).mockImplementation(retire);
+      if (mode === "marker-interrupted") {
+        const update = stateMgr.updateRecord.bind(stateMgr); let interrupted = false;
+        vi.spyOn(stateMgr, "updateRecord").mockImplementation((id, patch) => {
+          if (!interrupted && patch.session_adoption?.status === "adopted") { interrupted = true; throw new Error("marker interrupted"); }
+          return update(id, patch);
+        });
+      }
+      engine.dispose();
+      engine = new AgentEngine(stateMgr, registry, mockClient, { sessionProcessScanner: async () => [],
+        spawnPreflight: async () => {},
+        adoptionOptions: { currentRegistration: (agent, uuids) => {
+          if (mode === "hook-race" && hookReads++ > 0) return null;
+          return registration(agent, uuids);
+        }, sessionHistory: () => legacy ? [hook as any] : [], processProof: async pid => {
+          if (mode === "row-race" && ++reads === 2) stateMgr.updateRecord(lead.agent_id, { task: "changed meanwhile" });
+          return { liveness: mode === "unknown" ? "unknown" : pid === hook.pid || mode === "old-live" ? "alive" : "gone",
+            started_at: mode === "reused-pid" ? hook.ts + 10000 : hook.ts - 200000,
+            cli: mode === "cli" ? "claude" : lead.cli, cwd: mode === "cwd" ? "/synthetic/home" : (lead.launch_cwd ?? "/synthetic/brainlayer") };
+        } },
+        selfRegistrationSessionResolver: makeSelfRegistrationSessionResolver({ readFile: () => JSON.stringify(hook) }),
+        inboxOpts: { baseDir: TEST_DIR } });
+      const discovery = { scan: async () => [discoveryRow] } as any;
+      const spawn = { repo: lead.repo, cli: "codex" as const, model: "gpt-6.1-sol", effort: "high",
+        prompt: "Verify recovered parent placement", parent_agent_id: lead.agent_id, focus: false };
+      if (retained && mode !== "claude-legacy-old-live") {
+        await expect(engine.spawnAgent(spawn)).rejects.toThrow(/Stable surface UUID/);
+        expect(mockClient.newSurface).not.toHaveBeenCalled();
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+      }
+      const accepted = ["legacy", "retained-observer", "claude-retained", "codex-retained", "claude-legacy", "claude-legacy-worker", "repeat", "interrupted", "marker-interrupted"].includes(mode);
+      if (!accepted) {
+        const refusalReasons: Record<string, string> = {
+          "claude-legacy-role-missing": "Recovery requires a known registry role",
+          "claude-legacy-role-unknown": "Recovery requires a known registry role",
+          "claude-legacy-old-live": "Selected seat or old-seat absence disagrees",
+          "claude-legacy-session-mismatch": "Legacy recovery requires an exact-session hook registration",
+          "claude-duplicate-old": "Current topology is ambiguous", "claude-duplicate-target": "Current topology is ambiguous",
+          "claude-foreign-binding": "Selected seat or old-seat absence disagrees",
+          "claude-witness-cli": "Historical binding disagrees", authority: "Historical binding disagrees",
+          "old-live": "Another known session process is live", unknown: "Relevant PID liveness is unknown",
+          cwd: "Current process CLI/cwd disagrees", cli: "Current process CLI/cwd disagrees",
+          "reused-pid": "Current process CLI/cwd disagrees", observer: "Observer selection disagrees",
+          "old-seat": "Selected seat or old-seat absence disagrees", digest: "Witness digest changed",
+          version: "Original record version changed", pending: "Competing identity or target work cannot be preserved",
+          claimant: "Competing identity or target work cannot be preserved",
+          "hook-race": "Adoption proof changed before persistence", "row-race": "Adoption proof changed before persistence",
+          "ref-recycle": "Current topology is ambiguous",
+        };
+        expect(refusalReasons).toHaveProperty(mode);
+        await expect(engine.adoptResumedSession(request)).rejects.toThrow(new Error(refusalReasons[mode]));
+        expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBe(lead.surface_uuid);
+      } else {
+        const result = await engine.adoptResumedSession(request);
+        expect(result.status).toBe(mode.includes("interrupted") ? "pending_verify" : "adopted");
+        expect(registry.list().filter(row => row.agent_id === autoId)).toHaveLength(0);
+        if (mode !== "legacy") expect((await engine.adoptResumedSession(request)).status).toBe("adopted");
+        const stableVersion = stateMgr.readState(lead.agent_id)!.version;
+        expect((await engine.adoptResumedSession(request)).idempotent).toBe(true);
+        expect(stateMgr.readState(lead.agent_id)!.version).toBe(stableVersion);
+        for (let i = 0; i < 3; i++) {
+          await registry.recoverSessionContinuityFromDiscovery([discoveryRow] as any, registry.getObserverEpoch());
+          registry.repairFromDiscovery([discoveryRow] as any, { orphansOnly: true });
+          await registry.listMerged(discovery);
+          await engine.reconcileRolePlacements("idle");
+        }
+        expect(registry.get(lead.agent_id)).toMatchObject({ surface_uuid: target.surface_uuid,
+          role: lead.role, authority: legacy ? (lead.role === "worker" ? "worker" : "lead") : lead.authority, parent_agent_id: lead.parent_agent_id,
+          collab_path: lead.collab_path, boot_prompt_pending: true, prompt_delivered: false });
+        expect(stateMgr.readState(child.agent_id)).toEqual(child);
+        if (legacy) expect(registry.get(lead.agent_id)).toMatchObject({ authority: lead.role === "worker" ? "worker" : "lead", placement: lead.role === "worker" ? "right" : "left",
+          launch_cwd: "/synthetic/brainlayer", surface_provenance: "session_registration",
+          session_recovery_audit: expect.stringContaining(lead.cli_session_id!) });
+      }
+      if (mode === "claude-legacy-worker") {
+        // The static topology keeps the worker left: each idle pass corrects it right.
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(3);
+        for (const [move] of (mockClient.moveSurface as any).mock.calls) {
+          expect(move).toMatchObject({ surface: target.surface_id, stableSurfaceIdentity: target.surface_uuid,
+            pane: "pane:right", workspace: "ws:placement", focus: false });
+        }
+      } else expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      expect(mockClient.sendKey).not.toHaveBeenCalled();
+      expect(mockClient.newSplit).not.toHaveBeenCalled();
+      expect(readFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), "utf8")).toContain("preserve these words");
+      if (accepted && retained) {
+        const spawned = await engine.spawnAgent(spawn);
+        expect(spawned.workspace_id).toBe("ws:placement");
+        expect(registry.get(spawned.agent_id)?.parent_agent_id).toBe(lead.agent_id);
+        expect(mockClient.newSurface).toHaveBeenCalledWith(expect.objectContaining({ pane: "pane:right", workspace: "ws:placement" }));
+        expect(mockClient.newSplit).not.toHaveBeenCalled();
+        if (mode === "claude-legacy") {
+          const dormant = makeRecord({ agent_id: "dormant-child", parent_agent_id: lead.agent_id,
+            state: "done", surface_id: "surface:unbound", surface_uuid: null, workspace_id: "ws:placement",
+            cli: "codex", cli_session_id: "33333333-4444-4555-8666-777777777777", pid: null });
+          harnessHome.give(dormant.cli, dormant.cli_session_id!);
+          stateMgr.writeState(dormant); registry.set(dormant.agent_id, dormant);
+          const resumed = await engine.resumeAgent(dormant.agent_id, { force: true, focus: false });
+          expect(resumed).toMatchObject({ agent_id: dormant.agent_id, parent_agent_id: lead.agent_id,
+            workspace_id: "ws:placement", surface_id: "surface:resumed-child" });
+          expect(mockClient.newSurface).toHaveBeenLastCalledWith(expect.objectContaining({ pane: "pane:right", workspace: "ws:placement" }));
+          expect(mockClient.newSplit).not.toHaveBeenCalled();
+        }
+      }
+    });
 
     it("does not repeat a move when final marker persistence fails", async () => {
       const record = registerSelfRegistered({

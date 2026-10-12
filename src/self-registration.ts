@@ -33,6 +33,7 @@ import type {
 
 const SESSION_REGISTRATION_TIMESTAMP_SKEW_MS = 5_000;
 const SESSION_REGISTRATION_CONTINUITY_BYTES = 64;
+export const SESSION_CONTINUITY_MAX_AGE_MS = 86_400_000;
 export const SESSION_REGISTRATION_READ_CHUNK_BYTES = 64 * 1024;
 export const SESSION_REGISTRATION_MAX_PENDING_LINE_BYTES = 64 * 1024;
 export const SESSION_REGISTRATION_MAX_CANDIDATES_PER_SURFACE = 64;
@@ -441,29 +442,9 @@ function makeIncrementalEntryIndexReader(
   };
 }
 
-/**
- * Build the self-registration `SessionIdentityResolver`.
- *
- * Match is stable-surface UUID PRIMARY
- * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
- * optional secondary validator, then newest `ts` decides. For cmuxlayer-owned
- * launches, candidates must be newer than the agent-creation window; raw and
- * repaired records deliberately skip that lower bound because their
- * `created_at` is discovery time, not launch time. All candidates are bounded
- * against the reader clock so a row from before a backward clock correction
- * cannot dominate. A row with explicit `cli` metadata must match the agent;
- * missing CLI remains compatible with older writers. AgentRecord pid is
- * deliberately ignored for candidate selection. Returns captured session and
- * hook process evidence, or `null`. NO filesystem scan of session dirs; a
- * missing/unreadable/empty registry, an agent without a stable surface UUID, or
- * no UUID match all return `null` (the caller then falls back to the scan).
- */
-export function makeSelfRegistrationSessionResolver(
-  options: SelfRegistrationResolverOptions = {},
-): SessionIdentityResolver {
+function makeRegistrationCandidateReader(options: SelfRegistrationResolverOptions) {
   const registryPath = options.registryPath ?? resolveSessionRegistryPath();
-  const now = options.now ?? Date.now;
-  const readCandidates = options.readFile
+  return options.readFile
     ? (surfaceKey: string): SelfRegistrationEntry[] | null => {
         let text: string | null;
         try {
@@ -485,6 +466,30 @@ export function makeSelfRegistrationSessionResolver(
         return (surfaceKey: string): SelfRegistrationEntry[] | null =>
           readIndex()?.get(surfaceKey) ?? null;
       })();
+}
+
+/**
+ * Build the self-registration `SessionIdentityResolver`.
+ *
+ * Match is stable-surface UUID PRIMARY
+ * (`entry.surface_uuid === agent.surface_uuid`). Exact launch_cwd is only an
+ * optional secondary validator, then newest `ts` decides. For cmuxlayer-owned
+ * launches, candidates must be newer than the agent-creation window; raw and
+ * repaired records deliberately skip that lower bound because their
+ * `created_at` is discovery time, not launch time. All candidates are bounded
+ * against the reader clock so a row from before a backward clock correction
+ * cannot dominate. A row with explicit `cli` metadata must match the agent;
+ * missing CLI remains compatible with older writers. AgentRecord pid is
+ * deliberately ignored for candidate selection. Returns captured session and
+ * hook process evidence, or `null`. NO filesystem scan of session dirs; a
+ * missing/unreadable/empty registry, an agent without a stable surface UUID, or
+ * no UUID match all return `null` (the caller then falls back to the scan).
+ */
+export function makeSelfRegistrationSessionResolver(
+  options: SelfRegistrationResolverOptions = {},
+): SessionIdentityResolver {
+  const now = options.now ?? Date.now;
+  const readCandidates = makeRegistrationCandidateReader(options);
 
   return (agent: AgentRecord): CapturedSessionIdentity | null => {
     const agentSurfaceUuid = surfaceUuidKey(agent.surface_uuid);
@@ -524,6 +529,37 @@ export function makeSelfRegistrationSessionResolver(
   };
 }
 
+/** Stricter proof for moving authority across UUIDs; ordinary capture stays compatible. */
+export function makeSelfRegistrationContinuityResolver(
+  options: SelfRegistrationResolverOptions = {},
+): (agent: AgentRecord, liveUuids: readonly string[]) => SelfRegistrationEntry | null {
+  const readCandidates = makeRegistrationCandidateReader(options);
+  const now = options.now ?? Date.now;
+  return (agent, liveUuids) => {
+    const key = surfaceUuidKey(agent.surface_uuid);
+    const cwd = agent.launch_cwd;
+    const clock = now();
+    if (!key || !cwd || !Number.isSafeInteger(clock) ||
+        liveUuids.length > SESSION_REGISTRATION_MAX_INDEXED_SURFACES) return null;
+    // A resumed process must register within the last day. Old hook rows can
+    // capture a session, but cannot transfer managed authority indefinitely.
+    const currentRows = (uuid: string) => (readCandidates(uuid) ?? []).filter(
+      row => row.ts !== null && row.ts >= clock - SESSION_CONTINUITY_MAX_AGE_MS && row.ts <= clock + 5_000,
+    );
+    const rows = currentRows(key);
+    if ((readCandidates(key) ?? []).some(row => row.ts !== null && row.ts > clock + 5_000)) return null;
+    const winner = chooseCandidate(rows, null);
+    if (!winner || winner.cli !== agent.cli || winner.cwd !== cwd ||
+        !winner.pid || winner.pid <= 0 || winner.session_id !== agent.cli_session_id ||
+        rows.some(row => row.session_id !== winner.session_id || row.cli !== winner.cli || row.cwd !== cwd || row.pid !== winner.pid)) return null;
+    // Count even unread/other-workspace seats from the full topology. Never
+    // select one UUID from multiple currently registered copies of a session.
+    if (liveUuids.some(uuid => surfaceUuidKey(uuid) !== key &&
+        currentRows(surfaceUuidKey(uuid)!).some(row => row.session_id === winner.session_id))) return null;
+    return winner;
+  };
+}
+
 /**
  * Resolve an exact raw harness session id back to its newest registration row.
  * Resume is rare, so this deliberately reads the append-only file directly;
@@ -532,26 +568,21 @@ export function makeSelfRegistrationSessionResolver(
 export function makeSelfRegistrationSessionLookup(
   options: SelfRegistrationResolverOptions = {},
 ): (sessionId: string) => SelfRegistrationEntry | null {
+  const history = makeSelfRegistrationSessionHistoryLookup(options);
+  return sessionId => history(sessionId)?.at(-1) ?? null;
+}
+
+/** All known exact-session rows, including older process claimants. */
+export function makeSelfRegistrationSessionHistoryLookup(
+  options: SelfRegistrationResolverOptions = {},
+): (sessionId: string) => SelfRegistrationEntry[] | null {
   const registryPath = options.registryPath ?? resolveSessionRegistryPath();
-  const readText = (): string | null => {
+  return sessionId => {
     try {
-      return options.readFile
-        ? options.readFile(registryPath)
-        : readFileSync(registryPath, "utf8");
-    } catch {
-      return null;
-    }
-  };
-  return (sessionId: string): SelfRegistrationEntry | null => {
-    const requested = sessionId.trim().toLowerCase();
-    if (!requested) return null;
-    const text = readText();
-    if (!text) return null;
-    const matches = parseSelfRegistrationLines(text).filter(
-      (entry) => entry.session_id.trim().toLowerCase() === requested,
-    );
-    if (matches.length === 0) return null;
-    return matches.at(-1)!;
+      const text = options.readFile ? options.readFile(registryPath) : readFileSync(registryPath, "utf8");
+      if (text === null) return null;
+      return parseSelfRegistrationLines(text).filter(row => row.session_id.trim().toLowerCase() === sessionId.trim().toLowerCase());
+    } catch { return null; }
   };
 }
 

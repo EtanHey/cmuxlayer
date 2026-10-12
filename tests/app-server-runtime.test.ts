@@ -7,6 +7,7 @@ import {
   CmuxAppServerRuntime as ProductionCmuxAppServerRuntime,
   type CmuxAppServerRuntimeOptions,
 } from "../src/app-server-runtime.js";
+import { AgentEngine } from "../src/agent-engine.js";
 import type { AgentRecord } from "../src/agent-types.js";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -100,6 +101,46 @@ function makeRecord(): AgentRecord {
 }
 
 describe("CmuxAppServerRuntime", () => {
+  it.each(["DONE_AGENT_1", "BLOCKED_AGENT_1"])("R2-N1 app-server cannot acknowledge an undelivered %s", async (marker) => {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    const client = makeClient();
+    const uuid = "11111111-2222-4333-8444-555555555555";
+    client.listWorkspaces.mockResolvedValue({ workspaces: [{ ref: "workspace:app", title: "test" }] });
+    client.listPanes.mockResolvedValue({ panes: [{ ref: "pane:1", surface_count: 1, surface_refs: ["surface:1"], surface_ids: [uuid] }] });
+    client.listPaneSurfaces.mockResolvedValue({ surfaces: [{ id: uuid, ref: "surface:1", title: "worker", type: "terminal" }] });
+    client.readScreen.mockResolvedValue({ surface: "surface:1", text: "Claude Code\nWhat can I help you with?\n❯ ", lines: 3, scrollback_used: false });
+    const runtime = new CmuxAppServerRuntime({ client, stateDir: TEST_DIR, inboxOpts: { baseDir: join(TEST_DIR, "inbox") } });
+    const stateMgr = (runtime as any).stateMgr;
+    const reportPath = join(TEST_DIR, "report.md");
+    try {
+      stateMgr.writeState({ ...makeRecord(), state: "creating", surface_uuid: uuid, surface_observer_id: "cmux:/tmp/cmux-app-test.sock", cli: "claude", parent_agent_id: "parent",
+        report_path: reportPath, done_marker: "DONE_AGENT_1" });
+      stateMgr.transition("agent-1", "booting");
+      stateMgr.transition("agent-1", "done");
+      writeFileSync(reportPath, `${marker}\n`);
+      await (runtime as any).registry.reconstitute();
+      await (runtime as any).engine.runSweep();
+      const record = stateMgr.readState("agent-1");
+      expect(record.report_done_notified_episode ?? null).toBeNull();
+      expect(record.report_blocked_notified_episode ?? null).toBeNull();
+      expect(client.send).not.toHaveBeenCalled();
+      // The delivery-owning engine must still be able to publish from the same state.
+      const relay = vi.fn().mockResolvedValue(undefined);
+      const daemon = new AgentEngine(stateMgr, (runtime as any).registry,
+        { ...(runtime as any).engine.client, notifyLifecycleEvent: relay },
+        { inboxOpts: { baseDir: join(TEST_DIR, "inbox") } });
+      try {
+        await daemon.runSweep();
+        await daemon.runSweep();
+        expect(relay.mock.calls.filter(([event]) => event === (marker.startsWith("DONE_") ? "done" : "blocked"))).toHaveLength(1);
+      } finally { daemon.dispose(); }
+    } finally {
+      runtime.dispose();
+      rmSync(TEST_DIR, { recursive: true, force: true });
+    }
+  });
+
   it("#1007 native banner transaction excludes concurrent UUID-routed input", async () => {
     rmSync(TEST_DIR, { recursive: true, force: true }); mkdirSync(TEST_DIR, { recursive: true });
     const client = makeClient();
