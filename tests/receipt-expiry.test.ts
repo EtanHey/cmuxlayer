@@ -15,7 +15,7 @@ describe("receipt expiry queue boundaries", () => {
   function setup(observation: DeliveryVerifyObservation = { outcome: "pending" }) {
     const stateMgr = new StateManager(dir);
     const registry = new AgentRegistry(stateMgr, async () => []);
-    const deps = { stateMgr, registry, getAgentState: () => null, markAgentWorking: () => null };
+    const deps = { stateMgr, registry, getAgentState: () => null, captureReportSubmission: () => null, markAgentWorking: () => null };
     const verifier = vi.fn(async () => observation);
     const queue = new DeliveryQueue(deps, { deliveryVerifyDeadlineMs: 1000, deliveryVerifier: verifier });
     const accept = (submit_dispatched?: boolean, typed = true) => queue.acceptPendingVerify({
