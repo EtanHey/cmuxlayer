@@ -8,6 +8,9 @@ The guardian starts first. Due duties run concurrently, each in its own process
 group with a 45-second wall-clock budget, followed by TERM and a two-second grace
 before KILL. A hung duty therefore cannot starve the next tick. Timeouts appear in
 the duty error log; skipped overlapping ticks appear in capped `guard.lock.log`.
+The dispatcher closes its output pipes when the duty leader exits, so an escaped
+descendant cannot hold the tick open. Delayed escalation still kills surviving
+process-group members after leader exit; only an absent group is skipped.
 Invalid tick state resets to zero with a warning.
 
 Fresh installs enable only the sampler and dry-run reaper (`REAPER_DRY_RUN=1`).
@@ -19,12 +22,18 @@ reclaims idle backfills and kills unprotected runaways under memory danger. Set
 `CMUX_MEM_WATCHDOG_DRY_RUN=1` / `HEAVY_ML_GUARD_ENABLE_KILL=0` for observation only.
 
 ```json
-{"watchdog":false,"guardian":false,"env":{"REAPER_DRY_RUN":"1"}}
+{"env":{}}
 ```
+
+During installation, omitted duty keys inherit the loaded legacy duties. Only
+explicit `false` opts a duty out; disabling a loaded legacy duty prints a warning.
+The sample above inherits migration settings and keeps fresh installs safe.
 
 All existing duty environment knobs remain supported under `env`; process env also
 works. `CMUX_RESOURCE_GUARD_CONFIG` selects another config file. Diagnostics and
-sampler data default to `~/Library/Logs/cmux-resource-guard/`. Output streams rotate
+sampler data default to `~/Library/Logs/cmux-resource-guard/` on fresh installs.
+Migration pins the legacy sampler default `~/Library/Logs/cmux-ram-sampler/`
+unless a configured path overrides it, preserving history and guardian samples. Output streams rotate
 at 5 MiB with one archive. Sampler JSONL and watchdog snapshots are capped after
 each invocation; when the watchdog is enabled, only its latest two timestamped
 snapshots remain. Explicit duty
@@ -43,4 +52,5 @@ Homebrew compiles the native launcher with absolute installed Node/entry paths,
 and installs the launchd duty files under libexec. Release tooling applies the versioned
 formula fragment before publishing the tap update. GitHub tag tarballs include
 these tracked files. Installing the formula never starts or changes launchd jobs.
-The installer and legacy cutover are supplied by the stacked migration PR.
+Use the installed [cutover command](../../docs/guides/resource-guard-cutover.md)
+to install one job and archive the four legacy plists. Installation is opt-in.

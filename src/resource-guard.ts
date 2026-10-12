@@ -83,7 +83,7 @@ export async function runTick(options: { root: string; home?: string; config?: G
 
 const activeGroups = new Set<number>();
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
-  try { process.kill(-pid,signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  try { process.kill(-pid,0); process.kill(-pid,signal); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
 }
 function runDuty(root: string, duty: Duty, env: Env, logs: string): Promise<void> {
   const commands: Record<Duty, string[]> = {
@@ -114,7 +114,12 @@ function runDuty(root: string, duty: Duty, env: Env, logs: string): Promise<void
       setTimeout(() => { if (pid) signalGroup(pid,'SIGKILL'); escalated = true; finish(); },2000);
     },timeout);
     child.once('error', error => { clearTimeout(timer); if (pid) activeGroups.delete(pid); fail(error); });
-    child.once('close', code => { closed = true; exitCode = code; finish(); });
+    child.once('exit', code => {
+      closed = true; exitCode = code;
+      // An escaped descendant can hold these pipes after the owned leader exits.
+      child.stdout.destroy(); child.stderr.destroy();
+      finish();
+    });
   });
 }
 

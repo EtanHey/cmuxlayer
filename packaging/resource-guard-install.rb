@@ -6,4 +6,6 @@
            "launchd/resource-guard/cmux-resource-guard.c", "-o", "cmux-resource-guard"
     bin.install "cmux-resource-guard"
     libexec.install "launchd"
+    (libexec/"scripts").install "scripts/install-mcp-reaper.sh"
+    (libexec/"resource-guard-node-path").write "#{formula_opt_bin("node")}/node\n"
     # END cmux-resource-guard packaging
