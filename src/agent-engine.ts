@@ -5022,6 +5022,7 @@ export class AgentEngine {
       try {
         const released = await releaseWatchWaiter(armed.watch_id, {
           registryPath: this.watchRegistryPath,
+          now: this.watchRegistryNow,
         });
         if (released) this.scheduleClosedChildReportWatchPrune();
       } catch (error) {
@@ -5036,6 +5037,7 @@ export class AgentEngine {
           registryPath: this.watchRegistryPath,
           now: this.watchRegistryNow,
           agentObservation: this.watchAgentObservation,
+          ownerObservation: (owner) => sweepImpl.observeWatchOwner.call(this.sweepHost(), owner),
           notify: this.watchNotify,
           onNotificationExhausted: ({ notification, attempts, reason }) => {
             this.sweepDebugLog(
@@ -5045,6 +5047,7 @@ export class AgentEngine {
         });
         const current = readWatchRegistry({
           registryPath: this.watchRegistryPath,
+          now: this.watchRegistryNow,
         }).watches.find((watch) => watch.watch_id === armed.watch_id);
         if (!current) {
           throw new Error(`Watch disappeared during wait: ${armed.watch_id}`);

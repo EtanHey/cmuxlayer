@@ -46,7 +46,7 @@ describe("WatchSpec arm contract", () => {
     );
     expect(await updateWatchDeadline(armed.watch_id, 3_000,
       { registryPath: registryPath(), now: () => 1_500 })).toBe(true);
-    expect(readWatchRegistry({ registryPath: registryPath() }).watches[0])
+    expect(readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0])
       .toMatchObject({ watch_id: armed.watch_id, armed_at_ms: 1_500, deadline: 3_000 });
   });
   it("notifies the transport only when the declared watch opts in", async () => {
@@ -216,7 +216,7 @@ describe("WatchSpec arm contract", () => {
       },
       { registryPath: registryPath(), now: () => 1_000 },
     );
-    const registry = readWatchRegistry({ registryPath: registryPath() });
+    const registry = readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 });
     writeFileSync(
       registryPath(),
       JSON.stringify({
@@ -238,7 +238,7 @@ describe("WatchSpec arm contract", () => {
     expect(result.fired).toEqual([]);
     expect(notify).not.toHaveBeenCalled();
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0]
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0]
         ?.fingerprint,
     ).toBe(armed.fingerprint);
   });
@@ -301,7 +301,7 @@ describe("WatchSpec arm contract", () => {
     });
 
     expect(result.fired).not.toContain(armed.watch_id);
-    expect(readWatchRegistry({ registryPath: registryPath() }).watches).toEqual(
+    expect(readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches).toEqual(
       [],
     );
     expect(notify).not.toHaveBeenCalled();
@@ -394,7 +394,7 @@ describe("WatchSpec arm contract", () => {
       }),
     );
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "failed",
       liveness_source: "screen:surface-worker-a",
@@ -475,7 +475,7 @@ describe("WatchSpec arm contract", () => {
     expect(result.armed).toEqual([armed.watch_id]);
     expect(notify).not.toHaveBeenCalled();
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "armed",
       observed_value: "idle",
@@ -542,7 +542,7 @@ describe("WatchSpec arm contract", () => {
     expect(result.armed).toContain(armedDuringSweep!.watch_id);
     expect(notify).not.toHaveBeenCalled();
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches.find(
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches.find(
         (record) => record.watch_id === armedDuringSweep!.watch_id,
       ),
     ).toMatchObject({
@@ -819,7 +819,7 @@ describe("WatchSpec arm contract", () => {
       "malformed-row",
     ]);
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches.map(
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches.map(
         (record) => record.watch_id,
       ),
     ).toEqual([valid.watch_id]);
@@ -853,7 +853,7 @@ describe("WatchSpec arm contract", () => {
     });
     expect(failedDelivery.fired).toEqual([armed.watch_id]);
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       watch_id: armed.watch_id,
       state: "fired",
@@ -878,7 +878,7 @@ describe("WatchSpec arm contract", () => {
     });
     expect(notify).toHaveBeenCalledTimes(2);
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({ state: "fired", notification_pending: false });
   });
 
@@ -920,7 +920,7 @@ describe("WatchSpec arm contract", () => {
       }),
     );
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       watch_id: armed.watch_id,
       state: "fired",
@@ -959,7 +959,7 @@ describe("WatchSpec arm contract", () => {
     }
 
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       watch_id: armed.watch_id,
       state: "armed",
@@ -990,7 +990,7 @@ describe("WatchSpec arm contract", () => {
     expect(notify).toHaveBeenCalledTimes(9);
     expect(onNotificationExhausted).toHaveBeenCalledOnce();
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "armed",
       notification_pending: false,
@@ -1021,7 +1021,7 @@ describe("WatchSpec arm contract", () => {
     });
     expect(deadline).toMatchObject({ armed: [armed.watch_id], failed: [] });
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "armed",
       deadline_notified_at_ms: 2_000,
@@ -1058,7 +1058,7 @@ describe("WatchSpec arm contract", () => {
     });
     expect(result.failed).toEqual([armed.watch_id]);
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({ state: "failed", terminal_reason: "deadline_elapsed" });
   });
 
@@ -1084,7 +1084,7 @@ describe("WatchSpec arm contract", () => {
       notify,
     });
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({ state: "armed", armed_at_ms: 1_900, deadline: 2_900 });
 
     await sweepWatches({
@@ -1136,7 +1136,7 @@ describe("WatchSpec arm contract", () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
-  it("never rolls an engine report deadline beyond MAX_SAFE_INTEGER", async () => {
+  it("caps the rolling engine report interval at seven days", async () => {
     const target = join(TEST_DIR, "legacy-infinite-report.md");
     writeFileSync(target, "before\n", "utf8");
     await armWatch(
@@ -1158,11 +1158,11 @@ describe("WatchSpec arm contract", () => {
     });
 
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "armed",
       armed_at_ms: 2_000,
-      deadline: Number.MAX_SAFE_INTEGER,
+      deadline: 2_000 + 7 * 86_400_000,
     });
   });
 
@@ -1192,7 +1192,7 @@ describe("WatchSpec arm contract", () => {
       expect.objectContaining({ reason: "deadline_elapsed" }),
     );
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "failed",
       terminal_reason: "deadline_elapsed",
@@ -1239,7 +1239,7 @@ describe("WatchSpec arm contract", () => {
     finishDelivery(true);
     await firstSweep;
     expect(
-      readWatchRegistry({ registryPath: registryPath() }).watches[0],
+      readWatchRegistry({ registryPath: registryPath(), now: () => 1_000 }).watches[0],
     ).toMatchObject({
       state: "failed",
       notification_pending: false,

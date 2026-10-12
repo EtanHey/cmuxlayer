@@ -203,6 +203,7 @@ export async function pruneClosedChildReportWatches(this: SweepHost): Promise<bo
   }
   const persistedWatches = readWatchRegistry({
     registryPath: this.watchRegistryPath,
+    now: this.watchRegistryNow,
   }).watches;
   const persistedWatchSnapshots = new Map(
     persistedWatches.map((watch) => [watch.watch_id, JSON.stringify(watch)]),
@@ -364,7 +365,7 @@ export async function pruneClosedChildReportWatches(this: SweepHost): Promise<bo
       if (ownerResolution.kind !== "resolved") return false;
       return !hasActiveSubjectOwnership;
     },
-    { registryPath: this.watchRegistryPath },
+    { registryPath: this.watchRegistryPath, now: this.watchRegistryNow },
   );
   return retainedNeedsRecheck;
 }
@@ -1028,6 +1029,27 @@ export function markIntentionalSurfaceCloses(
   }
 }
 
+export async function observeWatchOwner(
+  this: SweepHost, owner: string,
+  withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
+): Promise<boolean | null> {
+  let persistedReadFailed = false;
+  const resolution = resolveWatchOwnerFromSources(
+    watchRecordOwner({ owner }), this.registry.list(),
+    this.stateMgr.listStates(() => { persistedReadFailed = true; }),
+  );
+  // Ambiguous aliases retain if any candidate may be live. Unreadable screens
+  // are inconclusive in watchAgentObservation and therefore also retain.
+  for (const candidate of resolution.candidates) {
+    if ((await this.watchAgentObservation(candidate.agent_id, withUnlocked)).exists) {
+      return true;
+    }
+  }
+  // Any unreadable row could hide a live alias/prefix candidate. Only complete
+  // enumeration may prove absence; a positively live candidate still wins.
+  return persistedReadFailed ? null : false;
+}
+
 export async function sweepWatchesBestEffort(
   this: SweepHost,
   withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
@@ -1041,6 +1063,7 @@ export async function sweepWatchesBestEffort(
       now: this.watchRegistryNow,
       agentObservation: (agentId) =>
         this.watchAgentObservation(agentId, withUnlocked),
+      ownerObservation: (owner) => observeWatchOwner.call(this, owner, withUnlocked),
       notify: this.watchNotify,
       onNotificationExhausted: ({ notification, attempts, reason }) => {
         this.sweepDebugLog(
@@ -1049,7 +1072,7 @@ export async function sweepWatchesBestEffort(
       },
     });
     if (
-      readWatchRegistry({ registryPath: this.watchRegistryPath }).watches.some(
+      readWatchRegistry({ registryPath: this.watchRegistryPath, now: this.watchRegistryNow }).watches.some(
         (watch) => watch.state === "failed" && !watch.notification_pending,
       )
     ) {
