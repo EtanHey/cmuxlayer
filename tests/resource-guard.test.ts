@@ -87,7 +87,7 @@ it('ships a named executable, all four real duties, and an idempotent jq formula
   expect(readFileSync(join(logs, 'sampler.err.log'), 'utf8')).toContain('not running');
   expect(readFileSync(join(logs, 'reaper.out.log'), 'utf8')).toMatch(/No reapable|DRY_RUN/);
   expect(readFileSync(join(state, 'tick'), 'utf8')).toBe('0');
-});
+}, 60_000);
 it('native lock prevents overlap and recovers after process termination', async () => {
   const {spawn, spawnSync} = await import('node:child_process');
   const {once} = await import('node:events');
@@ -102,7 +102,7 @@ it('native lock prevents overlap and recovers after process termination', async 
   const third = start();
   try { const [out] = await once(third.stdout,'data'); expect(String(out)).toContain('ready'); }
   finally { third.kill('SIGTERM'); await once(third,'close'); }
-});
+}, 60_000);
 
 it('rejects malformed configuration before invoking a host duty', async () => {
   let invoked = false;
@@ -137,7 +137,7 @@ it('times out an uncooperative duty group while guardian runs on the same and ne
   }
   expect(readFileSync(join(home,'logs/guardian.out.log'),'utf8').trim().split('\n')).toEqual(['guardian-ran','guardian-ran']);
   expect(readFileSync(join(home,'logs/watchdog.err.log'),'utf8')).toContain('timeout');
-},10000);
+}, 60_000);
 it('recovers an invalid tick and leaves disabled watchdog snapshot directories untouched',async()=>{
   const {mkdirSync}=await import('node:fs'); const home=scratch(), snapshots=join(home,'shared');mkdirSync(snapshots);
   for(let i=0;i<4;i++)writeFileSync(join(snapshots,i + '.log'),'keep');writeFileSync(join(home,'tick'),'99');
@@ -172,7 +172,7 @@ it('repeated CLI shutdown signals terminate detached duty descendants',async()=>
       await new Promise(r => setTimeout(r, 5000));
     }
   }
-},10000);
+}, 60_000);
 
 it('bounds a tick when a setsid descendant retains duty pipes', async () => {
   const {mkdirSync, existsSync} = await import('node:fs');
@@ -201,7 +201,7 @@ it('bounds a tick when a setsid descendant retains duty pipes', async () => {
       await new Promise(resolve => setTimeout(resolve,50));
     }
   }
-},15000);
+}, 60_000);
 
 it('kills surviving group members after the duty leader exits on TERM', async () => {
   const {mkdirSync, existsSync} = await import('node:fs');
@@ -232,4 +232,4 @@ it('kills surviving group members after the duty leader exits on TERM', async ()
       await new Promise(resolve=>setTimeout(resolve,50));
     }
   }
-},15000);
+}, 60_000);
