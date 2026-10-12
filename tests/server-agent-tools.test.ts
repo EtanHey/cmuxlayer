@@ -545,6 +545,63 @@ function createLifecycleServer(exec: ExecFn) {
   });
 }
 
+/** Assert accepted boot input and the same durable, publicly waitable receipt. */
+async function expectVerifiedBoot(
+  server: ReturnType<typeof createServer>,
+  exec: ExecFn,
+  parsed: any,
+  prompt: string | null,
+  workspace: string,
+  surface = "surface:new",
+  bootAgentId = parsed.agent_id,
+) {
+  const pointer = `cmuxlayer contract for ${bootAgentId}: Read and follow ${parsed.contract_path}`;
+  const payload = prompt === null ? pointer : `${prompt} ; ${pointer}`;
+  const calls = (exec as ReturnType<typeof vi.fn>).mock.calls;
+  const inputs = calls.filter(([, args]) =>
+    (args.includes("send") || args.includes("set-buffer")) &&
+    (String(args.at(-1)).includes("cmuxlayer contract for") ||
+      (prompt !== null && String(args.at(-1)).includes(prompt))),
+  );
+  expect(inputs.map(([, args]) => args.at(-1))).toEqual([payload]);
+  const input = inputs[0];
+  expect(input[1]).toEqual(expect.arrayContaining([
+    "send", "--workspace", workspace, "--surface", surface,
+  ]));
+  const returns = calls.slice(calls.indexOf(input) + 1).filter(([, args]) =>
+    args.includes("send-key") && args.includes("return"),
+  );
+  expect(returns).toHaveLength(1);
+  expect(returns[0][1]).toEqual(expect.arrayContaining([
+    "--workspace", workspace, "--surface", surface,
+  ]));
+  expect(parsed.boot_prompt_delivered).toBe(true);
+  expect(parsed.boot_prompt_receipt).toMatchObject({
+    typed: true, submit_dispatched: true, submit_verified: true,
+  });
+  const id = parsed.boot_prompt_receipt.delivery_id;
+  expect(id).toEqual(expect.any(String));
+  const engine = engineForTests(server);
+  const expected = {
+    delivery_id: id, agent_id: parsed.agent_id, text: payload,
+    source_event: "boot_prompt", typed: true, submit_dispatched: true,
+    submit_verified: true, terminal: true, delivery_state: "submitted",
+  };
+  expect(engine.getDeliveryReceipt(id)).toMatchObject(expected);
+  const ledger = JSON.parse(readFileSync(
+    join(engine.stateMgr.getBaseDir(), "delivery-receipts.json"), "utf8",
+  ));
+  expect(ledger).toHaveLength(1);
+  expect(ledger[0]).toMatchObject(expected);
+  const waited = parseToolResult(await (server as any)._registeredTools.wait_for.handler(
+    { delivery_id: id, timeout_ms: 1 }, {} as any,
+  ));
+  expect(waited).toMatchObject({
+    ok: true, delivery_id: id, terminal: true,
+    submit_dispatched: true, submit_verified: true, delivery_state: "submitted",
+  });
+}
+
 function createInMemoryStateManager(
   baseDir = "/in-memory/spawn-manifest",
 ): StateManager {
@@ -1580,8 +1637,9 @@ describe("lean spawn tool responses", () => {
   it("spawn_agent publishes the exact expected-state manifest through the injected writer", async () => {
     const manifests: SeatManifest[] = [];
     const surfaceUuid = "11111111-2222-4333-8444-555555555555";
+    const exec = makeLifecycleExec({ surfaceUuid });
     const fixture = createHermeticSpawnServer({
-      exec: makeLifecycleExec({ surfaceUuid }),
+      exec,
       disableSpawnPreflight: true,
       sessionIdentityResolver: () => null,
       seatManifestWriter: async (manifest) => {
@@ -1630,13 +1688,15 @@ describe("lean spawn tool responses", () => {
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    expect(readdirSync(stateDir)).toEqual(["delivery-receipts.json"]);
+    await expectVerifiedBoot(server, exec, parsed, null, "workspace:1");
   });
 
   it("spawn_agent manifest uses the launcher name resolved by preflight", async () => {
     const manifests: SeatManifest[] = [];
+    const exec = makeLifecycleExec();
     const fixture = createHermeticSpawnServer({
-      exec: makeLifecycleExec(),
+      exec,
       spawnPreflight: async () => ({ launcherName: "registeredClaude" }),
       sessionIdentityResolver: () => null,
       seatManifestWriter: async (manifest) => manifests.push(manifest),
@@ -1651,16 +1711,20 @@ describe("lean spawn tool responses", () => {
     } = fixture;
     const spawn = (server as any)._registeredTools["spawn_agent"];
 
-    await spawn.handler(
+    const result = await spawn.handler(
       { verbose: true, repo: "cmuxlayer", model: "sonnet", cli: "claude" },
       {} as any,
     );
 
+    const parsed = parseToolResult(result);
+    expect(parsed.ok).toBe(true);
+    expect(manifests).toHaveLength(1);
     expect(manifests[0]?.tab_name).toBe("registeredClaude [surface:new]");
     expect(lifecycleInitializer).toHaveBeenCalledTimes(1);
     expect(lifecycleSurfaceProvider).not.toHaveBeenCalled();
     expect(context.stateDir).toBe(stateDir);
-    expect(existsSync(stateDir)).toBe(false);
+    expect(readdirSync(stateDir)).toEqual(["delivery-receipts.json"]);
+    await expectVerifiedBoot(server, exec, parsed, null, "workspace:1");
   });
 
   it("spawn_agent defaults to the lean payload in text and structured content", async () => {
@@ -4259,6 +4323,7 @@ describe("agent lifecycle tool handlers", () => {
         "return",
       ]),
     );
+    await expectVerifiedBoot(server, mockExec, parsed, "fix prompt delivery", "workspace:1");
   });
 
   it("spawn_agent routes its boot prompt through the stable UUID after readiness moves", async () => {
@@ -4344,7 +4409,9 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
 
     expect(parsed.ok).toBe(true);
+    expect(engineForTests(server).getAgentState(parsed.agent_id)?.surface_uuid).toBe(stableUuid);
     expectCombinedCodexBoot(mockExec, parsed, "UUID-bound boot prompt", "workspace:1", "surface:moved");
+    await expectVerifiedBoot(server, mockExec, parsed, "UUID-bound boot prompt", "workspace:1", "surface:moved");
   });
 
   it("spawn_agent blocks the internal boot_prompt mutation when control becomes manual", async () => {
@@ -4418,6 +4485,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.actual_workspace_id).toBeUndefined();
 
     expectCombinedCodexBoot(mockExec, parsed, prompt, "workspace:1");
+    await expectVerifiedBoot(server, mockExec, parsed, prompt, "workspace:1");
   });
 
   it("spawn_agent delivers prompts to the resolved workspace when cmux returns an empty workspace", async () => {
@@ -4439,6 +4507,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
     expectCombinedCodexBoot(exec, parsed, prompt, "workspace:1");
+    await expectVerifiedBoot(server, exec, parsed, prompt, "workspace:1");
   });
 
   it("spawn_agent deliberately allowed inline prompts preserve blank lines without empty chunks", async () => {
@@ -4529,19 +4598,26 @@ describe("agent lifecycle tool handlers", () => {
     const sessionId = "019ec0e6-1111-2222-3333-444455556666";
     let finalAgentId: string | null = null;
     let renamed = false;
+    let bootAgentId = "";
+    const inboxBaseDir = join(harnessHome.path(), "inbox");
     const baseExec = makeLifecycleExec();
     mockExec = vi.fn().mockImplementation(async (cmd, args) => {
+      const boot = engineForTests(server).stateMgr.listStates()[0];
       if (
         !renamed &&
         (args.includes("send") || args.includes("set-buffer")) &&
         String(args.at(-1) ?? "").includes("probe renamed state")
       ) {
+        bootAgentId = boot.agent_id;
         renamed = true;
         finalAgentId = renameOnlyAgentStateToSession(sessionId);
       }
       return baseExec(cmd, args);
     });
-    const server = createLifecycleServer(mockExec);
+    const server = createTrackedServer({
+      exec: mockExec, stateDir: TEST_DIR, inboxBaseDir,
+      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+    });
     const tool = (server as any)._registeredTools["spawn_agent"];
 
     const result = await tool.handler(
@@ -4557,6 +4633,7 @@ describe("agent lifecycle tool handlers", () => {
     const parsed =
       result.structuredContent ?? JSON.parse(result.content[0].text);
     expect(parsed.ok).toBe(true);
+    expect(renamed).toBe(true);
     expect(parsed.agent_id).toBe(finalAgentId);
     expect(parsed.agent_id).toBe("cmuxlayerCodex-019ec0e6");
     expect(parsed.boot_prompt_delivered).toBe(true);
@@ -4572,6 +4649,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(persisted.prompt_delivered).toBe(true);
     expect(persisted.submit_verified).toBe(true);
     expect(persisted.task_summary).toBe("probe renamed state");
+    await expectVerifiedBoot(server, mockExec, parsed, "probe renamed state", "workspace:1", "surface:new", bootAgentId);
   });
 
   it("spawn_agent with worktree launches from the worktree and inherits MCPs by default", async () => {
@@ -5519,6 +5597,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.spawn_state).toBe("started");
     expect(parsed).not.toHaveProperty("next_action");
     expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:1");
+    await expectVerifiedBoot(server, mockExec, parsed, "file prompt body", "workspace:1");
   });
 
   it.each([600, 2400])("spawn_agent does not insert a leading newline when the CLI paints after %ims", async (paintMs) => {
@@ -5697,7 +5776,8 @@ describe("agent lifecycle tool handlers", () => {
         }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
-      if (args.includes("send-key")) {
+      if (args.includes("send-key") && args.includes("return")) {
+        if (lastSentText.includes("file prompt body")) promptSubmitted = true;
         if (lastSentText === "voicelayerCodex -s --worker -E medium") {
           launcherReturnCount += 1;
           launcherReturnTimes.push(Date.now());
@@ -5778,6 +5858,8 @@ describe("agent lifecycle tool handlers", () => {
       ]),
     );
     expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:voice");
+    expect(promptSubmitted).toBe(true);
+    await expectVerifiedBoot(server, mockExec, parsed, "file prompt body", "workspace:voice");
   }, 10_000);
 
   it("spawn_agent fails with decorated-prompt pending evidence when Return never submits", async () => {

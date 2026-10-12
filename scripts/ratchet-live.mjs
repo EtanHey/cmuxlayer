@@ -23,6 +23,7 @@ const productionHome = homedir();
 const rows = [
   { name: "send_under_codex_banner", fixture: "banner", bug: "7f26603f", fix: "64260ba3", specimen: "#1007 / composer-overlays/codex-boot.txt" },
   { name: "spawn_boot_false_unsubmitted", fixture: "boot", bug: "14aa55b5", fix: "fee6d9e5f29801e97fa64dabb8bfe0fc41aa5c94", fix_source: "#1019 merge", specimen: "docs.local/lanes/spawn-p0/live-specimen-1.md" },
+  { name: "spawn_contract_once", fixture: "contract", bug: "87eccd87a81d116e3fe6056a9373e7d85fd0c3ab", fix: "HEAD", fix_source: "candidate resolved to exact SHA per sample; lead review required", specimen: "2026-10-07 initialization consumes brief / contract footer stranded" },
 ];
 let nightlyPid, appTarget, scratch, mcp, daemon, daemonCommand, productionBefore, sequence = 0, lockOwned = false;
 const runAgentIds = new Set();
@@ -134,18 +135,26 @@ async function sample(row, ref) {
       await until(() => existsSync(events));
       result = await tool("send_to", { mode: "surface", surface: ws.surface_ref, workspace: ws.workspace_ref, text: token, verbose: true });
     } else {
-      result = await tool("spawn_agent", { repo: "ratchet", cli: "codex", effort: "low", role: "worker", authority: "worker", placement: "right", workspace: receipt.workspace.workspace_id, cwd: join(scratch, "repo"), worktree: false, mcp_profile: "sterile", prompt: token, boot_prompt_timeout_ms: 5000, verbose: true });
+      result = await tool("spawn_agent", { repo: "ratchet", cli: "codex", effort: "low", role: "worker", authority: "worker", placement: "right", workspace: receipt.workspace.workspace_id, cwd: join(scratch, "repo"), worktree: false, ...(row.fixture === "contract" ? {} : { mcp_profile: "sterile" }), prompt: token, boot_prompt_timeout_ms: 5000, verbose: true });
       surface = result.surface_id;
       if (result.agent_id) runAgentIds.add(result.agent_id);
     }
-    if (existsSync(events) && JSON.parse(readFileSync(events)).submitted === token) await until(() => JSON.parse(readFileSync(events)).phase === "working");
+    const expected = row.fixture === "contract"
+      ? `${token} ; cmuxlayer contract for ${result.agent_id}: Read and follow ${result.contract_path}` : token;
+    if (existsSync(events) && JSON.parse(readFileSync(events)).submitted) await until(() => JSON.parse(readFileSync(events)).phase === "working");
     const fixture = existsSync(events) ? JSON.parse(readFileSync(events)) : null;
     if (!fixture) throw new Error(`fixture did not launch: ${JSON.stringify(result)}`);
     const screen = surface ? await cmux("surface.read_text", { surface_id: surface }) : null;
-    const accepted = fixture.submitted === token && fixture.phase === "working" && screen?.text.includes("Working");
+    const accepted = fixture.submitted === expected && fixture.phase === "working" && screen?.text.includes("Working");
     const passed = accepted && result.ok === true && (row.fixture === "banner" ? result.submitted === true && result.submit_verified === true && result.delivery_state === "submitted" : result.boot_prompt_delivered === true && result.boot_prompt_submit_verified === true && result.spawn_state !== "boot_unsubmitted");
-    const expected_defect = row.fixture === "banner" ? !fixture.submitted && result.ok === false && (result.error?.includes("account_security_banner_not_dismissed") || result.submit_verification_reason === "account_security_banner_not_dismissed") : accepted && result.spawn_state === "boot_unsubmitted" && result.boot_prompt_delivered === false && result.health?.screen_confirmed_state === "working";
-    return sampled = { sha, lock_sha256: createHash("sha256").update(readFileSync(join(tree, "bun.lock"))).digest("hex"), status: passed ? "PASS" : "FAIL", failure_kind: passed ? null : "behavior", expected_defect: Boolean(expected_defect), accepted, result, fixture, screen, daemon_log: log };
+    const contractOnce = row.fixture !== "contract" || fixture.draft === "" &&
+      fixture.submissions?.length === 1 && fixture.submissions[0] === expected &&
+      fixture.keys.filter(key => key === "Return").length === 1 &&
+      !fixture.keys.includes("LF") && result.coordination_footer_delivered === true;
+    const expected_defect = row.fixture === "contract"
+      ? fixture.submitted === token && fixture.draft.includes(`cmuxlayer contract for ${result.agent_id}:`) && result.spawn_state === "boot_unsubmitted"
+      : row.fixture === "banner" ? !fixture.submitted && result.ok === false && (result.error?.includes("account_security_banner_not_dismissed") || result.submit_verification_reason === "account_security_banner_not_dismissed") : accepted && result.spawn_state === "boot_unsubmitted" && result.boot_prompt_delivered === false && result.health?.screen_confirmed_state === "working";
+    return sampled = { sha, lock_sha256: createHash("sha256").update(readFileSync(join(tree, "bun.lock"))).digest("hex"), status: passed && contractOnce ? "PASS" : "FAIL", failure_kind: passed && contractOnce ? null : "behavior", expected_defect: Boolean(expected_defect), accepted, contract_once: contractOnce, result, fixture, screen, daemon_log: log };
   } catch (error) { return sampled = { sha, status: "FAIL", failure_kind: "infrastructure", error: String(error), daemon_log: log }; }
   finally {
     try {

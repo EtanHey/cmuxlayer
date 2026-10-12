@@ -1207,6 +1207,23 @@ export function registerSpawnAgentTool(
                 retry_count: bootPromptDelivery.retry_count, rpc_methods: bootPromptDelivery.rpc_methods,
                 boot_recovery: true, boot_instance_id: boot?.boot_instance_id ?? undefined,
               });
+            } else if (bootPromptDelivery.delivery_id) {
+              const boot = engine.getAgentState(result.agent_id);
+              // Every published ID is waitable. An unsubmitted draft is typed,
+              // not a background verification candidate or a replayable queue.
+              engine.resolveDelivery({
+                delivery_id: bootPromptDelivery.delivery_id, agent_id: result.agent_id,
+                text: bootDeliveryText ?? boot?.boot_delivery_text ?? "",
+                source_event: "boot_prompt", typed: bootPromptDelivery.typed,
+                press_enter: bootPromptDelivery.submit_dispatched === true,
+                submit_dispatched: bootPromptDelivery.submit_dispatched,
+                submit_verified: bootPromptDelivery.submit_verified,
+                delivery_state: bootPromptDelivery.submit_verified === true ? "submitted" : "typed",
+                terminal: true,
+                retry_count: bootPromptDelivery.retry_count, rpc_methods: bootPromptDelivery.rpc_methods,
+                error: null,
+                boot_instance_id: boot?.boot_instance_id ?? undefined,
+              });
             }
             if (bootPromptDelivery.prompt_text !== null) {
               const updated = stateMgr.updateRecord(result.agent_id, {
