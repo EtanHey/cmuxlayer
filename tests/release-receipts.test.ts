@@ -115,6 +115,7 @@ function makeReleaseFixture(
     "release.sh",
     "release-verify.sh",
     "release-receipt.mjs",
+    "package-resource-guard.mjs",
     "post-release-reconnect-sweep.sh",
   ]) {
     const source = join(repoRoot, "scripts", script);
@@ -123,6 +124,9 @@ function makeReleaseFixture(
       chmodSync(join(scriptsDir, script), 0o755);
     }
   }
+
+  mkdirSync(join(repoDir, "packaging"));
+  copyFileSync(join(repoRoot, "packaging/resource-guard-install.rb"), join(repoDir, "packaging/resource-guard-install.rb"));
 
   writeFileSync(
     join(repoDir, "package.json"),
@@ -135,6 +139,9 @@ function makeReleaseFixture(
       '  url "https://github.com/EtanHey/cmuxlayer/archive/refs/tags/v0.4.0.tar.gz"',
       `  sha256 "${"0".repeat(64)}"`,
       '  exec "#{Formula["node"].opt_bin}/node"',
+      "  def install",
+      '    libexec.install "dist", "node_modules", "package.json"',
+      "  end",
       "end",
       "",
     ].join("\n"),
