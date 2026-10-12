@@ -123,20 +123,38 @@ it('caps JSONL at complete row boundaries without archive duplication', async ()
 });
 
 it('times out an uncooperative duty group while guardian runs on the same and next tick', async()=>{
-  const {mkdirSync}=await import('node:fs'); const root=scratch(), home=scratch();
-  mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
+  const {mkdirSync,existsSync}=await import('node:fs'), {spawn,spawnSync}=await import('node:child_process');
+  const ts=await import('typescript'), root=scratch(), home=scratch(), logs=join(home,'logs');
+  mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});mkdirSync(join(root,'dist'));
+  writeFileSync(join(root,'package.json'),'{"type":"module"}');
+  const entry=join(root,'dist/resource-guard.js'), binary=join(root,'cmux-resource-guard');
+  writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  const built=spawnSync('cc',[`-DGUARD_NODE="${process.execPath}"`,`-DGUARD_PATH="${process.env.PATH}"`,`-DGUARD_ENTRY="${entry}"`,join(import.meta.dirname,'../launchd/resource-guard/cmux-resource-guard.c'),'-o',binary],{encoding:'utf8'});
+  expect(built.status,built.stderr).toBe(0);
   writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),'echo guardian-ran\n');
   writeFileSync(join(root,'launchd/resource-guard/cmux-memory-watchdog.sh'),'trap "" TERM\nsleep 30 &\necho $! > "$CHILD_PID_FILE"\nwait\n');
-  const options={root,home,config:{watchdog:true,guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'100',CHILD_PID_FILE:join(home,'child')}}};
+  const pidFile=join(home,'child'), config=join(home,'config');
+  // Both duties share a budget: allow a loaded runner to schedule the guardian.
+  writeFileSync(config,JSON.stringify({watchdog:true,guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'5000',CHILD_PID_FILE:pidFile,CMUX_RESOURCE_GUARD_LOG_DIR:logs}}));
+  const state=(pid:number)=>spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();
+  const gone=(pid:number)=>/^$|^Z/.test(state(pid));
   for(let tick=0;tick<2;tick++) {
-    await expect(runTick(options)).rejects.toThrow('timeout');
-    const pid=Number(readFileSync(join(home,'child'),'utf8'));
-    const {spawnSync}=await import('node:child_process');
-    const status=spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim();
-    expect(status === '' || status.startsWith('Z')).toBe(true);
+    rmSync(pidFile,{force:true});
+    const child=spawn(binary,[],{env:{...process.env,HOME:home,CMUX_RESOURCE_GUARD_CONFIG:config},stdio:'ignore'});
+    const closed=new Promise<void>(resolve=>child.once('close',()=>resolve()));
+    try {
+      const deadline=Date.now()+20_000;
+      while(Date.now()<deadline && (child.exitCode===null || !existsSync(pidFile) || !gone(Number(readFileSync(pidFile,'utf8'))))) await new Promise(resolve=>setTimeout(resolve,20));
+      // Native launcher exit releases its flock; only then start tick two.
+      expect(child.exitCode,'native tick did not exit/release its lock by the deadline').toBe(1);
+      await closed;
+      expect(gone(Number(readFileSync(pidFile,'utf8')))).toBe(true);
+      expect(readFileSync(join(home,'.local/state/cmux-resource-guard/tick'),'utf8')).toBe(String(tick+1));
+      expect(readFileSync(join(logs,'guardian.out.log'),'utf8').trim().split('\n')).toHaveLength(tick+1);
+    } finally { if(child.exitCode===null && child.signalCode===null) {child.kill('SIGTERM');await closed;} }
   }
-  expect(readFileSync(join(home,'logs/guardian.out.log'),'utf8').trim().split('\n')).toEqual(['guardian-ran','guardian-ran']);
-  expect(readFileSync(join(home,'logs/watchdog.err.log'),'utf8')).toContain('timeout');
+  expect(readFileSync(join(logs,'guardian.out.log'),'utf8').trim().split('\n')).toEqual(['guardian-ran','guardian-ran']);
+  expect(readFileSync(join(logs,'watchdog.err.log'),'utf8')).toContain('timeout');
 }, 60_000);
 it('recovers an invalid tick and leaves disabled watchdog snapshot directories untouched',async()=>{
   const {mkdirSync}=await import('node:fs'); const home=scratch(), snapshots=join(home,'shared');mkdirSync(snapshots);
