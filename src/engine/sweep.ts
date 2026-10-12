@@ -1032,9 +1032,11 @@ export function markIntentionalSurfaceCloses(
 export async function observeWatchOwner(
   this: SweepHost, owner: string,
   withUnlocked?: <T>(operation: () => Promise<T>) => Promise<T>,
-): Promise<boolean> {
+): Promise<boolean | null> {
+  let persistedReadFailed = false;
   const resolution = resolveWatchOwnerFromSources(
-    watchRecordOwner({ owner }), this.registry.list(), this.stateMgr.listStates(),
+    watchRecordOwner({ owner }), this.registry.list(),
+    this.stateMgr.listStates(() => { persistedReadFailed = true; }),
   );
   // Ambiguous aliases retain if any candidate may be live. Unreadable screens
   // are inconclusive in watchAgentObservation and therefore also retain.
@@ -1043,7 +1045,9 @@ export async function observeWatchOwner(
       return true;
     }
   }
-  return false;
+  // Any unreadable row could hide a live alias/prefix candidate. Only complete
+  // enumeration may prove absence; a positively live candidate still wins.
+  return persistedReadFailed ? null : false;
 }
 
 export async function sweepWatchesBestEffort(

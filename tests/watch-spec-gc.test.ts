@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { armWatch, readWatchRegistry, sweepWatches, updateWatchDeadline } from "../src/watch-spec.js";
 import { observeWatchOwner } from "../src/engine/sweep.js";
+import { StateManager } from "../src/state-manager.js";
 
 const DAY = 86_400_000;
 describe("watch registry retention", () => {
@@ -117,5 +118,28 @@ describe("watch registry retention", () => {
     expect(await observe("lead-b")).toBe(true);
     host.watchAgentObservation.mockResolvedValue({ exists: true });
     expect(await observe("seat")).toBe(true);
+  });
+
+  it.each(["malformed", "unreadable", "null-record", "incomplete-record"])("retains an aged watch when real owner state is %s", async (failure) => {
+    const stateDir = join(dir, "states");
+    const stateFile = join(stateDir, "lead", "state.json");
+    mkdirSync(join(stateDir, "lead"), { recursive: true });
+    if (failure === "malformed") writeFileSync(stateFile, "{invalid-json");
+    else if (failure === "null-record") writeFileSync(stateFile, "null");
+    else if (failure === "incomplete-record") writeFileSync(stateFile, '{"agent_id":"lead"}');
+    else mkdirSync(stateFile); // EISDIR is portable even with elevated permissions.
+    const host = {
+      registry: { list: () => [] }, stateMgr: new StateManager(stateDir),
+      watchAgentObservation: vi.fn(async () => ({ exists: true })),
+    };
+    await arm();
+    now += DAY;
+    const ownerObservation = (owner: string) => observeWatchOwner.call(host as any, owner);
+    expect(await ownerObservation("lead")).toBeNull();
+    const notify = vi.fn();
+    await sweepWatches({ ...opts(), ownerObservation, notify });
+    expect(disk()[0]).toMatchObject({ state: "armed" });
+    expect(disk()[0]).not.toHaveProperty("terminal_reason");
+    expect(notify).not.toHaveBeenCalled();
   });
 });

@@ -258,14 +258,21 @@ export class StateManager {
     return join(this.baseDir, dirName, "state.json");
   }
 
-  private readStateFromDir(dirName: string): AgentRecord | null {
+  private readStateFromDir(dirName: string, onReadError?: () => void): AgentRecord | null {
     const stateFile = this.stateFilePath(dirName);
-    if (!existsSync(stateFile)) return null;
+    if (!onReadError && !existsSync(stateFile)) return null;
     try {
-      return normalizePersistedAgentRecord(
+      const record = normalizePersistedAgentRecord(
         JSON.parse(readFileSync(stateFile, "utf-8")) as PersistedAgentRecord,
       );
-    } catch {
+      if (onReadError && [record.agent_id, record.surface_id, record.state]
+        .some(value => typeof value !== "string" || !value.trim())) {
+        onReadError();
+        return null;
+      }
+      return record;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") onReadError?.();
       return null;
     }
   }
@@ -734,13 +741,20 @@ export class StateManager {
     return updated;
   }
 
-  listStates(): AgentRecord[] {
-    if (!existsSync(this.baseDir)) return [];
-    const entries = readdirSync(this.baseDir, { withFileTypes: true });
+  listStates(onReadError?: () => void): AgentRecord[] {
+    if (!onReadError && !existsSync(this.baseDir)) return [];
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(this.baseDir, { withFileTypes: true });
+    } catch (error) {
+      if (!onReadError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") onReadError();
+      return [];
+    }
     const records: AgentRecord[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const record = this.readStateFromDir(entry.name);
+      const record = this.readStateFromDir(entry.name, onReadError);
       if (record) records.push(record);
     }
     const retiredIds = new Set(records.flatMap(record => record.session_continuity_aliases ?? []));
