@@ -1,0 +1,123 @@
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { appendCapped, runTick } from '../src/resource-guard.js';
+
+const dirs: string[] = [];
+function scratch() { const dir = realpathSync(mkdtempSync(join(tmpdir(), 'resource-guard-'))); dirs.push(dir); return dir; }
+afterEach(() => dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true })));
+describe('resource guard', () => {
+  it('dispatches every duty on its cadence across separate invocations', async () => {
+    const home = scratch(), calls: string[] = [];
+    const options = { home, root: '/keg/libexec', config: { watchdog: true, guardian: true },
+      run: async (name: string) => { calls.push(name); } };
+    for (let tick = 1; tick <= 30; tick++) {
+      calls.length = 0;
+      await runTick(options);
+      expect(calls).toEqual([...(tick % 30 === 0 ? ['sampler'] : []), 'watchdog', 'guardian', ...(tick % 5 === 0 ? ['reaper'] : [])]);
+    }
+  });
+  it('fresh installs enable sampler and dry-run reaper; host duties require opt-in', async () => {
+    const calls: string[] = [], envs: Record<string, string | undefined>[] = [];
+    const home = scratch();
+    writeFileSync(join(home, 'tick'), '29');
+    await runTick({ home, root: '/keg/libexec', run: async (name, env) => { calls.push(name); envs.push(env); } });
+    expect(calls).toEqual(['sampler', 'reaper']);
+    expect(envs.every(env => env.REAPER_DRY_RUN === '1')).toBe(true);
+  });
+  it('streams huge output through a strict two-file cap', () => {
+    const file = join(scratch(), 'guard.log');
+    for (let i = 0; i < 20; i++) appendCapped(file, Buffer.alloc(70, i), 100);
+    expect(readdirSync(join(file, '..')).sort()).toEqual(['guard.log', 'guard.log.1']);
+    expect(readFileSync(file).length).toBeLessThanOrEqual(100);
+    expect(readFileSync(file + '.1').length).toBeLessThanOrEqual(100);
+  });
+  it('continues the other duties after a failure and allows the next tick', async () => {
+    const home = scratch(), calls: string[] = [];
+    const options = { home, root: '/keg/libexec', config: { watchdog: true, guardian: true },
+      run: async (name: string) => { calls.push(name); if (name === 'watchdog') throw new Error('broken'); } };
+    await expect(runTick(options)).rejects.toThrow('watchdog');
+    await expect(runTick(options)).rejects.toThrow('watchdog');
+    expect(calls).toEqual(['watchdog', 'guardian', 'watchdog', 'guardian']);
+  });
+});
+
+// Compile the shipped native launcher and make it serve a real dispatcher request.
+it('ships a named executable, all four real duties, and an idempotent jq formula fragment', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { cpSync, mkdirSync } = await import('node:fs');
+  const root = join(import.meta.dirname, '..'), keg = scratch(), home = scratch();
+  const formula = join(keg, 'cmuxlayer.rb');
+  writeFileSync(formula, 'class Cmuxlayer\n  def install\n    libexec.install "dist", "node_modules", "package.json"\n  end\nend\n');
+  expect(spawnSync(process.execPath, [join(root, 'scripts/package-resource-guard.mjs'), formula]).status).toBe(0);
+  const firstPackaging = readFileSync(formula, 'utf8');
+  expect(spawnSync(process.execPath, [join(root, 'scripts/package-resource-guard.mjs'), formula]).status).toBe(0);
+  expect(readFileSync(formula, 'utf8')).toBe(firstPackaging);
+  const packaged = readFileSync(formula, 'utf8');
+  expect(packaged.match(/depends_on "jq"/g)).toHaveLength(1);
+  expect(packaged.match(/BEGIN cmux-resource-guard/g)).toHaveLength(1);
+  expect(packaged.indexOf('system ENV.cc')).toBeLessThan(packaged.indexOf('libexec.install "launchd"'));
+  cpSync(join(root, 'launchd'), join(keg, 'launchd'), { recursive: true });
+  mkdirSync(join(keg, 'dist'));
+  const ts = await import('typescript');
+  for (const name of ['resource-guard', 'mcp-reaper']) {
+    writeFileSync(join(keg, 'dist', name + '.js'), ts.transpileModule(readFileSync(join(root, 'src', name + '.ts'), 'utf8'),
+      {compilerOptions:{module:ts.ModuleKind.ESNext, target:ts.ScriptTarget.ES2022}}).outputText);
+  }
+  mkdirSync(join(keg, 'dist/util'));
+  writeFileSync(join(keg, 'dist/util/pid-alive.js'), ts.transpileModule(readFileSync(join(root, 'src/util/pid-alive.ts'), 'utf8'), {compilerOptions:{module:ts.ModuleKind.ESNext, target:ts.ScriptTarget.ES2022}}).outputText);
+  writeFileSync(join(keg, 'package.json'), '{"type":"module"}');
+  const binary = join(keg, 'cmux-resource-guard');
+  const built = spawnSync('cc', ['-Wall', '-Wextra', '-Werror', `-DGUARD_NODE="${process.execPath}"`, `-DGUARD_PATH="${process.env.PATH}"`, `-DGUARD_ENTRY="${join(keg, 'dist/resource-guard.js')}"`, join(root, 'launchd/resource-guard/cmux-resource-guard.c'), '-o', binary], {encoding:'utf8'});
+  expect(built.status, built.stderr).toBe(0);
+  const state = join(home, '.local/state/cmux-resource-guard'); mkdirSync(state, {recursive:true}); writeFileSync(join(state, 'tick'), '29');
+  const empty = join(home, 'empty'); writeFileSync(empty, '');
+  const pressure = join(home, 'pressure'); writeFileSync(pressure, 'System-wide memory free percentage: 90%\n');
+  const vm = join(home, 'vm'); writeFileSync(vm, 'Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 100.\nPages inactive: 100.\nPages occupied by compressor: 0.\n');
+  const knobs = {REAPER_DRY_RUN:'1', HEAVY_ML_CLX_CLI:'', HEAVY_ML_DANGER_STATE_DIR:join(home,'guardian-state'), CMUX_MEM_WATCHDOG_THRESHOLD_GB:'invalid', HEAVY_ML_PS_FIXTURE:empty, HEAVY_ML_MEMPRESSURE_FIXTURE:pressure,
+    HEAVY_ML_VMSTAT_FIXTURE:vm, HEAVY_ML_GUARD_ENABLE_KILL:'0', CMUX_RAM_SAMPLER_VMSTAT_FIXTURE:vm,
+    CMUX_RAM_SAMPLER_STABLE_PATH:'/fixture/no-stable', CMUX_RAM_SAMPLER_NIGHTLY_PATH:'/fixture/no-nightly'};
+  const config = join(home, 'config.json'); writeFileSync(config, JSON.stringify({watchdog:true, guardian:true, env:knobs}));
+  const request = spawnSync(binary, [], {env:{...process.env, HOME:home, CMUX_RESOURCE_GUARD_CONFIG:config}, encoding:'utf8'});
+  expect(request.status, request.stderr).toBe(0);
+  const logs = join(home, 'Library/Logs/cmux-resource-guard');
+  expect(readFileSync(join(logs, 'watchdog.err.log'), 'utf8')).toContain('refusing to run');
+  expect(JSON.parse(readFileSync(join(logs, 'guardian.out.log'), 'utf8')).heavy_ml_count).toBe(0);
+  expect(readFileSync(join(logs, 'sampler.err.log'), 'utf8')).toContain('not running');
+  expect(readFileSync(join(logs, 'reaper.out.log'), 'utf8')).toMatch(/No reapable|DRY_RUN/);
+  expect(readFileSync(join(state, 'tick'), 'utf8')).toBe('0');
+});
+it('native lock prevents overlap and recovers after process termination', async () => {
+  const {spawn, spawnSync} = await import('node:child_process');
+  const {once} = await import('node:events');
+  const dir = scratch(), entry = join(dir,'entry.mjs'), binary = join(dir,'cmux-resource-guard');
+  writeFileSync(entry, 'console.log("ready"); setInterval(()=>{},1000);');
+  const result = spawnSync('cc', [`-DGUARD_NODE="${process.execPath}"`, `-DGUARD_PATH="${process.env.PATH}"`, `-DGUARD_ENTRY="${entry}"`, join(import.meta.dirname,'../launchd/resource-guard/cmux-resource-guard.c'), '-o',binary],{encoding:'utf8'});
+  expect(result.status,result.stderr).toBe(0);
+  const start = () => spawn(binary,[],{env:{...process.env,HOME:dir},stdio:['ignore','pipe','pipe']});
+  const first = start(); await once(first.stdout,'data');
+  try { const second = spawnSync(binary,[],{env:{...process.env,HOME:dir},encoding:'utf8',timeout:2000}); expect(second.status).toBe(0); expect(second.stdout).toBe(''); }
+  finally { first.kill('SIGTERM'); await once(first,'close'); }
+  const third = start();
+  try { const [out] = await once(third.stdout,'data'); expect(String(out)).toContain('ready'); }
+  finally { third.kill('SIGTERM'); await once(third,'close'); }
+});
+
+it('rejects malformed configuration before invoking a host duty', async () => {
+  let invoked = false;
+  await expect(runTick({root:'/keg',home:scratch(),config:{watchdog:true,env:[] as never},run:async()=>{invoked=true;}})).rejects.toThrow('invalid');
+  expect(invoked).toBe(false);
+});
+
+it('caps JSONL at complete row boundaries without archive duplication', async () => {
+  const home = scratch(), file = join(home, 'samples.jsonl');
+  writeFileSync(file, Array.from({length:30000},(_,i)=>JSON.stringify({i,payload:'x'.repeat(200)})).join('\n') + '\n');
+  await runTick({root:'/keg',home,config:{env:{CMUX_RAM_SAMPLER_SAMPLE_FILE:file}},run:async()=>{}});
+  const current = readFileSync(file,'utf8'), archive = readFileSync(file + '.1','utf8');
+  expect(Buffer.byteLength(current)).toBeLessThanOrEqual(5 * 1024 * 1024);
+  expect(Buffer.byteLength(archive)).toBeLessThanOrEqual(5 * 1024 * 1024);
+  const ids = (archive + current).trim().split('\n').map(line=>JSON.parse(line).i);
+  expect(new Set(ids).size).toBe(ids.length);
+  expect(ids.at(-1)).toBe(29999);
+});
