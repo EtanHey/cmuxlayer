@@ -173,3 +173,63 @@ it('repeated CLI shutdown signals terminate detached duty descendants',async()=>
     }
   }
 },10000);
+
+it('bounds a tick when a setsid descendant retains duty pipes', async () => {
+  const {mkdirSync, existsSync} = await import('node:fs');
+  const {spawnSync} = await import('node:child_process');
+  const root = scratch(), home = scratch(), escaped = join(home,'escaped');
+  mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
+  const guardian = join(root,'launchd/resource-guard/heavy-ml-guardian.sh');
+  writeFileSync(guardian, `trap "" TERM\necho guardian-ran\n/usr/bin/perl -MPOSIX=setsid -e 'my $pid=fork(); defined($pid) or die "fork"; if (!$pid) { setsid() >= 0 or die "setsid"; open my $fh, ">", $ENV{ESCAPED_PID_FILE} or die $!; print $fh $$; close $fh; sleep 8; exit 0; } sleep 30;'\n`);
+  const options = {root,home,config:{guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'500',ESCAPED_PID_FILE:escaped}}};
+  const started = Date.now();
+  try {
+    await expect(runTick(options)).rejects.toThrow('timeout');
+    expect(Date.now() - started).toBeLessThan(4500);
+    const pid = Number(readFileSync(escaped,'utf8'));
+    expect(spawnSync('ps',['-p',String(pid),'-o','stat='],{encoding:'utf8'}).stdout.trim()).not.toMatch(/^$|^Z/);
+    writeFileSync(guardian,'echo guardian-ran\n');
+    await runTick(options);
+    expect(readFileSync(join(home,'logs/guardian.out.log'),'utf8').trim().split('\n')).toEqual(['guardian-ran','guardian-ran']);
+  } finally {
+    // The escaped fixture expires itself; never signal an orphan after custody is lost.
+    while (Date.now() - started < 9500) {
+      if (existsSync(escaped)) {
+        const state = spawnSync('ps',['-p',readFileSync(escaped,'utf8'),'-o','stat='],{encoding:'utf8'}).stdout.trim();
+        if (state === '' || state.startsWith('Z')) break;
+      }
+      await new Promise(resolve => setTimeout(resolve,50));
+    }
+  }
+},15000);
+
+it('kills surviving group members after the duty leader exits on TERM', async () => {
+  const {mkdirSync, existsSync} = await import('node:fs');
+  const {spawn, spawnSync} = await import('node:child_process');
+  const {once} = await import('node:events'), ts = await import('typescript');
+  const root = scratch(), home = scratch(), leaderFile = join(home,'leader'), memberFile = join(home,'member');
+  mkdirSync(join(root,'dist')); mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
+  writeFileSync(join(root,'package.json'),'{"type":"module"}');
+  const entry = join(root,'dist/resource-guard.js');
+  writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),`trap "exit 0" TERM\necho $$ > "$LEADER_PID_FILE"\n/usr/bin/perl -e '$SIG{TERM}="IGNORE"; open my $fh, ">", $ENV{MEMBER_PID_FILE} or die $!; print $fh $$; close $fh; sleep 8;' &\nwhile :; do sleep 1; done\n`);
+  const config = join(home,'config');
+  writeFileSync(config,JSON.stringify({guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'500',LEADER_PID_FILE:leaderFile,MEMBER_PID_FILE:memberFile}}));
+  const started = Date.now(), child = spawn(process.execPath,[entry],{env:{...process.env,HOME:home,CMUX_RESOURCE_GUARD_CONFIG:config},stdio:'ignore'}), closed = once(child,'close');
+  const state = (pid:string) => spawnSync('ps',['-p',pid,'-o','stat='],{encoding:'utf8'}).stdout.trim();
+  try {
+    for(let i=0;i<100 && !existsSync(memberFile);i++) await new Promise(resolve=>setTimeout(resolve,20));
+    await new Promise(resolve=>setTimeout(resolve,900));
+    expect(state(readFileSync(leaderFile,'utf8').trim())).toMatch(/^$|^Z/);
+    expect(state(readFileSync(memberFile,'utf8').trim())).not.toMatch(/^$|^Z/);
+    const [code] = await closed; expect(code).toBe(1);
+    expect(state(readFileSync(memberFile,'utf8').trim())).toMatch(/^$|^Z/);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    // The bounded fixture expires itself if a broken dispatcher leaves it behind.
+    while(Date.now()-started < 9500) {
+      if(existsSync(memberFile) && /^$|^Z/.test(state(readFileSync(memberFile,'utf8').trim()))) break;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+  }
+},15000);

@@ -8,6 +8,9 @@ The guardian starts first. Due duties run concurrently, each in its own process
 group with a 45-second wall-clock budget, followed by TERM and a two-second grace
 before KILL. A hung duty therefore cannot starve the next tick. Timeouts appear in
 the duty error log; skipped overlapping ticks appear in capped `guard.lock.log`.
+The dispatcher closes its output pipes when the duty leader exits, so an escaped
+descendant cannot hold the tick open. Delayed escalation still kills surviving
+process-group members after leader exit; only an absent group is skipped.
 Invalid tick state resets to zero with a warning.
 
 Fresh installs enable only the sampler and dry-run reaper (`REAPER_DRY_RUN=1`).
