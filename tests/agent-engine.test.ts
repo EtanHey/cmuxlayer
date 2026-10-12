@@ -7751,6 +7751,10 @@ Session ID: ${sessionId}`,
           return { workspace: opts.workspace, surface: created.ref, surface_id: created.id,
             pane: opts.pane, title: "", type: "terminal" };
         });
+        Object.assign(mockClient, { listTerminalMetadata: vi.fn().mockImplementation(async () => ({
+          terminals: liveSurfaces.map(surface => ({ surface_id: surface.id, surface_ref: surface.ref,
+            workspace_ref: surface.workspace_ref, runtime_surface_ready: true, ghostty_surface_ptr: "0x123" })),
+        })) });
       }
       const witnessPath = join(TEST_DIR, "history.json");
       if (mode === "authority") historical.authority = "worker";
