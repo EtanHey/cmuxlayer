@@ -1,5 +1,9 @@
 # MCP orphan reaper LaunchAgent
 
+For new installations and four-job consolidation, use the installed
+[Resource Guard cutover](../docs/guides/resource-guard-cutover.md). The commands
+below retain the legacy single-reaper installer mode for compatibility.
+
 Render and inspect the portable plist without changing launchd:
 
 ```bash

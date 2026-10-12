@@ -43,4 +43,5 @@ Homebrew compiles the native launcher with absolute installed Node/entry paths,
 and installs the launchd duty files under libexec. Release tooling applies the versioned
 formula fragment before publishing the tap update. GitHub tag tarballs include
 these tracked files. Installing the formula never starts or changes launchd jobs.
-The installer and legacy cutover are supplied by the stacked migration PR.
+Use the installed [cutover command](../../docs/guides/resource-guard-cutover.md)
+to install one job and archive the four legacy plists. Installation is opt-in.

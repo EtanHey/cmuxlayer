@@ -2,6 +2,11 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "${1:-}" = "--resource-guard" ]; then
+  shift
+  IFS= read -r node_bin < "$REPO_DIR/resource-guard-node-path"
+  exec "$node_bin" "$REPO_DIR/dist/resource-guard-install.js" "${1:---dry-run}"
+fi
 SOURCE_PLIST="$REPO_DIR/scripts/com.cmuxlayer.mcp-reaper.plist"
 TARGET_PLIST="$HOME/Library/LaunchAgents/com.cmuxlayer.mcp-reaper.plist"
 MODE="${1:---dry-run}"
