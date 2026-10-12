@@ -7804,7 +7804,25 @@ Session ID: ${sessionId}`,
       }
       const accepted = ["legacy", "retained-observer", "claude-retained", "codex-retained", "claude-legacy", "claude-legacy-worker", "repeat", "interrupted", "marker-interrupted"].includes(mode);
       if (!accepted) {
-        await expect(engine.adoptResumedSession(request)).rejects.toThrow();
+        const refusalReasons: Record<string, string> = {
+          "claude-legacy-role-missing": "Recovery requires a known registry role",
+          "claude-legacy-role-unknown": "Recovery requires a known registry role",
+          "claude-legacy-old-live": "Selected seat or old-seat absence disagrees",
+          "claude-legacy-session-mismatch": "Legacy recovery requires an exact-session hook registration",
+          "claude-duplicate-old": "Current topology is ambiguous", "claude-duplicate-target": "Current topology is ambiguous",
+          "claude-foreign-binding": "Selected seat or old-seat absence disagrees",
+          "claude-witness-cli": "Historical binding disagrees", authority: "Historical binding disagrees",
+          "old-live": "Another known session process is live", unknown: "Relevant PID liveness is unknown",
+          cwd: "Current process CLI/cwd disagrees", cli: "Current process CLI/cwd disagrees",
+          "reused-pid": "Current process CLI/cwd disagrees", observer: "Observer selection disagrees",
+          "old-seat": "Selected seat or old-seat absence disagrees", digest: "Witness digest changed",
+          version: "Original record version changed", pending: "Competing identity or target work cannot be preserved",
+          claimant: "Competing identity or target work cannot be preserved",
+          "hook-race": "Adoption proof changed before persistence", "row-race": "Adoption proof changed before persistence",
+          "ref-recycle": "Current topology is ambiguous",
+        };
+        expect(refusalReasons).toHaveProperty(mode);
+        await expect(engine.adoptResumedSession(request)).rejects.toThrow(new Error(refusalReasons[mode]));
         expect(stateMgr.readState(lead.agent_id)?.surface_uuid).toBe(lead.surface_uuid);
       } else {
         const result = await engine.adoptResumedSession(request);
@@ -7814,7 +7832,7 @@ Session ID: ${sessionId}`,
         const stableVersion = stateMgr.readState(lead.agent_id)!.version;
         expect((await engine.adoptResumedSession(request)).idempotent).toBe(true);
         expect(stateMgr.readState(lead.agent_id)!.version).toBe(stableVersion);
-        for (let i = 0; i < (mode === "claude-legacy-worker" ? 0 : 3); i++) {
+        for (let i = 0; i < 3; i++) {
           await registry.recoverSessionContinuityFromDiscovery([discoveryRow] as any, registry.getObserverEpoch());
           registry.repairFromDiscovery([discoveryRow] as any, { orphansOnly: true });
           await registry.listMerged(discovery);
@@ -7828,7 +7846,14 @@ Session ID: ${sessionId}`,
           launch_cwd: "/synthetic/brainlayer", surface_provenance: "session_registration",
           session_recovery_audit: expect.stringContaining(lead.cli_session_id!) });
       }
-      expect(mockClient.moveSurface).not.toHaveBeenCalled();
+      if (mode === "claude-legacy-worker") {
+        // The static topology keeps the worker left: each idle pass corrects it right.
+        expect(mockClient.moveSurface).toHaveBeenCalledTimes(3);
+        for (const [move] of (mockClient.moveSurface as any).mock.calls) {
+          expect(move).toMatchObject({ surface: target.surface_id, stableSurfaceIdentity: target.surface_uuid,
+            pane: "pane:right", workspace: "ws:placement", focus: false });
+        }
+      } else expect(mockClient.moveSurface).not.toHaveBeenCalled();
       expect(mockClient.sendKey).not.toHaveBeenCalled();
       expect(mockClient.newSplit).not.toHaveBeenCalled();
       expect(readFileSync(join(TEST_DIR, autoId, "inbox.jsonl"), "utf8")).toContain("preserve these words");
