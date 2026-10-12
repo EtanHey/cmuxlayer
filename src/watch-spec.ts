@@ -106,7 +106,8 @@ export type WatchNotificationReason =
   | "target_changed"
   | "consumer_died"
   | "target_missing"
-  | "deadline_elapsed";
+  | "deadline_elapsed"
+  | "owner_gone";
 
 export interface WatchNotification {
   watch_id: string;
@@ -160,6 +161,8 @@ export interface WatchRegistryOptions {
   agentObservation?: (
     agentId: string,
   ) => Promise<WatchAgentObservation> | WatchAgentObservation;
+  /** False proves no live owner; null/probe errors retain the watch. */
+  ownerObservation?: (owner: string) => Promise<boolean | null> | boolean | null;
   /** Injectable reservation-owner probes for deterministic PID-reuse tests. */
   reservationProcessAlive?: (pid: number) => boolean;
   reservationProcessStartedAtMs?: (pid: number) => number | null;
@@ -213,11 +216,15 @@ const NOTIFY_RETRY_MAX_MS = 60_000;
 const NOTIFY_RETRY_LIMIT = 8;
 const FILE_MISSING_DEBOUNCE_MS = 2_000;
 const REPORT_CONTENT_QUIET_MS = 1_000;
+export const WATCH_TERMINAL_TTL_MS = 24 * 60 * 60 * 1_000;
+export const WATCH_OWNER_GRACE_MS = WATCH_TERMINAL_TTL_MS;
+export const WATCH_MAX_ARM_MS = 7 * WATCH_TERMINAL_TTL_MS;
 
 interface WatchRegistryState {
   version: unknown;
   rows: unknown[];
   watches: WatchRecord[];
+  changed?: boolean;
 }
 
 export function defaultWatchRegistryPath(): string {
@@ -263,7 +270,8 @@ function isWatchNotificationReason(
     value === "target_changed" ||
     value === "consumer_died" ||
     value === "target_missing" ||
-    value === "deadline_elapsed"
+    value === "deadline_elapsed" ||
+    value === "owner_gone"
   );
 }
 
@@ -393,16 +401,66 @@ function emptyRegistryState(): WatchRegistryState {
   return { version: STATE_VERSION, rows: [], watches: [] };
 }
 
-function readRegistryState(path: string): WatchRegistryState {
+function cappedDeadline(deadline: number, armedAt: number): number {
+  const cap = Math.min(Number.MAX_SAFE_INTEGER, armedAt + WATCH_MAX_ARM_MS);
+  return Number.isFinite(deadline) ? Math.min(deadline, cap) : cap;
+}
+
+function expireSilently(
+  record: WatchRecord, reason: WatchNotificationReason, observedAt: number,
+): WatchRecord {
+  return {
+    ...record,
+    state: "failed",
+    terminal_reason: reason,
+    terminal_at_ms: observedAt,
+    notification_pending: false,
+    notification_next_attempt_at_ms: undefined,
+    // Do not recover an engine deadline notice as an interrupted delivery.
+    deadline_notified_at_ms: observedAt,
+  };
+}
+
+function readRegistryState(
+  path: string, opts: WatchRegistryOptions = {},
+): WatchRegistryState {
   if (!existsSync(path)) return emptyRegistryState();
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
     if (isRecord(parsed) && Array.isArray(parsed.watches)) {
-      const rows = parsed.watches;
+      const observedAt = nowMs(opts);
+      let changed = false;
+      const rows = parsed.watches.flatMap((row: unknown) => {
+        if (!isRecord(row) || !isFiniteNumber(row.armed_at_ms)) return [row];
+        // JSON encodes non-finite legacy deadlines as null. Preserve other
+        // malformed/future rows rather than granting GC custody over them.
+        const deadline =
+          row.deadline === null || typeof row.deadline === "number"
+            ? cappedDeadline(row.deadline as number, row.armed_at_ms)
+            : row.deadline;
+        const candidate = { ...row, deadline };
+        if (!isWatchRecord(candidate)) return [row];
+        let record = candidate;
+        if (row.deadline !== deadline) {
+          changed = true;
+          if (record.state === "armed" && observedAt >= record.deadline) {
+            record = expireSilently(record, "deadline_elapsed", record.deadline);
+          }
+        }
+        if (
+          (record.state === "fired" || record.state === "failed") &&
+          observedAt - (record.terminal_at_ms ?? record.last_heartbeat_at_ms) >= WATCH_TERMINAL_TTL_MS
+        ) {
+          changed = true;
+          return [];
+        }
+        return [record];
+      });
       return {
         version: parsed.version ?? STATE_VERSION,
         rows,
         watches: rows.filter(isWatchRecord),
+        changed,
       };
     }
   } catch {
@@ -412,10 +470,10 @@ function readRegistryState(path: string): WatchRegistryState {
   return emptyRegistryState();
 }
 
-function readRegistry(path: string): WatchRegistryFile {
+function readRegistry(path: string, opts: WatchRegistryOptions): WatchRegistryFile {
   return {
     version: STATE_VERSION,
-    watches: readRegistryState(path).watches,
+    watches: readRegistryState(path, opts).watches,
   };
 }
 
@@ -661,7 +719,9 @@ function rolledEngineContentDeadline(
   if (record.provenance !== "engine" || reason !== "target_changed") {
     return {};
   }
-  const intervalMs = Math.max(1, record.deadline - record.armed_at_ms);
+  const intervalMs = Math.min(
+    WATCH_MAX_ARM_MS, Math.max(1, record.deadline - record.armed_at_ms),
+  );
   return {
     armed_at_ms: observedAt,
     deadline: Math.min(Number.MAX_SAFE_INTEGER, observedAt + intervalMs),
@@ -746,7 +806,7 @@ function assertSpec(
     );
   }
   const now = nowMs(opts);
-  if (!Number.isFinite(spec.deadline) || spec.deadline <= now) {
+  if (cappedDeadline(spec.deadline, now) <= now) {
     throw new WatchArmError(
       "watch_deadline_elapsed",
       target,
@@ -815,7 +875,7 @@ function assertSpec(
 export function readWatchRegistry(
   opts: WatchRegistryOptions = {},
 ): WatchRegistryFile {
-  return readRegistry(registryPathFor(opts));
+  return readRegistry(registryPathFor(opts), opts);
 }
 
 export function reserveWatchReportPath(
@@ -856,7 +916,7 @@ export function reserveWatchReportPath(
           : {}),
       };
     }
-    const conflictingWatch = readRegistryState(registryPath).watches.find(
+    const conflictingWatch = readRegistryState(registryPath, opts).watches.find(
       (watch) =>
         watch.owner === owner &&
         watch.target === normalizedTarget &&
@@ -959,7 +1019,7 @@ export async function armWatch(
     ...(checked.change ? { change: checked.change } : {}),
     ...(watermark !== undefined ? { watermark } : {}),
     ...(fingerprint !== undefined ? { fingerprint } : {}),
-    deadline: spec.deadline,
+    deadline: cappedDeadline(spec.deadline, observedAt),
     target_kind: checked.targetKind,
     armed_at_ms: observedAt,
     last_heartbeat_at_ms: observedAt,
@@ -973,7 +1033,7 @@ export async function armWatch(
 
   const path = registryPathFor(opts);
   await withWriteLock(path, () => {
-    const registry = readRegistryState(path);
+    const registry = readRegistryState(path, opts);
     writeRegistry(path, registry.version, [...registry.rows, record]);
   });
   return record;
@@ -985,7 +1045,7 @@ export function removeWatches(
 ): Promise<number> {
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
-    const registry = readRegistryState(path);
+    const registry = readRegistryState(path, opts);
     let removed = 0;
     const rows = registry.rows.filter((row) => {
       if (!isWatchRecord(row) || !predicate(row)) return true;
@@ -1002,7 +1062,11 @@ export function updateWatchDeadline(watchId: string, deadline: number,
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
     const armedAt = nowMs(opts);
-    const registry = readRegistryState(path);
+    if (cappedDeadline(deadline, armedAt) <= armedAt) {
+      throw new WatchArmError("watch_deadline_elapsed", watchId,
+        "WatchSpec deadline must be a future Unix timestamp in milliseconds");
+    }
+    const registry = readRegistryState(path, opts);
     let updated = false;
     const rows = registry.rows.map((row) => {
       if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
@@ -1010,7 +1074,7 @@ export function updateWatchDeadline(watchId: string, deadline: number,
       return {
         ...row,
         armed_at_ms: armedAt,
-        deadline,
+        deadline: cappedDeadline(deadline, armedAt),
         deadline_notified_at_ms: undefined,
       };
     });
@@ -1024,7 +1088,7 @@ export function releaseWatchWaiter(
 ): Promise<boolean> {
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
-    const registry = readRegistryState(path);
+    const registry = readRegistryState(path, opts);
     let released = false;
     const rows = registry.rows.map((row) => {
       if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
@@ -1046,7 +1110,7 @@ export function scopeWatchToSubject(
   if (!subject) return Promise.resolve(false);
   const path = registryPathFor(opts);
   return withWriteLock(path, () => {
-    const registry = readRegistryState(path);
+    const registry = readRegistryState(path, opts);
     let updated = false;
     const rows = registry.rows.map((row) => {
       if (!isWatchRecord(row) || row.watch_id !== watchId) return row;
@@ -1109,7 +1173,26 @@ export async function sweepWatches(
     armed: [],
   };
 
-  const snapshot = readRegistryState(path);
+  const snapshot = readRegistryState(path, opts);
+  const absentOwnerSnapshots = new Map<string, string>();
+  const ownerObservations = new Map<string, boolean | null>();
+  for (const record of snapshot.watches) {
+    if (
+      record.state !== "armed" ||
+      observedAt - record.armed_at_ms < WATCH_OWNER_GRACE_MS ||
+      !opts.ownerObservation
+    ) continue;
+    if (!ownerObservations.has(record.owner)) {
+      try {
+        ownerObservations.set(record.owner, await opts.ownerObservation(record.owner));
+      } catch {
+        ownerObservations.set(record.owner, null);
+      }
+    }
+    if (ownerObservations.get(record.owner) === false) {
+      absentOwnerSnapshots.set(record.watch_id, JSON.stringify(record));
+    }
+  }
   const agentObservations = new Map<string, WatchAgentObservation>();
   for (const record of snapshot.watches) {
     if (record.state !== "armed" || record.target_kind !== "agent") continue;
@@ -1125,10 +1208,14 @@ export async function sweepWatches(
   }
 
   await withWriteLock(path, () => {
-    const registry = readRegistryState(path);
+    const registry = readRegistryState(path, opts);
     // skipcq: JS-R1005
     const watches = registry.rows.map((row) => {
       if (!isWatchRecord(row)) return row;
+      if (absentOwnerSnapshots.get(row.watch_id) === JSON.stringify(row)) {
+        result.failed.push(row.watch_id);
+        return expireSilently(row, "owner_gone", observedAt);
+      }
       const record = recoverInterruptedEngineDeadlineClaim(row, observedAt);
       if (record.state === "firing" && record.terminal_reason) {
         const migrated: WatchRecord = {
@@ -1392,7 +1479,7 @@ export async function sweepWatches(
           : {}),
       };
     });
-    if (registry.watches.length > 0) {
+    if (registry.watches.length > 0 || registry.changed) {
       writeRegistry(path, registry.version, watches);
     }
   });
@@ -1417,7 +1504,7 @@ export async function sweepWatches(
     }
     let exhausted: WatchNotificationExhausted | null = null;
     await withWriteLock(path, () => {
-      const registry = readRegistryState(path);
+      const registry = readRegistryState(path, opts);
       const watches = registry.rows.map((row) => {
         if (!isWatchRecord(row)) return row;
         const record = row;

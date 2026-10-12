@@ -242,6 +242,12 @@ reports the problem instead of failing.
 | `sleepGuardLabel` | unset: `doctor` skips the sleep-guard check | launchd label of an optional sleep guard. `doctor` reports it as info, never as a failure. |
 | `worktreeBootstrap` | unset: no script; a bun lockfile gets an inline frozen install | Script run as `<script> <worktree>` to install a new worktree's dependencies. `spawn_agent` waits for it (up to 180 s) before starting the agent. See [registry-optional-spawn.md](registry-optional-spawn.md#worktree-dependencies). |
 
+Watch deadlines are capped at seven days per arm or renewal. Terminal rows expire
+after 24 hours; an armed watch with no observable live owner expires after a
+24-hour grace period. Uncertain owner observations retain the watch. Registry
+loads normalize legacy deadlines and hide aged terminal rows; sweeps persist
+cleanup under the write lock without notifying for GC or legacy expiry.
+
 Example:
 
 ```json

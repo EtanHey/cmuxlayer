@@ -699,6 +699,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       {
         registryPath:
           opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+        now: opts?.watchRegistryNow,
       },
     );
   };
@@ -724,6 +725,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
       {
         registryPath:
           opts?.watchRegistryPath ?? join(context.stateDir, "watch-specs.json"),
+        now: opts?.watchRegistryNow,
       },
     ).catch((error) => {
       console.error(
@@ -3473,6 +3475,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           (opts?.reportWatchDeadlineMs ?? DEFAULT_REPORT_WATCH_DEADLINE_MS);
         const existing = readWatchRegistry({
           registryPath: watchRegistryPath,
+          now: opts?.watchRegistryNow,
         }).watches.find(
           (watch) => {
             // Lifecycle may only adopt rows it owns. Provenance-absent rows are
@@ -3503,6 +3506,7 @@ export function createServer(opts?: CreateServerOptions): McpServer {
           if (!existing.subject_agent_id) {
             await scopeWatchToSubject(existing.watch_id, childAgentId, {
               registryPath: watchRegistryPath,
+              now: opts?.watchRegistryNow,
             });
           }
           await updateWatchDeadline(existing.watch_id, reportWatchDeadline, {

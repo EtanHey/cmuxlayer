@@ -756,7 +756,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       const [message] = await once(crashingSweep, "message");
       expect(message).toEqual({ phase: "pre-settlement" });
       expect(
-        readWatchRegistry({ registryPath: watchRegistryPath }).watches[0],
+        readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches[0],
       ).toMatchObject({
         state: "failed",
         terminal_reason: "deadline_elapsed",
@@ -780,7 +780,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     const restartedEngine = engineForTests(server);
     await restartedEngine.sweepWatchesBestEffort();
     expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches,
     ).toEqual([
       expect.objectContaining({
         watch_id: expect.any(String),
@@ -1172,7 +1172,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...registry.watches[0],
       state: "fired",
       terminal_reason: "predicate_matched",
-      terminal_at_ms: 2_000,
+      terminal_at_ms: Date.now(),
       notification_pending: true,
       notification_attempts: 1,
       notification_next_attempt_at_ms: 2_000,
@@ -1627,13 +1627,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       change: "content" as const,
       deadline: Number.MAX_SAFE_INTEGER,
       target_kind: "file" as const,
-      armed_at_ms: 1_000,
-      last_heartbeat_at_ms: 1_000,
+      armed_at_ms: Date.now(),
+      last_heartbeat_at_ms: Date.now(),
       liveness_source: "process",
       liveness: {
         value: true,
         source: "process" as const,
-        observed_at_ms: 1_000,
+        observed_at_ms: Date.now(),
       },
       state: "armed" as const,
     }));
@@ -1725,13 +1725,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       change: "content" as const,
       deadline: Number.MAX_SAFE_INTEGER,
       target_kind: "file" as const,
-      armed_at_ms: 1_000,
-      last_heartbeat_at_ms: 1_000,
+      armed_at_ms: Date.now(),
+      last_heartbeat_at_ms: Date.now(),
       liveness_source: "process",
       liveness: {
         value: true,
         source: "process" as const,
-        observed_at_ms: 1_000,
+        observed_at_ms: Date.now(),
       },
       state: "armed" as const,
     };
@@ -1781,7 +1781,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...registryFile.watches[0],
       state: "fired",
       terminal_reason: "target_changed",
-      terminal_at_ms: 2_000,
+      terminal_at_ms: Date.now(),
       observed_value: "sha256:changed",
       notification_pending: true,
       notification_attempts: 8,
@@ -1829,7 +1829,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...registryFile.watches[0],
       state: "failed",
       terminal_reason: "deadline_elapsed",
-      terminal_at_ms: 2_000,
+      terminal_at_ms: Date.now(),
       notification_pending: false,
       notification_attempts: 1,
       waiter_expires_at_ms: Date.now() + 60_000,
@@ -1934,13 +1934,13 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ).pruneClosedChildReportWatches();
     await prune();
     expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches,
     ).toHaveLength(1);
 
     watchNow = 2_001;
     await prune();
     expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches,
     ).toEqual([]);
   });
 
@@ -1978,7 +1978,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     );
     await vi.waitFor(() => {
       expect(
-        readWatchRegistry({ registryPath: watchRegistryPath }).watches[0]
+        readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches[0]
           .waiter_expires_at_ms,
       ).toBe(61_500);
     });
@@ -1991,7 +1991,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     });
     expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
     const settled = readWatchRegistry({
-      registryPath: watchRegistryPath,
+      registryPath: watchRegistryPath, now: () => watchNow,
     }).watches[0];
     expect(settled).toMatchObject({
       state: "failed",
@@ -2017,7 +2017,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
 
     expect(localDeadlineNotice).toHaveBeenCalledTimes(1);
     expect(
-      readWatchRegistry({ registryPath: watchRegistryPath }).watches,
+      readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches,
     ).toEqual([]);
   });
 
@@ -3555,7 +3555,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
       ...pendingRegistry.watches[0],
       state: "fired",
       terminal_reason: "target_changed",
-      terminal_at_ms: 2_000,
+      terminal_at_ms: Date.now(),
       observed_value: "sha256:pending",
       notification_pending: true,
       notification_attempts: 1,
@@ -4747,7 +4747,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(calls.some(([, args]: [string, string[]]) =>
       args.some((arg) => arg.includes("[report] changed") && arg.includes(collab)),
     )).toBe(false);
-    const legacyCollabWatch = readWatchRegistry({ registryPath: watchRegistryPath })
+    const legacyCollabWatch = readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow })
       .watches.find((watch) => watch.target === collab && watch.change === "content");
     expect(legacyCollabWatch).toMatchObject({
       state: "fired", notification_exhausted_reason: "shared_collab_watch_target",
@@ -4768,7 +4768,7 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     expect(foreignCalls.some(([, args]: [string, string[]]) =>
       args.some((arg) => arg.includes("[report] changed") && arg.includes(foreignReport)),
     )).toBe(false);
-    expect(readWatchRegistry({ registryPath: watchRegistryPath }).watches.find(
+    expect(readWatchRegistry({ registryPath: watchRegistryPath, now: () => watchNow }).watches.find(
       (watch) => watch.target === foreignReport,
     )).toMatchObject({
       state: "failed", notification_exhausted_reason: "report_target_mismatch",
@@ -5034,6 +5034,10 @@ describe("P11 spawn_agent issues the coordination contract", () => {
         state: "armed" | "fired" | "failed";
         notification_pending?: boolean;
         waiter_expires_at_ms?: number;
+        armed_at_ms: number;
+        last_heartbeat_at_ms: number;
+        terminal_at_ms?: number;
+        deadline: number;
       }>;
     };
     expect(incident.watches).toHaveLength(107);
@@ -5044,8 +5048,14 @@ describe("P11 spawn_agent issues the coordination contract", () => {
     // separately prunes settled failed rows once no waiter lease remains, so
     // keep those rows leased while proving only the dead owner authorizes the
     // seven destructive removals from the original 107-row incident shape.
-    const waiterLeaseExpiresAt = Date.now() + 60_000;
+    const replayAt = Date.now();
+    const waiterLeaseExpiresAt = replayAt + 60_000;
+    // Age GC is tested separately; replay owner/subject custody at a fresh epoch.
     for (const watch of incident.watches) {
+      watch.armed_at_ms = replayAt;
+      watch.last_heartbeat_at_ms = replayAt;
+      if (watch.terminal_at_ms !== undefined) watch.terminal_at_ms = replayAt;
+      if (watch.deadline <= replayAt) watch.deadline = replayAt + 60_000;
       if (watch.state === "failed" && watch.notification_pending !== true) {
         watch.waiter_expires_at_ms = waiterLeaseExpiresAt;
       }

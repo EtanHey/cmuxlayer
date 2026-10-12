@@ -113,16 +113,23 @@ describe("WatchSpec production wiring", () => {
       provenance: "public",
     });
     expect(
-      readWatchRegistry({ registryPath }).watches[0]?.last_heartbeat_at_ms,
+      readWatchRegistry({ registryPath, now: () => now }).watches[0]?.last_heartbeat_at_ms,
     ).toBe(1_000);
 
     now = 2_000;
     await context.lifecycleSweepEngine?.runSweep();
 
-    expect(readWatchRegistry({ registryPath }).watches[0]).toMatchObject({
+    expect(readWatchRegistry({ registryPath, now: () => now }).watches[0]).toMatchObject({
       state: "armed",
       last_heartbeat_at_ms: 2_000,
       liveness_source: target,
+    });
+    // This owner is absent from both daemon registries. The lifecycle sweep
+    // expires its aged watch without delivering a stale upgrade notification.
+    now = 1_000 + 86_400_000;
+    await context.lifecycleSweepEngine?.runSweep();
+    expect(readWatchRegistry({ registryPath, now: () => now }).watches[0]).toMatchObject({
+      state: "failed", terminal_reason: "owner_gone", notification_pending: false,
     });
   });
 });
