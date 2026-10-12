@@ -1,0 +1,58 @@
+{
+  "source": {
+    "provider_ref": "79484832c141e0021f898a4b8c99d19708cab341",
+    "provider_blob": "b9e543a133fa1452497a2df7fa67f43d847c0be1",
+    "provider_sha256": "e54eebff4afd82960bf60e2d886cc61728f353705788092a7edde04c35da9d82",
+    "test_sources": {
+      "current-session-census-rejection-validation.test.ts": "256826e8f39fb008b8788a2b900c91ec1fb69ae5fd0b1effa32eb55cb1dca48d",
+      "current-session-census-privacy.test.ts": "e5767104c1c3374cf3f2aab6ad9dc30fed97998e3b4011daa61b630fb3420ca2"
+    },
+    "factories_copied_verbatim": true,
+    "native_or_helper_process_invocation": false
+  },
+  "captures": [
+    {
+      "name": "healthy",
+      "calls": [
+        {
+          "args": [
+            "python3",
+            "/synthetic",
+            501
+          ],
+          "result": {
+            "stdout": "{\"before\":[42],\"after\":[42],\"reason\":null,\"processes\":[{\"pid\":42,\"ppid\":7,\"uid\":501,\"startSeconds\":\"123\",\"startMicroseconds\":\"10\",\"cwd\":\"/synthetic\",\"identityAfter\":{\"pid\":42,\"ppid\":7,\"uid\":501,\"startSeconds\":\"123\",\"startMicroseconds\":\"10\",\"cwd\":\"/synthetic\"},\"sessionId\":null,\"errors\":[],\"failures\":[]}],\"membershipReads\":[{\"operation\":\"membership-before\",\"queryBytes\":4,\"bytes\":4,\"capacityBytes\":1028,\"errno\":0,\"reason\":null,\"observedPids\":[42],\"membership\":[42]},{\"operation\":\"membership-after\",\"queryBytes\":4,\"bytes\":4,\"capacityBytes\":1028,\"errno\":0,\"reason\":null,\"observedPids\":[42],\"membership\":[42]}]}",
+            "code": 0,
+            "failure": null,
+            "callbackSettled": true
+          }
+        }
+      ],
+      "inputStdoutSha256": "213a221901ca04a02cc32996dd6c031190a18cd051f68a2efffdd0746a930781",
+      "outputSha256": "7a05407894bac1c7e26cc1ce5008087bfffeb4cb61c245679e2795bc90823c3a",
+      "compactOutputSha256": "f31365c45b426e32f9271d0831ed6b7f2ab9c54a3a9bd49e5695f5adf8ad9a4f"
+    },
+    {
+      "name": "privacy",
+      "calls": [
+        {
+          "args": [
+            "python3",
+            "/synthetic",
+            501
+          ],
+          "result": {
+            "stdout": "{\"before\":null,\"after\":[42],\"reason\":\"MEMBERSHIP_UNOBSERVED\",\"processes\":[{\"pid\":42,\"ppid\":7,\"uid\":501,\"startSeconds\":\"123\",\"startMicroseconds\":\"10\",\"cwd\":\"/synthetic\",\"identityAfter\":{\"pid\":42,\"ppid\":7,\"uid\":\"invalid\",\"startSeconds\":\"123\",\"startMicroseconds\":\"10\",\"cwd\":\"/synthetic\"},\"sessionId\":null,\"errors\":[\"EPERM\"],\"failures\":[{\"operation\":\"cwd-before\",\"errno\":1,\"reason\":\"OBSERVED_ERRNO\",\"bytes\":2352,\"expectedBytes\":2352,\"identity\":{\"pid\":42,\"ppid\":7,\"uid\":501,\"startSeconds\":\"123\",\"startMicroseconds\":\"10\",\"cwd\":\"/synthetic\"}}]}],\"membershipReads\":[{\"operation\":\"membership-before\",\"queryBytes\":8,\"bytes\":8,\"capacityBytes\":1032,\"errno\":1,\"reason\":\"ENUMERATION_READ_INVALID\",\"observedPids\":[42,-7],\"membership\":null},{\"operation\":\"membership-after\",\"queryBytes\":8,\"bytes\":8,\"capacityBytes\":1032,\"errno\":1,\"reason\":\"ENUMERATION_READ_INVALID\",\"observedPids\":[42,-7],\"membership\":null}]}",
+            "code": 7,
+            "failure": "HELPER_EXIT_NONZERO",
+            "callbackSettled": true
+          }
+        }
+      ],
+      "inputStdoutSha256": "66ca7d4eb9dcb26c440ca04969d7d2e59ebc8533754b3a82f22445298669e40d",
+      "outputSha256": "0157a75496664ceb30752193d7880410b6207944a414d4047884bc1b5a939422",
+      "compactOutputSha256": "3264c98bd52e759078611b4302c0f962138b21cc15d4d488c0f58eb0bc719d3d"
+    }
+  ],
+  "nativeOrHelperInvocation": false
+}

@@ -27,6 +27,7 @@ import {
   DELIVERY_WAIT_POLL_MS,
   RetryableDeliveryError,
   type AgentDeliveryReceipt,
+  type ReportSubmissionEvidence,
   type AgentEngineOptions,
   type DeliveryIssueFiler,
   type DeliverySnapshotReader,
@@ -41,9 +42,10 @@ export interface DeliveryQueueDeps {
   stateMgr: StateManager;
   registry: AgentRegistry;
   getAgentState(agentId: string): AgentRecord | null;
+  captureReportSubmission(agentId: string): ReportSubmissionEvidence | null;
   markAgentWorking(
     agentId: string,
-    opts?: { verifiedDelivery?: boolean },
+    opts?: { verifiedDelivery?: boolean; deliveryId?: string },
   ): AgentRecord | null;
 }
 
@@ -67,6 +69,9 @@ function snapshotDeliveryReceipt(
   return {
     ...snapshot,
     ...(receipt.boot_recovery_context ? { boot_recovery_context: { ...receipt.boot_recovery_context } } : {}),
+    ...(receipt.report_submission ? { report_submission: { ...receipt.report_submission, prior: { ...receipt.report_submission.prior } } } : {}),
+    ...(receipt.report_pending_done ? { report_pending_done: { ...receipt.report_pending_done } } : {}),
+    ...(receipt.report_pending_blocked ? { report_pending_blocked: { ...receipt.report_pending_blocked } } : {}),
     ...(Array.isArray(rpcMethods) ? { rpc_methods: [...rpcMethods] } : {}),
   };
 }
@@ -129,9 +134,32 @@ export class DeliveryQueue {
 
   private markAgentWorking(
     agentId: string,
-    opts: { verifiedDelivery?: boolean } = {},
+    opts: { verifiedDelivery?: boolean; deliveryId?: string } = {},
   ): AgentRecord | null {
     return this.deps.markAgentWorking(agentId, opts);
+  }
+
+  private reportMetadata(receipt: AgentDeliveryReceipt | undefined) {
+    return {
+      report_submission: receipt?.report_submission,
+      report_reopen_armed: receipt?.report_reopen_armed,
+      report_done_notified: receipt?.report_done_notified,
+      report_blocked_notified: receipt?.report_blocked_notified,
+      report_prior_done_notified: receipt?.report_prior_done_notified,
+      report_prior_blocked_notified: receipt?.report_prior_blocked_notified,
+      report_pending_done: receipt?.report_pending_done,
+      report_pending_blocked: receipt?.report_pending_blocked,
+    };
+  }
+
+  updateReportReceipt(deliveryId: string, patch: Partial<Pick<AgentDeliveryReceipt,
+    "report_reopen_armed" | "report_done_notified" | "report_blocked_notified" |
+    "report_prior_done_notified" | "report_prior_blocked_notified" |
+    "report_pending_done" | "report_pending_blocked">>): void {
+    const receipt = this.deliveryReceipts.get(deliveryId);
+    if (!receipt) return;
+    Object.assign(receipt, patch);
+    this.persistDeliveryReceipts();
   }
 
   setDeliverySubmitter(submitter: DeliverySubmitter | null): void {
@@ -274,8 +302,12 @@ export class DeliveryQueue {
     rpc_methods?: Array<"surface.send_text" | "surface.send_key">;
   }): AgentDeliveryReceipt {
     const now = new Date().toISOString();
+    const existing = this.deliveryReceipts.get(input.delivery_id);
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      ...this.reportMetadata(existing),
+      report_submission: existing?.report_submission ?? (input.source_event === "send_to" && input.press_enter
+        ? this.deps.captureReportSubmission(input.agent_id) : null),
       delivery_state: "queued",
       terminal: false,
       created_at: now,
@@ -284,7 +316,7 @@ export class DeliveryQueue {
       rpc_methods: input.rpc_methods ? [...input.rpc_methods] : [],
       submit_verified: null,
       error: null,
-      submission_started_at: now,
+      submission_started_at: existing?.submission_started_at ?? now,
       next_attempt_at: null,
       composer_accepted: false,
       verify_deadline_at: null,
@@ -319,6 +351,7 @@ export class DeliveryQueue {
       (input.delivery_state ?? "queued") === "queued_followup";
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      ...this.reportMetadata(existing),
       delivery_state: input.delivery_state ?? "queued",
       terminal: false,
       created_at: existing?.created_at ?? acceptedAt,
@@ -357,12 +390,14 @@ export class DeliveryQueue {
     const existing = this.deliveryReceipts.get(input.delivery_id);
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      ...this.reportMetadata(existing),
+      submission_started_at: existing?.submission_started_at ?? input.submission_started_at,
       rpc_methods: input.rpc_methods
         ? [...input.rpc_methods]
         : existing?.rpc_methods
           ? [...existing.rpc_methods]
           : [],
-      created_at: input.created_at ?? new Date().toISOString(),
+      created_at: input.created_at ?? existing?.created_at ?? new Date().toISOString(),
       resolved_at: new Date().toISOString(),
     };
     this.deliveryReceipts.set(receipt.delivery_id, receipt);
@@ -431,13 +466,18 @@ export class DeliveryQueue {
     text: string;
     press_enter: boolean;
   }): AgentDeliveryReceipt | null {
+    // Resolve both sides; receipt IDs/ownership and uncertain delivery stay intact.
+    const identity = (id: string) => this.registry.get(id)?.agent_id ?? this.stateMgr.readState(id)?.agent_id ?? id;
+    const requestedIdentity = identity(input.agent_id);
     for (const receipt of this.deliveryReceipts.values()) {
       if (
         (receipt.delivery_state === "pending_verify" ||
+          (receipt.delivery_state === "typed" && receipt.typed === true &&
+            !receipt.terminal) ||
           receipt.delivery_state === "queued" ||
           receipt.delivery_state === "steer_pending" ||
           receipt.delivery_state === "queued_followup") &&
-        receipt.agent_id === input.agent_id &&
+        identity(receipt.agent_id) === requestedIdentity &&
         receipt.text === input.text &&
         receipt.press_enter === input.press_enter
       ) {
@@ -468,6 +508,10 @@ export class DeliveryQueue {
     if (existing?.terminal && existing.submit_verified === true && existing.agent_id === input.agent_id && existing.text === input.text) return snapshotDeliveryReceipt(existing);
     const receipt: AgentDeliveryReceipt = {
       ...input,
+      ...this.reportMetadata(existing),
+      report_submission: existing?.report_submission ??
+        (input.source_event === "send_to" && input.press_enter
+          ? this.deps.captureReportSubmission(input.agent_id) : null),
       delivery_state: "pending_verify",
       terminal: false,
       created_at: input.created_at ?? existing?.created_at ?? now,
@@ -545,29 +589,38 @@ export class DeliveryQueue {
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
-        const watching =
+        const observationOnly = receipt.delivery_state === "typed" &&
+          receipt.typed === true && receipt.submit_dispatched === true && !receipt.terminal;
+        const watching = observationOnly ||
           receipt.delivery_state === "pending_verify" ||
           receipt.delivery_state === "queued_followup" ||
           receipt.delivery_state === "steer_pending" ||
           (receipt.delivery_state === "queued" &&
             receipt.composer_accepted === true);
         if (!watching || receipt.terminal) continue;
-        // An explicitly undispatched boot receipt is preparation, not ACK
-        // uncertainty. This also protects a persisted intent after rollback
-        // storage failure/restart. Undefined remains legacy uncertainty.
-        if (receipt.boot_recovery && receipt.submit_dispatched === false) continue;
+        // Same-generation undispatched intent is preparation, not ACK
+        // uncertainty, including rollback storage failure/restart. A replaced
+        // generation must reach the verifier so it cannot absorb duplicates.
+        if (receipt.boot_recovery && receipt.submit_dispatched === false &&
+            (!receipt.boot_instance_id ||
+              receipt.boot_instance_id === this.getAgentState(receipt.agent_id)?.boot_instance_id)) continue;
         const deadlineApplies = receipt.delivery_state === "pending_verify";
         const deadlineMs = receipt.verify_deadline_at
           ? Date.parse(receipt.verify_deadline_at)
           : Date.parse(receipt.created_at) + this.deliveryVerifyDeadlineMs;
         const now = Date.now();
         const timedOut = deadlineApplies && now >= deadlineMs;
-        const skipRead = this.shouldSkipVerifyRead(receipt, now);
+        // Parking needs a current observation, including absence/generation
+        // changes. A throttle placeholder cannot establish a live draft.
+        const skipRead = this.shouldSkipVerifyRead(receipt, now) &&
+          !(timedOut && receipt.typed === true && receipt.submit_dispatched === false);
         let observation: DeliveryVerifyObservation = { outcome: "pending" };
         if (skipRead && !timedOut) continue;
         if (!skipRead && this.deliveryVerifier) {
           const agent = this.getAgentState(receipt.agent_id);
-          const snapshotKey = agent?.surface_id ?? receipt.agent_id;
+          // Parked observation needs this receipt's ownership proof even when
+          // another receipt on the same surface already supplied a snapshot.
+          const snapshotKey = observationOnly ? receipt.delivery_id : agent?.surface_id ?? receipt.agent_id;
           let snapshot: DeliveryVerifySnapshot | null | undefined;
           if (this.deliverySnapshotReader) {
             if (!snapshots.has(snapshotKey)) {
@@ -617,12 +670,16 @@ export class DeliveryQueue {
           if (receipt.press_enter && receipt.submit_verified === true) {
             this.markAgentWorking(receipt.agent_id, {
               verifiedDelivery: receipt.source_event === "send_to",
+              deliveryId: receipt.delivery_id,
             });
           }
           this.appendDeliveryReceiptEventBestEffort(receipt);
           this.finalizeConfirmedBootRecovery(receipt);
           continue;
         }
+        // An attempted parked draft may collect acceptance, but observation
+        // cannot expire it, enqueue it or trigger failure handling.
+        if (observationOnly) continue;
         if (observation.delivery_state && receipt.composer_accepted) {
           receipt.delivery_state = observation.delivery_state;
           this.persistDeliveryReceipts();
@@ -683,6 +740,21 @@ export class DeliveryQueue {
           observation.reason === "target_gone" &&
           (receipt.verify_miss_count ?? 0) >=
             DELIVERY_TARGET_GONE_CONFIRM_MISSES;
+        if (timedOut && observation.outcome === "pending" && observation.reason === undefined && !confirmedGone &&
+          receipt.typed === true && receipt.submit_dispatched === false) {
+          // A verification deadline cannot fail a submit that never happened.
+          // Stop passive verification without expiring the caller's draft. The
+          // normal ownership guard still gates any later Return under this ID.
+          receipt.delivery_state = "typed";
+          receipt.terminal = false;
+          receipt.resolved_at = null;
+          receipt.submit_verified = null;
+          receipt.needs_attention = true;
+          receipt.attention_reason = "Verification deadline elapsed before submit dispatch; inspect the typed draft and recover only through its current owner. No replay was attempted.";
+          this.persistDeliveryReceipts();
+          this.appendDeliveryReceiptEventBestEffort(receipt);
+          continue;
+        }
         if (
           observation.outcome === "failed_confirmed" ||
           confirmedGone ||
@@ -964,6 +1036,8 @@ export class DeliveryQueue {
         }
         try {
           receipt.submission_started_at = new Date().toISOString();
+          receipt.report_submission = receipt.source_event === "send_to" && receipt.press_enter
+            ? this.deps.captureReportSubmission(receipt.agent_id) : null;
           // This is the no-replay boundary. A crash after this write leaves an
           // uncertain terminal receipt instead of re-sending terminal input.
           this.persistDeliveryReceipts();

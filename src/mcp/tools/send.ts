@@ -504,7 +504,7 @@ export interface SendToToolDeps {
   canonicalWorkspaceRef: (candidate?: string) => Promise<string | undefined>;
   collectDeliveryEvidence: (agentId: string) => Promise<{ registry_state: null; screen: null; state_conflict: boolean; health: undefined; } | { registry_state: AgentState; screen: { status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; model: string | null; done_signal: string | null; actions: string[]; } | null; state_conflict: boolean; health: { screen_observation?: { observed_at_ms: number; status: ParsedScreenStatus; agent_type: ParsedScreenAgentType; control_state: ParsedControlPlaneState; model: string | null; } | undefined; status: AgentHealthStatus; issue_codes: AgentHealthIssueCode[]; issues: string[]; issue_severities?: Partial<Record<AgentHealthIssueCode, AgentHealthIssueSeverity>>; reconciled_state?: AgentState; screen_confirmed_state?: AgentState; recommended_actions?: string[]; }; }>;
   collectTargetRecords: () => Promise<AgentRecord[]>;
-  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; codex_busy_mode?: "steer" | "queue"; retry_owned_draft?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ retry_settled?: boolean; queue_verified?: boolean; queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null; }>;
+  deliverAgentInput: (args: { agent_id: string; text: string; press_enter: boolean; allow_busy?: boolean; codex_busy_mode?: "steer" | "queue"; retry_owned_draft?: boolean; source_event: DeliveryEventType; delivery_id?: string; timings?: DeliveryPhaseTimings; }) => Promise<{ retry_settled?: boolean; queue_verified?: boolean; queued_behind_turn: boolean; delivered: boolean; terminal: boolean; typed: boolean; draft_complete?: boolean; owned_draft_recovery?: boolean; submit_attempted: boolean; submit_dispatched?: boolean; submit_verified: boolean | null; submitted: boolean; submit_evidence?: SubmitEvidence | null; retry_count: number; rpc_methods: Array<"surface.send_text" | "surface.send_key">; delivery?: PublicDeliveryState; delivery_state?: PublicDeliveryState; delivery_id?: string; duplicate_of?: string; needs_attention?: boolean; attention_reason?: string; timings_ms?: DeliveryPhaseTimings; observation?: { status: ParsedScreenResult["status"]; composer_empty: boolean; prompt_echoed: boolean; last_10_lines: string[]; }; WARNING?: string; bytes: number; key_dispatched?: boolean; submit_verification_reason?: SubmitKeyVerificationReason | SubmitVerificationFailureReason | null; }>;
   engine: AgentEngine;
   callerOwnsTypedDraft: (opts: { surface: string; workspace?: string; stableSurfaceIdentity?: string | null; text?: string; deliveryId?: string }) => boolean;
   observePausedTarget: (agent: AgentRecord | null | undefined) => Promise<{ paused: boolean; source: string; }>;
@@ -538,7 +538,7 @@ export function registerSendToTool(
   // 17. send_to
   server.tool(
     "send_to",
-    "Send text or a key through the shared delivery engine. Never send a Return yourself for a message; send_to submits messages. Key-Return is for pickers, menus, and permission prompts. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode; for shell commands use mode:command. Text success requires a verified submit or new matching queue proof. Otherwise ok=false with submit_unverified retains pending verification and ownership for retries without retyping. Verified text success returns only ok, target identity, delivery_id, delivery_state, submitted, caller_agent_id, and queued_behind_turn when applicable. Key success returns its key verification fields. Pass verbose=true for full diagnostics; failures always retain them.",
+    "Send text or a key through the shared delivery engine. send_to submits new messages. Key-Return supports pickers, menus, permission prompts, and recovery of this caller's exact typed draft on the same agent/session once the displayed unambiguous reset time passes or new harness output confirms recovery; the old refusal may stay visible. Exact /usage, /usage-credits or /rate-limit-options navigation is also guarded. Read the pane and receipt first; never retype or repeat accepted input. Every receipt includes caller_agent_id (null when unknown). Workers with collab_path cannot address their own parent or ancestor leads in any mode; append to that collab file instead. Unknown callers remain allowed. Lead-originated and engine-internal pushes remain allowed. Targets may be one agent, structured agent targeting, or a raw surface in surface/command/key mode; for shell commands use mode:command. Text success requires a verified submit or new matching queue proof. Otherwise ok=false with submit_unverified retains pending verification and ownership for retries without retyping. Verified text success returns only ok, target identity, delivery_id, delivery_state, submitted, caller_agent_id, and queued_behind_turn when applicable. Key success returns its key verification fields. Pass verbose=true for full diagnostics; failures always retain them.",
     {
       ...SendToArgsSchema.shape,
       text: SendToArgsSchema.shape.text.describe(
@@ -974,10 +974,13 @@ export function registerSendToTool(
               mutableReceipts.push({
                 ...resolutionMetadata,
                 agent_id: agent.agent_id,
+                ...(delivery.draft_complete !== undefined ? { bytes: delivery.bytes } : {}),
                 ...buildPublicDeliveryReceipt({
                   delivery_state: accepted?.delivery_state,
                   delivery_id: accepted?.delivery_id ?? deliveryId,
                   typed: delivery.typed,
+                  draft_complete: delivery.draft_complete, owned_draft_recovery: delivery.owned_draft_recovery,
+                  needs_attention: delivery.needs_attention, attention_reason: delivery.attention_reason, WARNING: delivery.WARNING,
                   submit_attempted: delivery.submit_attempted,
                   submit_verified: delivery.submit_verified,
                   submit_evidence: delivery.submit_evidence,
@@ -1436,6 +1439,8 @@ export function registerSendToTool(
           delivery_state: receipt?.delivery_state,
           delivery_id: receipt?.delivery_id ?? deliveryId,
           typed: delivery.typed,
+          draft_complete: delivery.draft_complete, owned_draft_recovery: delivery.owned_draft_recovery,
+          needs_attention: delivery.needs_attention, attention_reason: delivery.attention_reason, WARNING: delivery.WARNING,
           submit_attempted: delivery.submit_attempted,
           submit_verified: delivery.submit_verified,
           submit_evidence: delivery.submit_evidence,
@@ -1451,6 +1456,7 @@ export function registerSendToTool(
         const evidence = await collectDeliveryEvidence(agentId);
         const data = {
           agent_id: agentId,
+          ...(delivery.draft_complete !== undefined ? { bytes: delivery.bytes } : {}),
           ...publicReceipt,
           ...evidence,
         };

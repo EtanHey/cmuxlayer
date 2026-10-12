@@ -127,6 +127,38 @@ const AGENT_TOOLS = [
 const codexUserRows = (text: string): string =>
   text.split("\n").map((line, i) => (i === 0 ? `› ${line}` : line ? `  ${line}` : " ")).join("\n");
 
+/** Short Codex boot input must contain the task and contract on its routed surface. */
+function expectCombinedCodexBoot(
+  exec: ExecFn,
+  parsed: Record<string, unknown>,
+  prompt: string,
+  workspace: string,
+  surface = "surface:new",
+) {
+  const payload = `${prompt} ; cmuxlayer contract for ${parsed.agent_id}: Read and follow ${parsed.contract_path}`;
+  const calls = (exec as ReturnType<typeof vi.fn>).mock.calls;
+  const inputs = calls.filter(([, args]) =>
+    (args.includes("send") || args.includes("set-buffer")) &&
+    String(args.at(-1)).includes(prompt),
+  );
+  expect(inputs.map(([, args]) => args.at(-1))).toEqual([payload]);
+  const input = inputs[0];
+  expect(input[1]).toEqual(expect.arrayContaining([
+    "send", "--workspace", workspace, "--surface", surface,
+  ]));
+  const returns = calls.slice(calls.indexOf(input) + 1).filter(([, args]) =>
+    args.includes("send-key") && args.includes("return"),
+  );
+  expect(returns).toHaveLength(1);
+  expect(returns[0][1]).toEqual(expect.arrayContaining([
+    "--workspace", workspace, "--surface", surface,
+  ]));
+  expect(parsed.boot_prompt_delivered).toBe(true);
+  expect(parsed.boot_prompt_receipt).toMatchObject({
+    typed: true, submit_dispatched: true, submit_verified: true,
+  });
+}
+
 function makeLifecycleExec(opts?: {
   closeKeepsSurface?: boolean;
   createdWorkspace?: string;
@@ -4281,6 +4313,16 @@ describe("agent lifecycle tool handlers", () => {
       "cmux",
       expect.arrayContaining(["send", "--surface", "surface:new"]),
     );
+    expectCombinedCodexBoot(mockExec, parsed, "fix prompt delivery", "workspace:1");
+    expect(mockExec).toHaveBeenCalledWith(
+      "cmux",
+      expect.arrayContaining([
+        "send-key",
+        "--surface",
+        "surface:new",
+        "return",
+      ]),
+    );
     await expectVerifiedBoot(server, mockExec, parsed, "fix prompt delivery", "workspace:1");
   });
 
@@ -4368,6 +4410,7 @@ describe("agent lifecycle tool handlers", () => {
 
     expect(parsed.ok).toBe(true);
     expect(engineForTests(server).getAgentState(parsed.agent_id)?.surface_uuid).toBe(stableUuid);
+    expectCombinedCodexBoot(mockExec, parsed, "UUID-bound boot prompt", "workspace:1", "surface:moved");
     await expectVerifiedBoot(server, mockExec, parsed, "UUID-bound boot prompt", "workspace:1", "surface:moved");
   });
 
@@ -4441,6 +4484,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.workspace_id).toBe("workspace:1");
     expect(parsed.actual_workspace_id).toBeUndefined();
 
+    expectCombinedCodexBoot(mockExec, parsed, prompt, "workspace:1");
     await expectVerifiedBoot(server, mockExec, parsed, prompt, "workspace:1");
   });
 
@@ -4462,6 +4506,7 @@ describe("agent lifecycle tool handlers", () => {
 
     const parsed = parseToolResult(result);
     expect(parsed.ok).toBe(true);
+    expectCombinedCodexBoot(exec, parsed, prompt, "workspace:1");
     await expectVerifiedBoot(server, exec, parsed, prompt, "workspace:1");
   });
 
@@ -4558,11 +4603,10 @@ describe("agent lifecycle tool handlers", () => {
     const baseExec = makeLifecycleExec();
     mockExec = vi.fn().mockImplementation(async (cmd, args) => {
       const boot = engineForTests(server).stateMgr.listStates()[0];
-      const expectedPayload = boot && `probe renamed state ; cmuxlayer contract for ${boot.agent_id}: Read and follow ${coordinationContractPath(boot.agent_id, { baseDir: inboxBaseDir })}`;
       if (
         !renamed &&
-        args.includes("send") &&
-        String(args.at(-1) ?? "") === expectedPayload
+        (args.includes("send") || args.includes("set-buffer")) &&
+        String(args.at(-1) ?? "").includes("probe renamed state")
       ) {
         bootAgentId = boot.agent_id;
         renamed = true;
@@ -5552,6 +5596,7 @@ describe("agent lifecycle tool handlers", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.spawn_state).toBe("started");
     expect(parsed).not.toHaveProperty("next_action");
+    expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:1");
     await expectVerifiedBoot(server, mockExec, parsed, "file prompt body", "workspace:1");
   });
 
@@ -5737,6 +5782,9 @@ describe("agent lifecycle tool handlers", () => {
           launcherReturnCount += 1;
           launcherReturnTimes.push(Date.now());
         }
+        if (lastSentText.includes("file prompt body") && args.includes("return")) {
+          promptSubmitted = true;
+        }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" };
       }
       if (args.includes("read-screen")) {
@@ -5744,7 +5792,9 @@ describe("agent lifecycle tool handlers", () => {
           stdout: JSON.stringify({
             surface: "surface:new",
             text: lastSentText.includes("file prompt body")
-              ? `OpenAI Codex\n${codexUserRows(lastSentText)}\n${promptSubmitted ? "Working (1s • esc to interrupt)\n› " : ""}\n  gpt-5.5 xhigh · 99% left · ~/Gits/voicelayer`
+              ? promptSubmitted
+                ? `>_ OpenAI Codex\n${codexUserRows(lastSentText)}\nWorking (1s • esc to interrupt)\n› `
+                : `>_ OpenAI Codex\n${codexUserRows(lastSentText)}\ngpt-5.5 xhigh · 99% left · ~/Gits/voicelayer`
               : lastSentText === ""
                 ? "$ "
                 : launcherReturnCount < 2
@@ -5807,6 +5857,7 @@ describe("agent lifecycle tool handlers", () => {
         "surface:new",
       ]),
     );
+    expectCombinedCodexBoot(mockExec, parsed, "file prompt body", "workspace:voice");
     expect(promptSubmitted).toBe(true);
     await expectVerifiedBoot(server, mockExec, parsed, "file prompt body", "workspace:voice");
   }, 10_000);
@@ -10808,6 +10859,43 @@ codex>
     });
     expect(parsed.resume_command).toBeUndefined();
   });
+
+  it.each(["missing", "lost", "switched", "stable"])(
+    "list_agents optional continuity handles observer evidence (%s)", async mode => {
+      let epoch: string | null = mode === "missing" ? null : "synthetic-owner@one";
+      const context = createServerContext({ exec: mockExec, stateDir: TEST_DIR,
+        disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+        surfaceObserverOwnerIdProvider: () => epoch ? "synthetic-owner" : null,
+        surfaceObserverEpochProvider: () => epoch });
+      serverContexts.push(context);
+      context.stateMgr.ensureAutoRecord("auto-codex-surface-new", {
+        surface_id: "surface:new", surface_title: "cmuxlayerCodex", workspace_id: "workspace:1",
+        cli: "codex", parsed_status: "idle", model: null, token_count: null, context_pct: null,
+        has_agent: true, read_error: false });
+      const server = createServer({ context }); await context.lifecycleStartPromise;
+      const registry = testLifecycleEngine(server).getRegistry();
+      const retained = makeServerAgentRecord({ agent_id: "synthetic-retained-lead", state: "idle",
+        surface_id: "surface:unbound", surface_uuid: null, workspace_id: null,
+        surface_observer_id: "synthetic-historical", surface_provenance: "cmuxlayer_spawn",
+        role: "orchestrator", authority: "lead", placement: "left", launch_cwd: "/synthetic/repo" });
+      context.stateMgr.writeState(retained); registry.set(retained.agent_id, retained);
+      const recover = registry.recoverSessionContinuityFromDiscovery.bind(registry);
+      const recovery = vi.spyOn(registry, "recoverSessionContinuityFromDiscovery").mockImplementation((rows, expected) => {
+        if (mode === "lost") epoch = null;
+        if (mode === "switched") epoch = "synthetic-owner@two";
+        return recover(rows, expected);
+      });
+      const result = await agentStateTool(server).handler({ agent_id: "auto-codex-surface-new" }, {});
+      if (mode === "lost" || mode === "switched") {
+        expect(result.structuredContent).toMatchObject({ ok: false, error: "Observer changed before session continuity ingestion" });
+      } else {
+        expect(result.structuredContent).toMatchObject({ ok: true, cli_session_id: null, resumable: false });
+        if (mode === "missing") expect(recovery).not.toHaveBeenCalled();
+        else expect(recovery).toHaveBeenCalledTimes(1);
+      }
+      expect(context.stateMgr.readState(retained.agent_id)).toEqual(retained);
+      expect(registry.get(retained.agent_id)?.surface_uuid).toBeNull();
+    });
 
   it("get_agent_state includes resume_command when a session id is captured", async () => {
     const server = createLifecycleServer(mockExec);

@@ -572,7 +572,13 @@ describe("Predispatch persistence ratchet", () => {
     // Reload the real atomic file, as a new queue does after restart. The
     // failed rollback write left its last successful preparation on disk.
     queue.deliveryReceipts.clear(); queue.loadDeliveryReceipts();
+    const persistedIntent = t.engine.getDeliveryReceipt(id)!;
+    expect(persistedIntent).toMatchObject({
+      boot_recovery: true, submit_dispatched: false, delivery_state: "pending_verify", terminal: false,
+      boot_instance_id: t.engine.getAgentState(boot.agent_id)!.boot_instance_id,
+    });
     await t.engine.verifyPendingDeliveries();
+    expect(t.engine.getDeliveryReceipt(id)).toEqual(persistedIntent);
     expect(t.engine.listDeliveryReceipts().every(r => r.submit_verified !== true)).toBe(true);
     expect(t.engine.getAgentState(boot.agent_id)).toMatchObject({ boot_prompt_pending: true, prompt_delivered: false });
     expect(t.pane.returns).toBe(returns);

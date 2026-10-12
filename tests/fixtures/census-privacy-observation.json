@@ -1,0 +1,175 @@
+{
+  "before": null,
+  "after": null,
+  "processes": [
+    {
+      "pid": 42,
+      "ppid": 7,
+      "uid": 501,
+      "startSeconds": "123",
+      "startMicroseconds": "10",
+      "cwd": "/synthetic",
+      "identityAfter": {
+        "pid": 42,
+        "ppid": 7,
+        "uid": null,
+        "startSeconds": "123",
+        "startMicroseconds": "10",
+        "cwd": "/synthetic"
+      },
+      "sessionId": null,
+      "errors": [
+        "EPERM",
+        "MALFORMED_PROCESS_ROW"
+      ],
+      "failures": [
+        {
+          "operation": "cwd-before",
+          "errno": 1,
+          "identity": {
+            "pid": 42,
+            "ppid": 7,
+            "uid": 501,
+            "startSeconds": "123",
+            "startMicroseconds": "10",
+            "cwd": "/synthetic"
+          },
+          "reason": "OBSERVED_ERRNO",
+          "bytes": 2352,
+          "expectedBytes": 2352
+        }
+      ]
+    }
+  ],
+  "reason": "HELPER_EXIT_NONZERO",
+  "membershipReads": [
+    {
+      "operation": "membership-before",
+      "observedPids": [
+        42
+      ],
+      "membership": null,
+      "queryBytes": 8,
+      "bytes": 8,
+      "capacityBytes": 1032,
+      "errno": 1,
+      "reason": "ENUMERATION_READ_INVALID",
+      "invalidEntries": [
+        {
+          "index": 1,
+          "value": -7,
+          "field": "observedPids"
+        }
+      ]
+    },
+    {
+      "operation": "membership-after",
+      "observedPids": [
+        42
+      ],
+      "membership": null,
+      "queryBytes": 8,
+      "bytes": 8,
+      "capacityBytes": 1032,
+      "errno": 1,
+      "reason": "ENUMERATION_READ_INVALID",
+      "invalidEntries": [
+        {
+          "index": 1,
+          "value": -7,
+          "field": "observedPids"
+        }
+      ]
+    }
+  ],
+  "rejectedRows": [
+    {
+      "index": 0,
+      "pid": 42,
+      "digest": "70154a203ed3f2f8cbab0e319a3f2720596764fdb92d39dc6a6b32149669b15e",
+      "evidence": {
+        "before": {
+          "pid": 42,
+          "ppid": 7,
+          "uid": 501,
+          "startSeconds": "123",
+          "startMicroseconds": "10",
+          "cwd": "/synthetic"
+        },
+        "after": {
+          "pid": 42,
+          "ppid": 7,
+          "uid": "invalid",
+          "startSeconds": "123",
+          "startMicroseconds": "10",
+          "cwd": "/synthetic"
+        },
+        "failures": [
+          {
+            "operation": "cwd-before",
+            "errno": 1,
+            "reason": "OBSERVED_ERRNO",
+            "bytes": 2352,
+            "expectedBytes": 2352,
+            "identity": {
+              "pid": 42,
+              "ppid": 7,
+              "uid": 501,
+              "startSeconds": "123",
+              "startMicroseconds": "10",
+              "cwd": "/synthetic"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "rejectedMembershipReads": [
+    {
+      "index": 0,
+      "evidence": {
+        "operation": "membership-before",
+        "queryBytes": 8,
+        "bytes": 8,
+        "capacityBytes": 1032,
+        "errno": 1,
+        "reason": "ENUMERATION_READ_INVALID",
+        "invalidEntries": [
+          {
+            "field": "observedPids",
+            "index": 1,
+            "value": -7
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "evidence": {
+        "operation": "membership-after",
+        "queryBytes": 8,
+        "bytes": 8,
+        "capacityBytes": 1032,
+        "errno": 1,
+        "reason": "ENUMERATION_READ_INVALID",
+        "invalidEntries": [
+          {
+            "field": "observedPids",
+            "index": 1,
+            "value": -7
+          }
+        ]
+      }
+    }
+  ],
+  "helperOutputDigest": "66ca7d4eb9dcb26c440ca04969d7d2e59ebc8533754b3a82f22445298669e40d",
+  "helperExitCode": 7,
+  "runnerProvenance": {
+    "deadlineMs": 10000,
+    "cancellation": "not-requested",
+    "callbackSettled": true,
+    "stderrDigest": null,
+    "errorCode": null,
+    "signal": null
+  }
+}
