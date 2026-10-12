@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 if [ "${1:-}" = "--resource-guard" ]; then
   shift
   IFS= read -r node_bin < "$REPO_DIR/resource-guard-node-path"

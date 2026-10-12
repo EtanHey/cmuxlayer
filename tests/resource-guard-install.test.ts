@@ -105,14 +105,15 @@ it('does not reactivate an unloaded host-specific legacy duty',()=>{
   installGuard(f.root,true,f);
   expect(JSON.parse(readFileSync(join(f.home,'.config/cmuxlayer/resource-guard.json'),'utf8')).watchdog).toBe(false);
 });
-it.skipIf(process.platform !== 'darwin')('installed preview works with only system directories on PATH', async()=>{
-  const {spawnSync}=await import('node:child_process'), {copyFileSync}=await import('node:fs'), ts=await import('typescript');
+it.skipIf(process.platform !== 'darwin')('installed preview works through the opt symlink with only system directories on PATH', async()=>{
+  const {spawnSync}=await import('node:child_process'), {copyFileSync,symlinkSync}=await import('node:fs'), ts=await import('typescript');
   const f=fixture(), repo=join(import.meta.dirname,'..'); mkdirSync(join(f.root,'scripts'));mkdirSync(join(f.home,'bin'));
   copyFileSync(join(repo,'scripts/install-mcp-reaper.sh'),join(f.root,'scripts/install-mcp-reaper.sh'));
   writeFileSync(join(f.root,'resource-guard-node-path'),process.execPath + '\n'); writeFileSync(join(f.root,'package.json'),'{"type":"module"}');
   writeFileSync(join(f.root,'dist/resource-guard-install.js'),ts.transpileModule(readFileSync(join(repo,'src/resource-guard-install.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
   const brew=join(f.home,'bin/brew');writeFileSync(brew,'#!/bin/sh\nprintf "%s\\n" "$BREW_TEST_PREFIX"\n');chmodSync(brew,0o755);
-  const result=spawnSync('/bin/bash',[join(f.root,'scripts/install-mcp-reaper.sh'),'--resource-guard','--dry-run'],{env:{...process.env,HOME:f.home,PATH:'/usr/bin:/bin',BREW_TEST_PREFIX:join(f.root,'..')},encoding:'utf8'});
+  mkdirSync(join(f.home,'opt')); const opt=join(f.home,'opt/cmuxlayer'); symlinkSync(join(f.root,'..'),opt);
+  const result=spawnSync('/bin/bash',[join(opt,'libexec/scripts/install-mcp-reaper.sh'),'--resource-guard','--dry-run'],{env:{...process.env,HOME:f.home,PATH:'/usr/bin:/bin',BREW_TEST_PREFIX:join(f.root,'..')},encoding:'utf8'});
   expect(result.status,result.stderr).toBe(0); expect(result.stdout).toContain('<integer>60</integer>');
   expect(existsSync(join(f.home,'.config/cmuxlayer/resource-guard.json'))).toBe(false);
 });
