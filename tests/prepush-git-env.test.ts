@@ -17,7 +17,7 @@ it.each([false, true])("clears git-local environment before the hook suite (queu
     if (queued) {
       const helperDir = join(root, "Gits/golems/.worktrees/hooks-live/scripts/hooks");
       mkdirSync(helperDir, { recursive: true });
-      writeFileSync(join(helperDir, "heavy-suite.py"), "import os, sys\nassert os.environ['GOLEMS_HEAVY_PRE_PUSH'] == '1'\nos.execvp(sys.argv[2], sys.argv[2:])\n");
+      writeFileSync(join(helperDir, "heavy-suite.py"), "import os, sys\nassert os.environ['GOLEMS_HEAVY_PRE_PUSH'] == '1'\nprint('queued helper invoked', file=sys.stderr, flush=True)\nos.execvp(sys.argv[2], sys.argv[2:])\n");
     }
     const result = spawnSync("bash", [join(root, "pre-push")], {
       cwd: root, encoding: "utf8",
@@ -25,5 +25,6 @@ it.each([false, true])("clears git-local environment before the hook suite (queu
     });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe("unset|unset|unset");
+    if (queued) expect(result.stderr).toContain("queued helper invoked");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
