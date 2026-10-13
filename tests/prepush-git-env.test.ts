@@ -15,9 +15,9 @@ it.each([false, true])("clears git-local environment before the hook suite (queu
     copyFileSync(resolve(__dirname, "../.githooks/pre-push"), join(root, "pre-push"));
     writeFileSync(join(root, "scripts/run_tests.sh"), 'printf "%s|%s|%s\\n" "${GIT_DIR-unset}" "${GIT_WORK_TREE-unset}" "${GIT_INDEX_FILE-unset}"\n');
     if (queued) {
-      const helperDir = join(root, "Gits/golems/scripts/hooks");
+      const helperDir = join(root, "Gits/golems/.worktrees/hooks-live/scripts/hooks");
       mkdirSync(helperDir, { recursive: true });
-      writeFileSync(join(helperDir, "heavy-suite.py"), "import os, sys\nos.execvp(sys.argv[2], sys.argv[2:])\n");
+      writeFileSync(join(helperDir, "heavy-suite.py"), "import os, sys\nassert os.environ['GOLEMS_HEAVY_PRE_PUSH'] == '1'\nos.execvp(sys.argv[2], sys.argv[2:])\n");
     }
     const result = spawnSync("bash", [join(root, "pre-push")], {
       cwd: root, encoding: "utf8",
