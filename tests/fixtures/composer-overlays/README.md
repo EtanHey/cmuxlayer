@@ -1,5 +1,14 @@
 # Live composer overlays — issue 999 follow-up A
 
+`cursor-2026-10-14-boot-path.txt` was captured on 2026-10-16 (IDT) from
+Cursor Agent v2026.10.14-0f9edde, surface 211, through a private daemon built
+from the cursor-submit worktree and a real MCP client. Boot delivery failed
+with `draft_ownership_unverified`; no Return was sent. The two-row path, four
+column continuation gutter, borders, and No matches placement are captured,
+not synthesized. The shell prelude and right padding were removed and the
+home path replaced with a same-length portable fixture path. The managed scratch was
+closed. This is failure-shape evidence, not successful submission proof.
+
 Captured 2026-10-05 through cmuxlayer `read_screen(raw:true, scrollback:false)`
 in scratch terminals; no model prompt was submitted. All scratch surfaces closed.
 Original screen receipts and snapshot hashes are retained in the worker's private

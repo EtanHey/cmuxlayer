@@ -26,7 +26,7 @@ const LEAD_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const NEW_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
-type Frame = string | ((typed: string) => string);
+type Frame = string | ((typed: string, pickerOpen: boolean) => string);
 type Frames = { empty: Frame; buffered: Frame; draft: Frame; after: Frame };
 
 /** Codex renders a message as `› first` plus two-space rows; blank rows stay. */
@@ -54,7 +54,7 @@ function makeCodexPane(frames: Frames) {
     shellUntilLaunch: false, launcherCommand: "",
   };
   const frame = (f: Frame): string => {
-    const text = typeof f === "string" ? f : f(pane.text);
+    const text = typeof f === "string" ? f : f(pane.text, pane.pickerOpen);
     // Legacy queue-recovery cases explicitly request Tab; the section must
     // reflect Tab's after-turn semantics rather than the old shared heading.
     return pane.phase === "after" && pane.tabs > 0 ? text.replace(/• Messages to be submitted after next tool call(?: \(press esc to interrupt and send immediately\))?/g, "• Queued follow-up inputs") : text;
@@ -134,7 +134,7 @@ function makeCodexPane(frames: Frames) {
     const typed = args.includes("send") ? String(args.at(-1)) : args.includes("set-buffer") ? String(args.at(-1)) : null;
     if (typed !== null) {
       if (pane.shellUntilLaunch) pane.launcherCommand = typed;
-      if (pane.live && !/(?:^| )cmuxlayerCodex(?: |$)/.test(typed)) {
+      if (pane.live && !/(?:^| )(?:cmuxlayerCodex|cmuxlayerCursor|cursor-agent)(?: |$)/.test(typed)) {
         pane.text = typed; pane.phase = "buffered"; pane.bufferedReads = 2;
         if (pane.bannerAfterType) pane.bannerOpen = true;
       }
@@ -173,7 +173,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   beforeEach(() => { testDir = mkdtempSync(join(tmpdir(), "cmuxlayer-905-")); });
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); vi.restoreAllMocks(); vi.resetModules(); });
 
-  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000, omitBootDispatch = false, dispatchFault?: BootDispatchFault) {
+  async function setup(frames: Frames, bootPrompt?: string, swallow = 0, cli = "codex", observeKeyWrites = false, launchOverlay?: { variant: string; stuck: boolean }, bootTimeout = 5_000, omitBootDispatch = false, dispatchFault?: BootDispatchFault, configurePane?: (pane: ReturnType<typeof makeCodexPane>["pane"]) => void) {
     vi.resetModules();
     const serverModule = await import("../src/server.js");
     if (omitBootDispatch || dispatchFault) {
@@ -216,8 +216,10 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       after: text => `OpenAI Codex\n${codexRows(text)}\nWorking (5s • esc to interrupt)\n› Ask Codex to do anything\n  GPT-6.1-Sol high · ~/repo`,
     });
     pane.live = true;
+    if (bootPrompt && cli === "cursor") pane.pickerOpen = true;
     if (launchOverlay) { pane.bannerVariant = launchOverlay.variant; pane.bannerOnReturn = true; pane.bannerStuck = launchOverlay.stuck; pane.shellUntilLaunch = true; }
     pane.swallow = swallow;
+    configurePane?.(pane);
     const context = serverModule.createServerContext(withTestSurfaceObserver({
       exec, stateDir: testDir, inboxBaseDir: testDir, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
     }));
@@ -235,7 +237,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
     }
     const spawned = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, async () =>
       server._registeredTools.spawn_agent.handler({ verbose: true,
-        repo: "cmuxlayer", model: "gpt-6-sol", cli: "codex", effort: "medium", workspace: "workspace:1",
+        repo: "cmuxlayer", model: bootPrompt && cli === "cursor" ? "auto" : "gpt-6-sol", cli: bootPrompt ? cli : "codex", ...(bootPrompt && cli === "cursor" ? {} : { effort: "medium" }), workspace: "workspace:1",
         boot_prompt_timeout_ms: bootTimeout, ...(bootPrompt ? { prompt: bootPrompt } : {}),
       }, {})));
     if (bootPrompt) return { pane, context, spawned, keyWrites, engine, server };
@@ -751,6 +753,93 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   const matrixPlain = (cli: string, text: string, submitted = false) => cli === "cursor"
     ? `Cursor Agent\n${submitted ? `→ ${text}\nThinking…\n` : ""}→ ${submitted ? "Plan, search, build anything" : text}\nAuto`
     : plainFrame(cli, text, submitted);
+
+  // Captured Cursor borders and No matches placement; only the draft is
+  // substituted. Unlike matrixPlain, this retains the real closed-frame border.
+  const cursorClosed = (text: string) => overlayCapture("cursor-closed").replace("/999e_no_match_capture", text);
+  const cursorPicker = (text: string) => overlayCapture("cursor-path").replace("/999e_no_match_capture", text);
+
+  it("Cursor boot closes the captured path picker and verifies its own pointer", async () => {
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: (typed, open) => open ? cursorPicker(typed) : cursorClosed(typed),
+      after: typed => matrixPlain("cursor", typed, true) }, "Read and follow /tmp/cursor-boot.md", 0, "cursor", false,
+      undefined, 2_000);
+    try {
+      expect(target.spawned, JSON.stringify(target.spawned)).toMatchObject({ ok: true, boot_prompt_submit_verified: true });
+      expect(target.pane.keys).toContain("escape");
+      expect(target.pane.submitted).toHaveLength(1);
+      expect(target.pane.submitted[0]).toContain("Read and follow /tmp/cursor-boot.md");
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("Cursor key Return closes the captured owned picker before submitting", async () => {
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: typed => target.pane.pickerOpen ? cursorPicker(typed) : cursorClosed(typed),
+      after: typed => matrixPlain("cursor", typed, true) }, undefined, 0, "cursor");
+    try {
+      await target.typeDraft("Read and follow /tmp/cursor-boot.md");
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.keys).toEqual(["escape", "return"]);
+      expect(target.pane.submitted).toEqual(["Read and follow /tmp/cursor-boot.md"]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("Cursor boot ownership survives a stuck picker and the first session capture", async () => {
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: (typed, open) => open ? cursorPicker(typed) : cursorClosed(typed),
+      after: typed => matrixPlain("cursor", typed, true) }, "Read and follow /tmp/cursor-boot.md", 0, "cursor", false,
+      undefined, 2_000, false, undefined, pane => { pane.pickerStuck = true; });
+    try {
+      expect(target.spawned).toMatchObject({ ok: false, error_code: "composer_picker_not_closed", typed: true, submit_dispatched: false });
+      const [owner] = [...target.context.typedDraftOwners.values()];
+      expect(owner).toMatchObject({ bootAgentId: target.spawned.agent_id });
+      expect(owner.bootInstanceId).toBeTruthy();
+      const captured = target.engine.stateMgr.updateRecord(target.spawned.agent_id, { cli_session_id: "cursor-first-session" });
+      target.engine.getRegistry().set(captured.agent_id, captured);
+      target.pane.pickerStuck = false;
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const recovered = parseToolResult(await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () =>
+        target.server._registeredTools.send_to.handler({ mode: "key", surface: target.spawned.surface_id, text: "return" }, {})));
+      expect(recovered, JSON.stringify(recovered)).toMatchObject({ ok: true, submit_verified: true });
+      expect(target.pane.submitted).toHaveLength(1);
+      expect(target.context.typedDraftOwners.size).toBe(0);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["other caller", "edited after Esc"])("Cursor owned path picker refuses Return for %s", async change => {
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: (typed, open) => open ? cursorPicker(typed) : cursorClosed(typed),
+      after: typed => matrixPlain("cursor", typed, true) }, undefined, 0, "cursor");
+    try {
+      await target.typeDraft("Read and follow /tmp/cursor-boot.md");
+      target.pane.phase = "draft"; target.pane.pickerOpen = true;
+      if (change === "edited after Esc") target.pane.onEscape = async () => { target.pane.text += " edited"; };
+      const result = await target.keyReturn(change === "other caller" ? OTHER_UUID : LEAD_UUID);
+      expect(result).toMatchObject({ ok: false, error_code: "draft_ownership_unverified", submit_dispatched: false });
+      expect(target.pane.keys).toEqual(change === "other caller" ? [] : ["escape"]);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it.each(["closed", "before Esc", "after Esc"])("Cursor preserves authored border rows %s", async when => {
+    const render = (text: string) => text.replaceAll("\n", "\n    ");
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: (typed, open) => open ? cursorPicker(render(typed)) : cursorClosed(render(typed)),
+      after: typed => matrixPlain("cursor", typed, true) }, undefined, 0, "cursor");
+    try {
+      await target.typeDraft("Read and follow /tmp/cursor-boot.md");
+      target.pane.phase = "draft"; target.pane.pickerOpen = when !== "closed";
+      const edit = "\n▀▀▀▀▀▀▀▀\nhuman change";
+      if (when !== "after Esc") target.pane.text += edit;
+      else target.pane.onEscape = async () => { target.pane.text += edit; };
+      const result = await target.keyReturn(LEAD_UUID);
+      expect(target.pane.submitted).toEqual([]);
+      expect(result.ok).toBe(false);
+      expect(target.pane.keys).not.toContain("return");
+    } finally { target.context.dispose(); }
+  }, 30_000);
 
   it.each(realPickers)("#999(e) real %s %s closes only an owned picker and submits", async (cli, name, text) => {
     const target = await setup({ empty: matrixPlain(cli, ""), buffered: matrixPlain(cli, ""),

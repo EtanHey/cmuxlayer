@@ -90,6 +90,24 @@
       ],
       "raw_lines": 33,
       "sanitized_lines": 11
+    },
+    {
+      "file": "cursor-2026-10-14-boot-path.txt",
+      "surface": "surface:211",
+      "harness": "Cursor Agent v2026.10.14-0f9edde",
+      "original_snapshot_hash": "e1c2ed10e8e3237755beae952615c00ce870ce4849c85f1fea2c389afc152187",
+      "sanitized_sha256": "2c47e1ef565d45066a04607aeae67ad7a07cb6d52f7ae423bcf6f995dcb18804",
+      "method": "private built-daemon MCP client; read_screen(raw:true, scrollback:false) after failed boot, before managed close",
+      "sanitization": [
+        "shell prelude removed",
+        "home path replaced with same-length /home/fixtureusrx",
+        "right-edge spaces stripped"
+      ],
+      "submission": "typed pointer; no Return; No matches picker visible",
+      "capture_window": {
+        "started_at": "2026-10-15T22:15:01.344Z",
+        "finished_at": "2026-10-15T22:15:07.872Z"
+      }
     }
   ]
 }
