@@ -1,12 +1,28 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { isPickerOrMenuScreen, parseScreen } from "../src/screen-parser.js";
-import { composerPickerInputRegion } from "../src/delivery/composer-screen.js";
+import { composerPickerInputRegion, composerRegionMatchesPayload } from "../src/delivery/composer-screen.js";
 import { dismissAccountSecurityBanner } from "../src/delivery/account-security.js";
 
 const capture = (name: string) => readFileSync(new URL(`./fixtures/composer-overlays/${name}.txt`, import.meta.url), "utf8");
 
 describe("#999(e) real captured composer overlays", () => {
+  it("reads and owns every wrapped row of the Cursor 2026.10.14 boot pointer", () => {
+    const screen = capture("cursor-2026-10-14-boot-path");
+    const payload = "Read and follow /home/fixtureusrx/Gits/cmuxlayer/.worktrees/cursor-submit/docs.local/cursor-submit/live-capture/goals/cursor-01.md";
+    const region = composerPickerInputRegion(screen, "cursor");
+    expect(region).toBe("Read and follow /home/fixtureusrx/Gits/cmuxlayer/.worktrees/cursor-submit/docs.local/\n    cursor-submit/live-capture/goals/cursor-01.md");
+    expect(composerRegionMatchesPayload(region!, payload, "cursor", screen)).toBe(true);
+    expect(composerRegionMatchesPayload(region!, payload.replace("goals", "other"), "cursor", screen)).toBe(false);
+  });
+  it("retains even a matching-width authored rule before the actual lower border", () => {
+    const screen = capture("cursor-path");
+    const border = screen.split("\n").find(line => /^\s*▀{8,}$/u.test(line))!;
+    const edited = screen.replace("/999e_no_match_capture", `/999e_no_match_capture\n${border}\n    human change`);
+    const region = composerPickerInputRegion(edited, "cursor");
+    expect(region).toContain("human change");
+    expect(composerRegionMatchesPayload(region!, "/999e_no_match_capture", "cursor", edited)).toBe(false);
+  });
   it.each([
     ["codex-mention", "codex", "@999e_no_match_capture"],
     ["codex-slash", "codex", "/"],

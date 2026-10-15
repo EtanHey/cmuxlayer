@@ -9,6 +9,7 @@ import type { CliType } from "../agent-types.js";
 import {
   antigravityComposerDraft,
   composerPickerBounds,
+  cursorComposerBounds,
   isAntigravityScreen,
   isCodexDismissibleOverlay,
   isPickerOrMenuScreen,
@@ -283,6 +284,11 @@ export function composerPickerInputRegion(screenText: string, cli?: CliType): st
   const knownCli = cli ?? inferComposerCli(screenText);
   const bounds = composerPickerBounds(screenText, knownCli ?? undefined);
   if (!bounds) return null;
+  if (knownCli === "cursor") {
+    const rows = normalizeTerminalText(screenText).split("\n").slice(bounds.start, bounds.end);
+    const first = matchComposerPromptLine(rows[0] ?? "");
+    return first ? [first.input, ...rows.slice(1)].join("\n").trimEnd() : null;
+  }
   return extractComposerInputRegion(normalizeTerminalText(screenText).split("\n").slice(bounds.start, bounds.end).join("\n"), undefined, knownCli ?? undefined, true);
 }
 
@@ -302,6 +308,14 @@ export function extractComposerInputRegion(
   const cli = knownCli ?? inferComposerCli(screenText);
   // Menu selectors are not input boxes; their existing safety gate owns them.
   if (isPickerOrMenuScreen(screenText, cli ?? undefined)) return null;
+  const cursorBounds = cli === "cursor" ? cursorComposerBounds(screenText) : null;
+  if (cursorBounds) {
+    const rows = lines.slice(cursorBounds.start, cursorBounds.end);
+    const first = matchComposerPromptLine(rows[0] ?? "");
+    if (!first) return null;
+    const input = [first.input, ...rows.slice(1)].join("\n").trimEnd();
+    return preservePlaceholderText ? input : normalizeKnownPlaceholderComposerInput(cli, input, submittedText);
+  }
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
   // Captured Claude footer: a damaged rule is chrome only when separated
@@ -631,6 +645,17 @@ export function composerRegionMatchesPayload(
   // cannot establish ownership of the original payload.
   if (cli === "claude" && screenText !== undefined && region.includes("\n")) {
     return codexRenderedRowsMatch(region.split("\n"), payload, codexWrapWidthFloor(screenText), false);
+  }
+  if (cli === "cursor" && screenText !== undefined && region.includes("\n")) {
+    // Captured Cursor 2026.10.14: four columns before each continuation,
+    // two columns of right padding. Its border fixes the available width;
+    // reuse the strict row matcher without forgiving edits or short breaks.
+    const bounds = cursorComposerBounds(screenText);
+    if (!bounds) return false;
+    const border = normalizeTerminalText(screenText).split("\n")[bounds.end];
+    const rows = region.split("\n");
+    if (rows.slice(1).some(row => row.trim() && !row.startsWith("    "))) return false;
+    return codexRenderedRowsMatch(rows.map((row, index) => index > 0 ? row.slice(2) : row), payload, border.trimEnd().length - 6);
   }
   if (cli !== "codex") return false;
   if (!region.trim()) return expected === "";

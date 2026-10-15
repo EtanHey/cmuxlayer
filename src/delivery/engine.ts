@@ -2672,7 +2672,9 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
     const submittedText = opts.chunks.join("");
     if (textDispatched && beforeDraft === "" && opts.delivery_id) {
       const entries = previousOwner && previousOwner.caller === (caller ?? null) ? previousOwner.texts ?? [previousOwner.text] : [];
-      const boot = previousOwner?.text === submittedText ? previousOwner : undefined;
+      const boot = opts.source_event === "boot_prompt" && pendingBootAgent
+        ? { bootAgentId: pendingBootAgent.agent_id, bootInstanceId: pendingBootAgent.boot_instance_id ?? undefined }
+        : previousOwner?.text === submittedText ? previousOwner : undefined;
       rememberDraftOwner(ownerKey, { caller: caller ?? null, text: submittedText, texts: [...entries, submittedText], at: Date.now(),
         ref: opts.surface, uuid: opts.stableSurfaceIdentity ?? null, workspace: opts.workspace ?? null,
         fp: draftTargetFingerprint(opts.surface, opts.stableSurfaceIdentity), seen: false,

@@ -1809,6 +1809,26 @@ export function composerPickerFooterIndex(screenText: string): number {
 
 const COMPLETION_OPTION_RE = /^\s*(?:[>❯›]\s*)?\/[\w:-]+\s{2,}\S/u;
 
+/** Cursor's actual composer rules share a gutter and width; authored rules do not end input. */
+export function cursorComposerBounds(text: string): { start: number; end: number } | null {
+  const lines = normalizeText(text).split("\n");
+  for (let top = lines.length - 1; top >= 0; top--) {
+    const upper = /^( +)▄{8,}$/u.exec((lines[top] ?? "").trimEnd());
+    if (!upper || !(lines[top + 1] ?? "").startsWith(`${upper[1]} → `)) continue;
+    const lower = lines[top].trimEnd().replaceAll("▄", "▀");
+    for (let end = lines.length - 1; end > top + 1; end--) {
+      if ((lines[end] ?? "").trimEnd() !== lower) continue;
+      const tail = lines.slice(end + 1).map(line => line.trim()).filter(Boolean);
+      const picker = tail.length === 1 && /^No matches$/iu.test(tail[0]);
+      const footer = tail.some(line => /^(?:Auto|Agent)\b/u.test(line)) &&
+        tail.every(line => /^(?:Auto|Agent)\b/u.test(line) || /^\d+ tasks?$/u.test(line) || CURSOR_CWD_FOOTER_RE.test(line));
+      if (picker || footer) return { start: top + 1, end };
+    }
+    return null;
+  }
+  return null;
+}
+
 /** Bounds of the composer only, excluding completion rows on either side. */
 export function composerPickerBounds(text: string, cli?: CliType): { start: number; end: number } | null {
   const lines = normalizeText(text).split("\n");
@@ -1835,9 +1855,8 @@ export function composerPickerBounds(text: string, cli?: CliType): { start: numb
     const first = options.find(index => index > composer);
     if (first !== undefined && lines.slice(composer + 1, first).every(line => !line.trim() || /^─{8,}$/u.test(line.trim()))) return { start: composer, end: first };
   }
-  if ((cli === "cursor" || cli === undefined) && /^\s*→/u.test(lines[composer] ?? "") &&
-      lines.slice(composer + 1).some(line => /^\s*▀{8,}\s*$/u.test(line)) &&
-      /^\s*No matches\s*$/iu.test([...lines].reverse().find(line => line.trim()) ?? "")) return { start: composer, end: composer + 1 };
+  if ((cli === "cursor" || cli === undefined) &&
+      /^\s*No matches\s*$/iu.test([...lines].reverse().find(line => line.trim()) ?? "")) return cursorComposerBounds(text);
   return null;
 }
 
