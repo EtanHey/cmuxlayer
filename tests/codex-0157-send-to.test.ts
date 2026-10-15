@@ -759,7 +759,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   const cursorClosed = (text: string) => overlayCapture("cursor-closed").replace("/999e_no_match_capture", text);
   const cursorPicker = (text: string) => overlayCapture("cursor-path").replace("/999e_no_match_capture", text);
 
-  it.each(["Human unfinished draft", "Read and follow /tmp/cursor-boot.md"])("Cursor boot refuses a pre-existing foreign composer before typing: %s", async foreign => {
+  it.each(["Human unfinished draft", "Read and follow /tmp/cursor-boot.md", "\n    Human continuation"])("Cursor boot refuses a pre-existing foreign composer before typing: %s", async foreign => {
     const target = await setup({ empty: cursorClosed(foreign), buffered: cursorClosed(foreign),
       draft: typed => cursorClosed(typed), after: typed => matrixPlain("cursor", typed, true) },
       "Read and follow /tmp/cursor-boot.md", 0, "cursor", false, undefined, 2_000, false, undefined,
