@@ -314,7 +314,9 @@ export function extractComposerInputRegion(
     const first = matchComposerPromptLine(rows[0] ?? "");
     if (!first) return null;
     const input = [first.input, ...rows.slice(1)].join("\n").trimEnd();
-    return preservePlaceholderText ? input : normalizeKnownPlaceholderComposerInput(cli, input, submittedText);
+    // These are interior rows, so rule-shaped text is authored input.
+    return preservePlaceholderText || input.split("\n").some(line => /^\s*[▄▀]{8,}\s*$/u.test(line))
+      ? input : normalizeKnownPlaceholderComposerInput(cli, input, submittedText);
   }
   const start = currentComposerRegionStart(cli, lines);
   let end = lines.length;
