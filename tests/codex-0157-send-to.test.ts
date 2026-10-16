@@ -759,6 +759,36 @@ describe("#905 send_to receipts on Codex 0.157", () => {
   const cursorClosed = (text: string) => overlayCapture("cursor-closed").replace("/999e_no_match_capture", text);
   const cursorPicker = (text: string) => overlayCapture("cursor-path").replace("/999e_no_match_capture", text);
 
+  it.each(["Human unfinished draft", "Read and follow /tmp/cursor-boot.md", "\n    Human continuation",
+    "Plan, search, build anything\n    ▀▀▀▀▀▀▀▀", "Plan, search, build anything\n    ▄▄▄▄▄▄▄▄"])("Cursor boot refuses a pre-existing foreign composer before typing: %s", async foreign => {
+    const target = await setup({ empty: cursorClosed(foreign), buffered: cursorClosed(foreign),
+      draft: typed => cursorClosed(typed), after: typed => matrixPlain("cursor", typed, true) },
+      "Read and follow /tmp/cursor-boot.md", 0, "cursor", false, undefined, 2_000, false, undefined,
+      pane => { pane.pickerOpen = false; pane.text = foreign; });
+    try {
+      expect(target.spawned, JSON.stringify(target.spawned)).toMatchObject({ ok: false,
+        error_code: "blocked_by_foreign_draft", typed: false, submit_attempted: false });
+      expect(target.pane.text).toBe(foreign);
+      expect(target.pane.submitted).toEqual([]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
+  it("Cursor boot can retry the caller's exact owned draft without typing it twice", async () => {
+    const text = "Read and follow /tmp/cursor-boot.md";
+    const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
+      draft: typed => cursorClosed(typed), after: typed => matrixPlain("cursor", typed, true) }, undefined, 0, "cursor");
+    try {
+      await target.typeDraft(text); target.pane.phase = "draft";
+      const deliver = target.context.lifecycleAgentInputDeliverer;
+      if (!deliver) throw new Error("lifecycle relay was not initialized");
+      const { runWithCallerContext } = await import("../src/caller-context.js");
+      const result = await runWithCallerContext({ surfaceId: LEAD_UUID, workspaceId: "workspace:1" }, () =>
+        deliver({ agent_id: target.spawned.agent_id, text, press_enter: true, source_event: "boot_prompt" }));
+      expect(result).toMatchObject({ typed: false, submit_verified: true });
+      expect(target.pane.submitted).toEqual([text]);
+    } finally { target.context.dispose(); }
+  }, 30_000);
+
   it("Cursor boot closes the captured path picker and verifies its own pointer", async () => {
     const target = await setup({ empty: overlayCapture("cursor-idle"), buffered: overlayCapture("cursor-idle"),
       draft: (typed, open) => open ? cursorPicker(typed) : cursorClosed(typed),
@@ -837,6 +867,7 @@ describe("#905 send_to receipts on Codex 0.157", () => {
       const result = await target.keyReturn(LEAD_UUID);
       expect(target.pane.submitted).toEqual([]);
       expect(result.ok).toBe(false);
+      expect(result.error_code).toBe(when === "closed" ? "blocked_by_foreign_draft" : "draft_ownership_unverified");
       expect(target.pane.keys).not.toContain("return");
     } finally { target.context.dispose(); }
   }, 30_000);

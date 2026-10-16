@@ -27,6 +27,7 @@ import type {
 } from "../agent-types.js";
 import type { AgentDeliveryReceipt } from "../engine/types.js";
 import {
+  cursorComposerBounds,
   isAntigravityScreen,
   isCodexUpdateMenuScreen,
   isCodexDismissibleOverlay,
@@ -2622,6 +2623,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps) {
       draftOwnerFingerprintMatches(previousOwner, opts.surface, opts.stableSurfaceIdentity) &&
       bootTokenInstanceCurrent(previousOwner) &&
       ownedComposerText(previousOwner, extractComposerInputRegion(deliverySafetySnapshot.text, undefined, targetCli, true) ?? beforeDraft, targetCli, deliverySafetySnapshot.text) === draftGuardText;
+    const bootDraft = opts.source_event === "boot_prompt" && deliverySafetySnapshot
+      // Only a bounded Cursor box separates continuation rows from status
+      // output. Legacy frames keep the established prompt-line guard.
+      ? targetCli === "cursor" && cursorComposerBounds(deliverySafetySnapshot.text)
+        ? extractComposerInputRegion(deliverySafetySnapshot.text, undefined, targetCli)
+        : beforeDraft
+      : null;
+    if (deliverySafetySnapshot && bootDraft?.trim() && !ownedRetry) {
+      throw new DeliverySafetyGateError("blocked_by_foreign_draft", deliverySafetySnapshot.parsed, bootDraft);
+    }
     if (opts.retry_owned_draft && (!ownedRetry || (targetCli === "claude" && deliverySafetySnapshot && screenTranscriptContainsText(deliverySafetySnapshot.text, draftGuardText)))) {
       throw new DeliverySafetyGateError("draft_ownership_unverified", deliverySafetySnapshot?.parsed ?? parseScreen(""));
     }
