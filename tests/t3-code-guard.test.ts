@@ -33,7 +33,7 @@ describe("T3 Code startup guard", () => {
   it.each([
     "/sbin/launchd", "/Applications/cmux.app/Contents/MacOS/cmux", "/bin/zsh",
     'node wrapper.js --title "T3 Code"', "node ~/Gits/T3 Code-notes/wrap.js",
-    "/Users/test/Gits/T3 Code-notes/wrap.js",
+    "/workspace/T3 Code-notes/wrap.js",
   ])(
     "allows %s ancestry", (command) => {
       expect(findT3CodeAncestor(42, () => ({ ppid: 1, command }))).toBeNull();
