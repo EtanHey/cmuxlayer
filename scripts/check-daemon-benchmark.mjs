@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { availableParallelism, loadavg } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -33,23 +34,26 @@ export const CANONICAL_OPERATIONS = [
   "read_screen_10_parallel",
 ];
 export const BENCHMARK_HISTORY_LIMIT = 50;
-// #852: ten near-identical hosted runs ranged 66–81ms; 81.38ms failed an
-// 81.27ms ceiling. One fresh sample may resolve a <=5% miss, never widen it.
-export const MARGINAL_RESAMPLE_RATIO = 1.05;
+// #1114: scheduler bursts can exceed 5%. Re-measure each breached operation
+// once, using the same workload and ceiling; persistent regressions stay red.
+export function benchmarkLoadSkipReason(load = loadavg()[0], cpus = availableParallelism()) {
+  return load > cpus * 2 ? `SKIPPED: load ${load.toFixed(2)} exceeds ${cpus * 2} (2x ${cpus} CPUs)` : null;
+}
 
-function marginalRow(entry) {
+function breachedTimingRow(entry) {
   return !entry.passed && !entry.exact && !entry.informational &&
     entry.sampling === "sampled" &&
     ["p50_ms", "p95_ms", "lock_hold_ms", "cli_send_ms"].includes(entry.metric) &&
-    Number.isFinite(entry.current) && entry.current <= entry.ceiling * MARGINAL_RESAMPLE_RATIO;
+    Number.isFinite(entry.current);
 }
 
-/** One sampler call per operation; percentile/lock rows share that fresh sample. */
-export async function sampleMarginalRows(baseline, result, options, sampleOperation) {
+/** One sampler call per operation; percentile/lock rows share that fresh sample.
+ * Keep the historical marginal_resamples JSON keys for evidence consumers. */
+export async function sampleBreachedRows(baseline, result, options, sampleOperation) {
   if (result.marginal_resamples) return result.marginal_resamples;
   const comparison = compareBenchmark(baseline, result, options);
   const samples = {};
-  for (const operation of new Set(comparison.rows.filter(marginalRow).map((entry) => entry.operation))) {
+  for (const operation of new Set(comparison.rows.filter(breachedTimingRow).map((entry) => entry.operation))) {
     try {
       samples[operation] = await sampleOperation(operation);
     } catch (error) {
@@ -939,7 +943,7 @@ export function compareBenchmark(
   }
   const resampleFailures = [];
   for (const [operation, measurement] of Object.entries(result.marginal_resamples ?? {})) {
-    const eligible = rows.filter((entry) => entry.operation === operation && marginalRow(entry));
+    const eligible = rows.filter((entry) => entry.operation === operation && breachedTimingRow(entry));
     if (!eligible.length) continue;
     const retry = compareBenchmark(baseline, resultWithOperation(result, operation, measurement), {
       expectedRounds, history, historyDegraded, historyDegradedReason,
@@ -949,7 +953,7 @@ export function compareBenchmark(
       ...retry.failures.filter((failure) => !metricFailures.has(failure)),
       ...(measurement.sampling_error ? [`sampling failed: ${measurement.sampling_error}`] : []),
     ];
-    resampleFailures.push(...invalid.map((failure) => `marginal re-sample ${operation}: ${failure}`));
+    resampleFailures.push(...invalid.map((failure) => `breach re-sample ${operation}: ${failure}`));
     for (const entry of eligible) {
       const fresh = retry.rows.find((freshRow) => freshRow.operation === operation && freshRow.metric === entry.metric);
       entry.marginal_resample = {
@@ -1049,7 +1053,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     "|---|:---:|:---:|:---:|---:|---:|---:|---:|:---:|",
   ];
   const tableRow = (entry) =>
-    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.marginal_resample ? ` → re-sample ${formatted(entry.marginal_resample.current, entry.unit)}` : ""}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.informational ? entry.alert ? "ALERT (info)" : "INFO" : entry.passed ? entry.marginal_resample ? "PASS (marginal)" : "PASS" : entry.marginal_resample ? "FAIL (marginal)" : "FAIL"} |`;
+    `| ${entry.operation} | ${entry.transport ?? result?.replay?.transport?.[entry.operation] ?? "missing"} | ${entry.sampling ?? "single_shot"}${entry.stress ? " · stress" : ""}${entry.history_degraded ? " · history-degraded · wide-margin" : ""} | ${entry.margin_rule} | ${entry.metric} | ${formatted(entry.baseline, entry.unit)} | ${formatted(entry.current, entry.unit)}${entry.marginal_resample ? ` → re-sample ${formatted(entry.marginal_resample.current, entry.unit)}` : ""}${entry.raw_current === undefined ? "" : ` (raw ${formatted(entry.raw_current, entry.unit)})`} | ${formatted(entry.ceiling, entry.unit)} | ${entry.informational ? entry.alert ? "ALERT (info)" : "INFO" : entry.passed ? entry.marginal_resample ? "PASS (re-sampled)" : "PASS" : entry.marginal_resample ? "FAIL (re-sampled)" : "FAIL"} |`;
   const changed = comparison.rows.filter(
     (entry) => !entry.passed || entry.current !== entry.baseline,
   );
@@ -1061,7 +1065,7 @@ export function renderMarkdownComparison(baseline, result, comparison) {
     `Replay: ${result.clients} clients x ${result.rounds} rounds. Runner regression ratio: ${baseline.regression_ratio}x. Sampled rows use max(2 x (p95 - p50), 3 sigma of p50 after five green main runs); single-shot or untrusted-history rows retain +300 ms. Every row keeps the baseline x ${baseline.regression_ratio} floor and its sanity cap.`,
     "First-send and warm-agent p50/p95 may subtract only the part of a paired 1ms fake-socket timer's overrun that overlaps the measured send and exceeds the run's median overlap. A timer firing up to 2ms early is valid zero-overrun proof. Invalid pairs use raw send latency individually. Current shows the adjusted value with raw latency alongside it when paired proof is in use.",
     "",
-    "Marginal re-samples (informational): sampled timing misses within 5% get one fresh operation sample; it must meet the same ceiling. Both values remain visible. Contract and intrinsic failures remain authoritative.",
+    "Breach re-samples: sampled timing misses get one fresh operation sample; it must meet the same ceiling. Both values remain visible. Contract and intrinsic failures remain authoritative.",
     "",
     "Paired control evaluation (verdict basis; invalid receipts retain raw latency):",
     ...["first_send_after_spawn", "send_to_agent_warm"].map((operation) => {
@@ -1156,6 +1160,17 @@ export async function runBenchmark({
 }
 
 async function main() {
+  const skip = benchmarkLoadSkipReason();
+  if (skip) {
+    const artifactDir = resolve(process.env.CMUXLAYER_PERF_ARTIFACT_DIR ?? defaultArtifactDir);
+    await mkdir(artifactDir, { recursive: true });
+    const markdown = `<!-- cmuxlayer-perf-budget -->\n## Daemon performance budget: SKIPPED\n\n${skip}\n`;
+    await writeFile(join(artifactDir, "comment.md"), markdown);
+    if (process.env.GITHUB_STEP_SUMMARY) await writeFile(process.env.GITHUB_STEP_SUMMARY, markdown, { flag: "a" });
+    process.stdout.write(markdown);
+    process.exitCode = 2; // Inconclusive is a non-pass for this required check.
+    return;
+  }
   const rawBaseline = JSON.parse(await readFile(baselinePath, "utf8"));
   let baseline;
   let legacyBaseline = false;

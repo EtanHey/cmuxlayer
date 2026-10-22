@@ -95,6 +95,8 @@ export interface CreateServerOptions {
   inboxBaseDir?: string;
   /** Override session identity lookup (primarily for mocked tests). */
   sessionIdentityResolver?: SessionIdentityResolver;
+  /** Override the host process-table read for hermetic resume tests. */
+  sessionProcessScanner?: import("../engine/types.js").AgentEngineOptions["sessionProcessScanner"];
   /**
    * PRIMARY session-identity resolver — the self-registration READ side. Threaded
    * to the lifecycle engine as its primary resolver (self-registration first,

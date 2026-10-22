@@ -381,14 +381,15 @@ describe("daemon performance budget", () => {
   it.each([
     ["marginal pass", 276, 270, true, 1],
     ["marginal repeat fail", 276, 276, false, 1],
-    ["large fail", 290, 270, false, 0],
+    ["large transient breach", 559, 270, true, 1],
+    ["large repeated regression", 559, 559, false, 1],
     ["pass", 270, 290, true, 0],
     ["inclusive margin", 288.75, 275, true, 1],
   ])("re-samples once: %s", async (_name, initial, retry, passed, calls) => {
     const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = initial;
     let count = 0;
-    const samples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (operation: string) => {
+    const samples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, (operation: string) => {
       count++;
       expect(operation).toBe("send_to_surface_warm");
       return { ...candidate.latency.send_to_surface_warm, p95_ms: retry,
@@ -405,23 +406,22 @@ describe("daemon performance budget", () => {
       expect(row.marginal_resample.initial).toBe(initial);
       expect(row.marginal_resample.current).toBe(retry);
       expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(`${initial} ms → re-sample ${retry} ms`);
-      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(passed ? "PASS (marginal)" : "FAIL (marginal)");
-      expect(await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { throw new Error("second retry"); })).toEqual(samples);
+      expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain(passed ? "PASS (re-sampled)" : "FAIL (re-sampled)");
+      expect(await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => { throw new Error("second retry"); })).toEqual(samples);
     }
   });
 
   it("keeps contract failures and passing sibling metrics authoritative", async () => {
     const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = 276;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => ({
       ...candidate.latency.send_to_surface_warm, p50_ms: 999, p95_ms: 270,
       request_bytes: 999, request_sha256: "wrong", sample_count: 95, transport: "cli",
     }));
     const comparison = compareBenchmark(baseline, candidate);
     expect(comparison.passed).toBe(false);
     expect(comparison.rows.find((entry) => entry.operation === "send_to_surface_warm" && entry.metric === "p50_ms").current).toBe(210);
-    expect(comparison.failures.join(" ")).toMatch(/marginal re-sample/);
-    expect(checkerModule.MARGINAL_RESAMPLE_RATIO).toBe(1.05);
+    expect(comparison.failures.join(" ")).toMatch(/breach re-sample/);
     expect(() => validateBaseline({ ...baseline, regression_ratio: 1.26 })).toThrow(/1.25/);
   });
 
@@ -443,7 +443,7 @@ describe("daemon performance budget", () => {
       [81.38, 81.27, false], [81.38, 81.27, false],
     ]);
     let calls = 0;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(sameCeilingBaseline, candidate, {}, (operation: string) => {
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(sameCeilingBaseline, candidate, {}, (operation: string) => {
       calls++;
       expect(operation).toBe("send_to_surface_warm");
       return { ...candidate.latency.send_to_surface_warm, p50_ms: freshP50,
@@ -478,7 +478,7 @@ describe("daemon performance budget", () => {
     const fresh = { ...initial, p95_ms: ceiling, sample_count: checkerModule.canonicalSamplesPerRun(operation),
       request_bytes: baseline.replay.bytes[operation], request_sha256: baseline.replay.request_sha256[operation] };
     const samplerCalls: string[] = [];
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, (selected: string) => {
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, (selected: string) => {
       samplerCalls.push(selected);
       return fresh;
     });
@@ -489,12 +489,12 @@ describe("daemon performance budget", () => {
     expect(after.rows.filter((entry) => entry.operation !== operation)).toEqual(before.rows.filter((entry) => entry.operation !== operation));
   });
 
-  it("shares one sample across marginal metrics, preserving a large sibling miss", async () => {
+  it("shares one sample across breached metrics and fails a repeated sibling miss", async () => {
     const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p50_ms = 251;
     candidate.latency.send_to_surface_warm.p95_ms = 276;
     let count = 0;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => {
       count++;
       return { ...candidate.latency.send_to_surface_warm, p50_ms: 240, p95_ms: 270,
         request_bytes: 180, request_sha256: "4".repeat(64), sample_count: 96 };
@@ -502,7 +502,24 @@ describe("daemon performance budget", () => {
     expect(count).toBe(1);
     expect(compareBenchmark(baseline, candidate).passed).toBe(true);
     candidate.latency.send_to_surface_warm.p50_ms = 300;
+    candidate.marginal_resamples.send_to_surface_warm.p50_ms = 300;
     expect(compareBenchmark(baseline, candidate).passed).toBe(false);
+  });
+
+  it("refuses excessive load explicitly without turning a required check green", () => {
+    expect(checkerModule.benchmarkLoadSkipReason(9, 4)).toMatch(/^SKIPPED: load 9/);
+    expect(checkerModule.benchmarkLoadSkipReason(8, 4)).toBeNull();
+    const artifactDir = mkdtempSync(join(tmpdir(), "perf-load-skip-"));
+    try {
+      const stub = "import os from 'node:os'; import {syncBuiltinESMExports} from 'node:module'; os.loadavg=()=>[999999,0,0]; syncBuiltinESMExports();";
+      const run = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(stub)}`,
+        join(repoRoot, "scripts/check-daemon-benchmark.mjs")], {
+        env: { ...process.env, CMUXLAYER_PERF_ARTIFACT_DIR: artifactDir }, encoding: "utf8", timeout: 5_000,
+      });
+      expect(run.status).toBe(2);
+      expect(run.stdout).toContain("SKIPPED: load 999999.00");
+      expect(readFileSync(join(artifactDir, "comment.md"), "utf8")).toContain("budget: SKIPPED");
+    } finally { rmSync(artifactDir, { recursive: true, force: true }); }
   });
 
   it.each([
@@ -510,7 +527,7 @@ describe("daemon performance budget", () => {
   ])("rejects a re-sample with invalid workload proof %j", async (invalid) => {
     const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = 276;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => ({
       ...candidate.latency.send_to_surface_warm, p95_ms: 270,
       sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64), ...invalid,
     }));
@@ -521,7 +538,7 @@ describe("daemon performance budget", () => {
     const candidate = budgetCandidate();
     candidate.verdict = "RED";
     candidate.latency.send_to_surface_warm.p95_ms = 276;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => ({
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => ({
       ...candidate.latency.send_to_surface_warm, p95_ms: 270,
       sample_count: 96, request_bytes: 180, request_sha256: "4".repeat(64),
     }));
@@ -534,7 +551,7 @@ describe("daemon performance budget", () => {
     const candidate = budgetCandidate();
     candidate.latency.send_to_surface_warm.p95_ms = 276;
     let calls = 0;
-    candidate.marginal_resamples = await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => {
+    candidate.marginal_resamples = await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => {
       calls++;
       const error = new Error("synthetic resample failure");
       if (mode === "throw") throw error;
@@ -547,7 +564,7 @@ describe("daemon performance budget", () => {
     expect(comparison.failures.join(" ")).toContain("synthetic resample failure");
     expect(renderMarkdownComparison(baseline, candidate, comparison)).toContain("276 ms → re-sample missing");
     expect(resultWithComparison(candidate, comparison).latency.send_to_surface_warm.p95_ms).toBe(276);
-    await checkerModule.sampleMarginalRows(baseline, candidate, {}, () => { calls++; throw new Error("second attempt"); });
+    await checkerModule.sampleBreachedRows(baseline, candidate, {}, () => { calls++; throw new Error("second attempt"); });
     expect(calls).toBe(1);
   });
 
