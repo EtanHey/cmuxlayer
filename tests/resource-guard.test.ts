@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { appendCapped, runTick } from '../src/resource-guard.js';
+import { installAllowedAncestryFixture } from './helpers/startup-ancestry.js';
 
 const dirs: string[] = [];
 function scratch() { const dir = realpathSync(mkdtempSync(join(tmpdir(), 'resource-guard-'))); dirs.push(dir); return dir; }
@@ -60,6 +61,7 @@ it('ships a named executable, all four real duties, and an idempotent jq formula
   expect(packaged.indexOf('system ENV.cc')).toBeLessThan(packaged.indexOf('libexec.install "launchd"'));
   cpSync(join(root, 'launchd'), join(keg, 'launchd'), { recursive: true });
   mkdirSync(join(keg, 'dist'));
+  installAllowedAncestryFixture(join(keg, 'dist'));
   const ts = await import('typescript');
   for (const name of ['resource-guard', 'mcp-reaper']) {
     writeFileSync(join(keg, 'dist', name + '.js'), ts.transpileModule(readFileSync(join(root, 'src', name + '.ts'), 'utf8'),
@@ -129,6 +131,7 @@ it('times out an uncooperative duty group while guardian runs on the same and ne
   writeFileSync(join(root,'package.json'),'{"type":"module"}');
   const entry=join(root,'dist/resource-guard.js'), binary=join(root,'cmux-resource-guard');
   writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  installAllowedAncestryFixture(join(root, 'dist'));
   const built=spawnSync('cc',[`-DGUARD_NODE="${process.execPath}"`,`-DGUARD_PATH="${process.env.PATH}"`,`-DGUARD_ENTRY="${entry}"`,join(import.meta.dirname,'../launchd/resource-guard/cmux-resource-guard.c'),'-o',binary],{encoding:'utf8'});
   expect(built.status,built.stderr).toBe(0);
   writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),'echo guardian-ran\n');
@@ -173,6 +176,7 @@ it('repeated CLI shutdown signals terminate detached duty descendants',async()=>
   const root=scratch(), home=scratch();mkdirSync(join(root,'dist'));mkdirSync(join(root,'launchd/resource-guard'),{recursive:true});
   writeFileSync(join(root,'package.json'),'{"type":"module"}');
   const entry=join(root,'dist/resource-guard.js');writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  installAllowedAncestryFixture(join(root, 'dist'));
   const pids=join(home,'pids');writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),'trap "" TERM\nsleep 5 &\necho $$ $! > "$PID_FILE"\nwait\n');
   const config=join(home,'config');writeFileSync(config,JSON.stringify({guardian:true,env:{PID_FILE:pids}}));
   const child=spawn(process.execPath,[entry],{env:{...process.env,HOME:home,CMUX_RESOURCE_GUARD_CONFIG:config},stdio:'ignore'}), closed=once(child,'close');
@@ -230,6 +234,7 @@ it('kills surviving group members after the duty leader exits on TERM', async ()
   writeFileSync(join(root,'package.json'),'{"type":"module"}');
   const entry = join(root,'dist/resource-guard.js');
   writeFileSync(entry,ts.transpileModule(readFileSync(join(import.meta.dirname,'../src/resource-guard.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText);
+  installAllowedAncestryFixture(join(root, 'dist'));
   writeFileSync(join(root,'launchd/resource-guard/heavy-ml-guardian.sh'),`trap "exit 0" TERM\necho $$ > "$LEADER_PID_FILE"\n/usr/bin/perl -e '$SIG{TERM}="IGNORE"; open my $fh, ">", $ENV{MEMBER_PID_FILE} or die $!; print $fh $$; close $fh; sleep 8;' &\nwhile :; do sleep 1; done\n`);
   const config = join(home,'config');
   writeFileSync(config,JSON.stringify({guardian:true,env:{CMUX_RESOURCE_GUARD_DUTY_TIMEOUT_MS:'500',LEADER_PID_FILE:leaderFile,MEMBER_PID_FILE:memberFile}}));

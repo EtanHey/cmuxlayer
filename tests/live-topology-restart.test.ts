@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { ReadBuffer } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { installAllowedAncestryFixture } from "./helpers/startup-ancestry.js";
 
 const ROOTS = new Set<string>();
 const CHILDREN = new Set<ChildProcess>();
@@ -174,6 +175,7 @@ function createFormulaFixture(root: string, version: string): {
   const libexec = join(cellarRoot, "libexec");
   mkdirSync(libexec, { recursive: true });
   cpSync(resolve("dist"), join(libexec, "dist"), { recursive: true });
+  installAllowedAncestryFixture(join(libexec, "dist"));
   symlinkSync(resolve("node_modules"), join(libexec, "node_modules"), "dir");
   const rootPackage = join(cellarRoot, "package.json");
   const libexecPackage = join(libexec, "package.json");
@@ -193,6 +195,7 @@ function upgradeFormulaFixture(
   const newLibexec = join(newCellarRoot, "libexec");
   mkdirSync(newLibexec, { recursive: true });
   cpSync(resolve("dist"), join(newLibexec, "dist"), { recursive: true });
+  installAllowedAncestryFixture(join(newLibexec, "dist"));
   symlinkSync(resolve("node_modules"), join(newLibexec, "node_modules"), "dir");
   const rootPackage = join(newCellarRoot, "package.json");
   const libexecPackage = join(newLibexec, "package.json");

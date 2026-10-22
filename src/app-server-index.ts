@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import readline from "node:readline";
+import { refuseUnderT3Code } from "./t3-code-guard.js";
 import { createCmuxClient } from "./cmux-client-factory.js";
 import {
   CodexAppServerBridge,
@@ -15,6 +16,7 @@ function writeJson(message: unknown): void {
 }
 
 async function main() {
+  if (refuseUnderT3Code()) return;
   loadCmuxlayerConfigFile();
   const client = await createCmuxClient();
   const runtime = new CmuxAppServerRuntime({ client, inboxOpts: {} });

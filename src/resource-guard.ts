@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { refuseUnderT3Code } from './t3-code-guard.js';
 
 export interface GuardConfig { watchdog?: boolean; guardian?: boolean; env?: Record<string, string>; }
 type Duty = 'watchdog' | 'guardian' | 'reaper' | 'sampler';
@@ -124,6 +125,7 @@ function runDuty(root: string, duty: Duty, env: Env, logs: string): Promise<void
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (refuseUnderT3Code()) process.exit(0);
   let stopping = false;
   for (const signal of ['SIGTERM','SIGINT'] as const) process.on(signal, () => {
     if (stopping) return;

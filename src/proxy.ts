@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import net from "node:net";
+import { refuseUnderT3Code } from "./t3-code-guard.js";
 import type { Readable, Writable } from "node:stream";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type {
@@ -1527,6 +1528,7 @@ export async function runProxy(
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {
+  if (refuseUnderT3Code()) process.exit(0);
   runProxy({ spawnDaemonForVersionBump: spawnDaemonProcess }).catch((error) => {
     console.error("[cmuxlayer-proxy] fatal", error);
     process.exit(1);
