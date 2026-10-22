@@ -8,6 +8,7 @@
  */
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
+import { refuseUnderT3Code } from "./t3-code-guard.js";
 import { RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
@@ -124,6 +125,7 @@ async function main() {
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {
+  if (refuseUnderT3Code()) process.exit(0);
   main().catch((error) => {
     console.error("[cmuxlayer] fatal", error);
     process.exit(1);

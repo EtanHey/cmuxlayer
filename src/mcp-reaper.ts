@@ -27,6 +27,7 @@
  */
 
 import { processLiveness } from "./util/pid-alive.js";
+import { refuseUnderT3Code } from "./t3-code-guard.js";
 import { execFile } from "node:child_process";
 import { mkdir, appendFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
@@ -542,6 +543,7 @@ export async function runReaper(
 }
 
 async function main(): Promise<void> {
+  if (refuseUnderT3Code()) return;
   const opts = parseCliOptions(process.argv.slice(2));
   await runReaper(opts);
 }
