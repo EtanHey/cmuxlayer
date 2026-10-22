@@ -12,6 +12,15 @@ describe("T3 Code startup guard", () => {
       .toEqual({ pid: 42, command: t3 });
   });
 
+  it.each([
+    "/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)",
+    "/Applications/T3 Code.app/Contents/Frameworks/T3 Code Helper.app/Contents/MacOS/T3 Code Helper",
+    "/Applications/T3 Code (Nightly).app/Contents/Frameworks/T3 Code (Nightly) Helper (Renderer).app/Contents/MacOS/T3 Code (Nightly) Helper (Renderer)",
+    "/Applications/T3 Code (Nightly).app/Contents/Resources/resource-monitor/t3-resource-monitor",
+  ])("recognizes the executable inside %s", (command) => {
+    expect(findT3CodeAncestor(42, () => ({ ppid: 1, command }))).toEqual({ pid: 42, command });
+  });
+
   it("walks through node and the Codex app-server without an environment signal", () => {
     const lookup: ProcessLookup = (pid) => new Map([
       [40, { ppid: 30, command: "node cmuxlayer-wrapper.js" }],
@@ -21,7 +30,11 @@ describe("T3 Code startup guard", () => {
     expect(findT3CodeAncestor(40, lookup)).toEqual({ pid: 20, command: t3 });
   });
 
-  it.each(["/sbin/launchd", "/Applications/cmux.app/Contents/MacOS/cmux", "/bin/zsh"])(
+  it.each([
+    "/sbin/launchd", "/Applications/cmux.app/Contents/MacOS/cmux", "/bin/zsh",
+    'node wrapper.js --title "T3 Code"', "node ~/Gits/T3 Code-notes/wrap.js",
+    "/Users/test/Gits/T3 Code-notes/wrap.js",
+  ])(
     "allows %s ancestry", (command) => {
       expect(findT3CodeAncestor(42, () => ({ ppid: 1, command }))).toBeNull();
     },
@@ -66,17 +79,18 @@ describe("T3 Code startup guard", () => {
   });
 
   it("parses real ps output with spaces and follows its parent pid", () => {
-    ps.mockReset().mockReturnValueOnce(" 50 node codex app-server\n").mockReturnValueOnce(` 1 ${t3}\n`);
+    ps.mockReset().mockReturnValue(` 1 0 /sbin/launchd\n 42 50 /usr/bin/node\n 50 1 ${t3}\n`);
     const writeStderr = vi.fn();
     expect(refuseUnderT3Code({ parentPid: 42, writeStderr })).toBe(true);
     expect(ps.mock.calls.map((call) => call[1])).toEqual([
-      ["-ww", "-o", "ppid=,command=", "-p", "42"],
-      ["-ww", "-o", "ppid=,command=", "-p", "50"],
+      ["-ww", "-Ao", "pid=,ppid=,comm="],
     ]);
     expect(writeStderr.mock.calls).toEqual([[`cmuxlayer: refusing to start under T3 Code (ancestor pid 50: ${t3})\n`]]);
   });
 
-  it.each(["", "not a process", "1\n"])("fails open for unreadable ps output %j", (output) => {
+  it.each(["", "not a process", "1\n", `42 1 ${t3}\ninvalid row\n`,
+    `42 1 ${t3}\n42 1 /usr/bin/node\n`, `9007199254740992 1 ${t3}\n`,
+  ])("fails open for unreadable ps output %j", (output) => {
     ps.mockReset().mockReturnValue(output);
     expect(refuseUnderT3Code({ parentPid: 42, writeStderr: vi.fn() })).toBe(false);
   });

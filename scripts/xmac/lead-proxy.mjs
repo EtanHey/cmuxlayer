@@ -9,7 +9,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { boundedSpawn, checkCliAuth } from "./target-client.mjs";
 import { captureSpawnIdentity } from "./resume-identity.mjs";
 import { unwrap } from "./ctx.mjs";
+import { refuseUnderT3Code } from "../../dist/t3-code-guard.js";
 
+if (refuseUnderT3Code()) process.exit(0);
 const client = new Client({ name: "xmac-private-lead", version: "1.1" });
 const entry = process.env.XMAC_ENTRY, defaults = JSON.parse(process.env.XMAC_DEFAULTS);
 if (!process.env.CMUXLAYER_DAEMON_SOCKET || !process.env.CMUXLAYER_STATE_DIR || !process.env.CMUXLAYER_INBOX_BASE_DIR) throw new Error("lead private routing missing");
