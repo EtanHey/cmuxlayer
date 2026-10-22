@@ -514,11 +514,13 @@ describe("daemon performance budget", () => {
       const stub = "import os from 'node:os'; import {syncBuiltinESMExports} from 'node:module'; os.loadavg=()=>[999999,0,0]; syncBuiltinESMExports();";
       const run = spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(stub)}`,
         join(repoRoot, "scripts/check-daemon-benchmark.mjs")], {
-        env: { ...process.env, CMUXLAYER_PERF_ARTIFACT_DIR: artifactDir }, encoding: "utf8", timeout: 5_000,
+        env: { ...process.env, CMUXLAYER_PERF_ARTIFACT_DIR: artifactDir,
+          GITHUB_STEP_SUMMARY: join(artifactDir, "summary.md") }, encoding: "utf8", timeout: 5_000,
       });
       expect(run.status).toBe(2);
       expect(run.stdout).toContain("SKIPPED: load 999999.00");
       expect(readFileSync(join(artifactDir, "comment.md"), "utf8")).toContain("budget: SKIPPED");
+      expect(readFileSync(join(artifactDir, "summary.md"), "utf8")).toContain("SKIPPED: load 999999.00");
     } finally { rmSync(artifactDir, { recursive: true, force: true }); }
   });
 
