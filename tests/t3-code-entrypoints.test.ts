@@ -12,7 +12,7 @@ const entrypoints = [
   "scripts/xmac/lead-proxy.mjs",
 ];
 
-function checkEntrypoint(entry: string, ancestry: "t3" | "allowed" | "real") {
+function checkEntrypoint(entry: string, ancestry: "t3" | "allowed" | "real", deferStderr = false) {
   const home = mkdtempSync(join(tmpdir(), "t3-refusal-"));
   try {
     const env: NodeJS.ProcessEnv = { ...process.env, HOME: home,
@@ -24,6 +24,7 @@ function checkEntrypoint(entry: string, ancestry: "t3" | "allowed" | "real") {
     delete env.T3CODE_CLI_PATH;
     const loader = new URL("./fixtures/t3-code-startup-loader.mjs", import.meta.url);
     loader.searchParams.set("ancestry", ancestry);
+    if (deferStderr) loader.searchParams.set("deferStderr", "1");
     const imports = entry.endsWith(".mjs") ? [] : ["--import", "tsx"];
     const child = spawnSync("node", [...imports, "--import", loader.href, resolve(entry)], {
       env, encoding: "utf8", timeout: 10_000,
@@ -45,6 +46,10 @@ describe.each(["t3", "allowed"] as const)("injected %s ancestry", (ancestry) => 
   it.each(entrypoints)("%s reaches the guard before protocol or host work", (entry) => {
     checkEntrypoint(entry, ancestry);
   });
+});
+
+it("delivers the refusal line before immediate exit with deferred stream writes", () => {
+  checkEntrypoint("src/index.ts", "t3", true);
 });
 
 // Extra acceptance coverage on real T3 hosts; deterministic cases above run in CI.

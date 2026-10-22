@@ -4,6 +4,13 @@ import ts from "typescript";
 
 // Loaded explicitly by entrypoint tests; production never imports this file.
 const ancestry = new URL(import.meta.url).searchParams.get("ancestry");
+if (new URL(import.meta.url).searchParams.has("deferStderr")) {
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (...args) => {
+    setTimeout(() => write(...args), 100);
+    return true;
+  };
+}
 if (!["t3", "allowed", "real"].includes(ancestry)) throw new Error("missing fixture ancestry");
 const guardSource = readFileSync(new URL("../../src/t3-code-guard.ts", import.meta.url), "utf8");
 const realGuard = `data:text/javascript,${encodeURIComponent(ts.transpileModule(guardSource, {

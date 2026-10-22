@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { writeSync } from "node:fs";
 
 export interface ProcessInfo {
   ppid: number;
-  /** Executable path from ps comm, never argv. */
+  /** Command path/name from ps comm (argv[0]), without the argument tail. */
   command: string;
 }
 
@@ -57,7 +58,7 @@ function readProcessTable(): ProcessLookup {
 export function refuseUnderT3Code({
   parentPid = process.ppid,
   lookup,
-  writeStderr = (line: string) => process.stderr.write(line),
+  writeStderr = (line: string) => writeSync(2, line),
 }: {
   parentPid?: number;
   lookup?: ProcessLookup;
