@@ -3086,50 +3086,57 @@ describe("agent lifecycle tool handlers", () => {
     { metadata: "legacy", focus: false, expected: false },
     { metadata: "legacy", focus: true, expected: true },
   ])("spawn_agent resume focus=$focus metadata=$metadata reaches engine without changing public id", async ({ metadata, focus, expected }) => {
-    const agentId = "cmuxlayerCodex-stable-resume";
-    const stateMgr = new StateManager(TEST_DIR);
-    stateMgr.writeState(
-      makeServerAgentRecord({
-        agent_id: agentId,
-        repo: "brainlayer",
-        cli: "codex",
-        state: "done",
-        pid: DEAD_PID,
-        surface_id: "surface:old",
-        cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
-      }),
-    );
-    const exec = makeLifecycleExec();
-    const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
-    if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
-    if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
-    const server = createTrackedServer({ client, stateDir: TEST_DIR,
-      inboxBaseDir: TEST_DIR, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
-    await serverContexts.at(-1)?.lifecycleStartPromise;
-    const spawn = (server as any)._registeredTools["spawn_agent"];
-    const engine = engineForTests(server);
-    const resume = vi.spyOn(engine, "resumeAgent");
-    expect(spawn.inputSchema.shape.focus.parse(focus)).toBe(focus);
-    const result = await spawn.handler({ resume_agent_id: agentId, focus }, {} as any);
-    expect(resume).toHaveBeenCalledWith(agentId, expect.objectContaining({ focus: expected }));
-    expect(exec.mock.calls.some(([, args]) => args.includes("surface.focus") && args.some((arg: string) => arg.includes("surface:new")))).toBe(expected);
-    if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
-    const parsed = parseToolResult(result) as Record<string, unknown>;
+    vi.useFakeTimers();
+    try {
+      const sessionProcessScanner = vi.fn(async () => []);
+      const agentId = "cmuxlayerCodex-stable-resume";
+      const stateMgr = new StateManager(TEST_DIR);
+      stateMgr.writeState(
+        makeServerAgentRecord({
+          agent_id: agentId,
+          repo: "brainlayer",
+          cli: "codex",
+          state: "done",
+          pid: DEAD_PID,
+          surface_id: "surface:old",
+          cli_session_id: "019d9aa5-93c0-7a52-9c47-9be1f7625f3e",
+        }),
+      );
+      const exec = makeLifecycleExec();
+      const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/cmuxlayer-test.sock" } });
+      if (metadata === "surface") client.listSurfaceRuntimeMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
+      if (metadata === "terminal") client.listTerminalMetadata = vi.fn().mockResolvedValue({ terminals: [{ surface_ref: "surface:new", runtime_surface_ready: true, ghostty_surface_ptr: "0x123" }] });
+      const server = createTrackedServer({ client, stateDir: TEST_DIR,
+        inboxBaseDir: TEST_DIR, sessionProcessScanner, disableSpawnPreflight: true, sessionIdentityResolver: () => null });
+      await serverContexts.at(-1)?.lifecycleStartPromise;
+      const spawn = (server as any)._registeredTools["spawn_agent"];
+      const engine = engineForTests(server);
+      const resume = vi.spyOn(engine, "resumeAgent");
+      expect(spawn.inputSchema.shape.focus.parse(focus)).toBe(focus);
+      const pending = spawn.handler({ resume_agent_id: agentId, focus }, {} as any);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await pending;
+      expect(sessionProcessScanner).toHaveBeenCalledWith(FIXTURE_SESSIONS[0]);
+      expect(resume).toHaveBeenCalledWith(agentId, expect.objectContaining({ focus: expected }));
+      expect(exec.mock.calls.some(([, args]) => args.includes("surface.focus") && args.some((arg: string) => arg.includes("surface:new")))).toBe(expected);
+      if (!expected) expect(exec.mock.calls.filter(([, args]) => args.includes("select-workspace"))).toHaveLength(0);
+      const parsed = parseToolResult(result) as Record<string, unknown>;
 
-    if (metadata === "legacy" && focus === false) {
-      expect(parsed.ok).toBe(false);
-      expect(parsed.error).toMatch(/surface_runtime_not_started/);
-      return;
-    }
-    expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
-    expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
-      surface_id: "surface:new", state: "started", delivered: false });
-    expect(parsed.warning).toMatch(/refreshed_not_redelivered.*lost context/);
-    expect(parsed.warning).toContain(`Read and follow ${coordinationContractPath(agentId, { baseDir: TEST_DIR })}`);
-    expect(Object.keys(parsed).sort()).toEqual(
-      ["ok", "agent_id", "surface_id", "state", "delivered", "warning"].sort());
-    expect(JSON.parse(result.content[0].text)).toEqual(parsed);
-    expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
+      if (metadata === "legacy" && focus === false) {
+        expect(parsed.ok).toBe(false);
+        expect(parsed.error).toMatch(/surface_runtime_not_started/);
+        return;
+      }
+      expect(parsed.ok, JSON.stringify(parsed)).toBe(true);
+      expect(parsed).toMatchObject({ ok: true, agent_id: agentId,
+        surface_id: "surface:new", state: "started", delivered: false });
+      expect(parsed.warning).toMatch(/refreshed_not_redelivered.*lost context/);
+      expect(parsed.warning).toContain(`Read and follow ${coordinationContractPath(agentId, { baseDir: TEST_DIR })}`);
+      expect(Object.keys(parsed).sort()).toEqual(
+        ["ok", "agent_id", "surface_id", "state", "delivered", "warning"].sort());
+      expect(JSON.parse(result.content[0].text)).toEqual(parsed);
+      expect(spawn.inputSchema.shape.resume_agent_id).toBeDefined();
+    } finally { vi.useRealTimers(); }
   });
 
   it("P11b/#462: resume re-arms an already-notified report watch", async () => {
@@ -15605,6 +15612,7 @@ describe("auto-focus discipline (focus target before split, restore after render
       (["placement-read", "selected-read", "restore-success", "restore-failure", "restore-ready-read", "restore-before-failure"] as const).flatMap(phase =>
         [false, true].map(change => ({ caller, phase, change })))),
   )("observer focus ratchet $caller $phase changed=$change", async ({ caller, phase, change }) => {
+    const sessionProcessScanner = vi.fn(async () => []);
     const agentId = "cmuxlayerCodex-observer-ratchet";
     if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
       agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
@@ -15647,11 +15655,12 @@ describe("auto-focus discipline (focus target before split, restore after render
     const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
     client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
     const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
-      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      sessionProcessScanner, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
       surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => epoch });
     const args = caller === "resume" ? { resume_agent_id: agentId }
       : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
     const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    if (caller === "resume") expect(sessionProcessScanner).toHaveBeenCalledWith(FIXTURE_SESSIONS[0]);
     if (change) {
       expect(switched, JSON.stringify(result)).toBe(true);
       expect(mutations.filter(row => row.epoch === "ratchet:2"), JSON.stringify(mutations)).toEqual([]);
@@ -15667,6 +15676,7 @@ describe("auto-focus discipline (focus target before split, restore after render
   it.each(
     (["resume", "managed"] as const).flatMap(caller => [false, true].map(failure => ({ caller, failure }))),
   )("observer focus ratchet user movement $caller failure=$failure", async ({ caller, failure }) => {
+    const sessionProcessScanner = vi.fn(async () => []);
     const agentId = "cmuxlayerCodex-observer-user";
     if (caller === "resume") new StateManager(TEST_DIR).writeState(makeServerAgentRecord({
       agent_id: agentId, state: "done", pid: DEAD_PID, surface_id: "surface:old", workspace_id: "workspace:2",
@@ -15686,11 +15696,12 @@ describe("auto-focus discipline (focus target before split, restore after render
     const client = new CmuxClient({ exec, env: { CMUX_SOCKET_PATH: "/tmp/observer-ratchet-witness.sock" } });
     client.listSurfaceRuntimeMetadata = () => client.listTerminalMetadata();
     const server = createTrackedServer({ client, stateDir: TEST_DIR, inboxBaseDir: TEST_DIR,
-      disableSpawnPreflight: true, sessionIdentityResolver: () => null,
+      sessionProcessScanner, disableSpawnPreflight: true, sessionIdentityResolver: () => null,
       surfaceObserverOwnerIdProvider: () => "ratchet-owner", surfaceObserverEpochProvider: () => "ratchet:1" });
     const args = caller === "resume" ? { resume_agent_id: agentId }
       : { type: "agent", workspace: "workspace:2", repo: "cmuxlayer", cli: "codex", effort: "medium", force_new: true };
     const result = parseToolResult(await (server as any)._registeredTools.spawn_agent.handler(args, {}));
+    if (caller === "resume") expect(sessionProcessScanner).toHaveBeenCalledWith(FIXTURE_SESSIONS[0]);
     expect(moved).toBe(true);
     expect(result.ok, JSON.stringify(result)).toBe(!failure);
     if (failure) expect(result.error).toMatch(/fixture launch failed/);

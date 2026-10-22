@@ -18,6 +18,10 @@ import type { CmuxSurface } from "../src/types.js";
 const TEST_DIR = join(tmpdir(), `cmux-reconcile-nonblocking-${process.pid}`);
 const AGENTS = 10;
 const BUDGET_MS = 50;
+// #1114: Node 26/M1 pre-guard control runs held 58.5–63 ms at load ~4.
+// Give local runs 1.5x (75 ms); hosted attribution keeps its 50 ms budget.
+// The 120 ms model and real 150 ms synchronous-wait probes must still fail.
+const loopBudgetMs = (hosted: boolean) => BUDGET_MS * (hosted ? 1 : 1.5);
 const TRIALS = 3;
 
 /**
@@ -252,7 +256,7 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
       needed: TRIALS,
       maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
-      budgetMs: BUDGET_MS,
+      budgetMs: loopBudgetMs(model.hosted ?? false),
       hosted: model.hosted ?? false,
       pause: async (ms) => {
         pauses.push(ms);
@@ -289,6 +293,11 @@ describe("runControlledTrials (#817: a stalled runner is not a held loop)", () =
     expect(result.verdict).toBe("pass");
     expect(result.attempts).toHaveLength(TRIALS);
     expect(result.pauses).toEqual(Array(TRIALS).fill(TRIAL_PAUSE_MS));
+  });
+
+  it("local: accommodates the measured 63 ms machine floor but still rejects 120 ms", async () => {
+    expect((await simulate({ control: always(12), trial: always(63) })).verdict).toBe("pass");
+    expect((await simulate({ control: always(12), trial: always(120) })).verdict).toBe("fail");
   });
 
   it("voids attempts inside a 600 ms burst and judges the clean ones", async () => {
@@ -448,7 +457,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
       needed: TRIALS,
       maxAttempts: MAX_ATTEMPTS,
       pauseMs: TRIAL_PAUSE_MS,
-      budgetMs: BUDGET_MS,
+      budgetMs: loopBudgetMs(hosted),
       hosted,
       pause: async (ms) => {
         const idle = monitorEventLoopDelay({ resolution: 1 });
@@ -514,7 +523,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     });
   };
 
-  it(`a ${AGENTS}-agent sweep never holds the loop for ${BUDGET_MS} ms`, async (ctx) => {
+  it(`a ${AGENTS}-agent sweep stays within its ${loopBudgetMs(HOSTED)} ms loop budget`, async (ctx) => {
     await engine.getRegistry().reconstitute();
     await engine.runSweep(); // warm module and JIT state; measure steady state
     const result = await measure(HOSTED);
@@ -526,7 +535,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     }
     expect(
       result.verdict,
-      `every valid trial exceeded ${BUDGET_MS} ms with a quiet control` +
+      `every valid trial exceeded ${loopBudgetMs(HOSTED)} ms with a quiet control` +
         (HOSTED ? " and the loop held (not run-queue wait) in every trial" : ""),
     ).toBe("pass");
   }, 30_000);
@@ -551,7 +560,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     30_000,
   );
 
-  it("hosted: a block in the first screen read of each trial fails", async () => {
+  it.each([false, true])("a block in the first screen read fails, hosted=%s", async (hosted) => {
     const readScreen = client.readScreen as ReturnType<typeof vi.fn>;
     const cell = new Int32Array(new SharedArrayBuffer(4));
     let armed = false;
@@ -566,7 +575,7 @@ describe("reconciler sweep keeps the event loop responsive (#810)", () => {
     });
     await engine.getRegistry().reconstitute();
     await engine.runSweep();
-    const result = await measure(true, () => { armed = true; });
+    const result = await measure(hosted, () => { armed = true; });
     report(result.attempts);
     expect(blocks).toBe(TRIALS);
     expect(result.verdict).toBe("fail");

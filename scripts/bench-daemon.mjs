@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import { serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
-import { TAIL_ROW_SAMPLE_MULTIPLIER, sampleMarginalRows, readBenchmarkHistory } from "./check-daemon-benchmark.mjs";
+import { TAIL_ROW_SAMPLE_MULTIPLIER, sampleBreachedRows, readBenchmarkHistory, benchmarkLoadSkipReason } from "./check-daemon-benchmark.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distIndex = join(repoRoot, "dist", "index.js");
@@ -1853,6 +1853,8 @@ async function measureParallelStress(
 }
 
 async function main() {
+  const skip = benchmarkLoadSkipReason();
+  if (skip) throw new Error(skip);
   if (!existsSync(distIndex) || !existsSync(distDaemon)) {
     throw new Error(
       "dist/index.js and dist/daemon.js are required; run bun run build first",
@@ -2319,10 +2321,12 @@ async function main() {
       const baseline = JSON.parse(await readFile(process.env.CMUXLAYER_BENCH_MARGINAL_BASELINE, "utf8"));
       const history = await readBenchmarkHistory(process.env.CMUXLAYER_BENCH_HISTORY_PATH,
         baseline.refresh_attestation.content_sha256);
-      result.marginal_resamples = await sampleMarginalRows(baseline, result, {
+      result.marginal_resamples = await sampleBreachedRows(baseline, result, {
         expectedRounds: rounds, history: history.runs,
         historyDegraded: history.degraded, historyDegradedReason: history.reason,
       }, async (operation) => {
+        const skip = benchmarkLoadSkipReason();
+        if (skip) throw new Error(skip);
         if (["list_surfaces", "read_screen"].includes(operation)) {
           return (await measureLatency(daemonClients, "marginal", fakeSocketTrace, operation))[operation];
         }

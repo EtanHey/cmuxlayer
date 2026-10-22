@@ -478,6 +478,7 @@ export function createLifecycleAgentEngine(deps: LifecycleAgentEngineDeps): Agen
           spawnPreflight ??
           (disableSpawnPreflight ? async () => {} : undefined),
         sessionIdentityResolver: context.sessionIdentityResolver,
+        sessionProcessScanner: opts?.sessionProcessScanner,
         selfRegistrationSessionResolver:
           context.selfRegistrationSessionResolver,
         selfRegistrationSessionLookup: context.selfRegistrationSessionLookup,
