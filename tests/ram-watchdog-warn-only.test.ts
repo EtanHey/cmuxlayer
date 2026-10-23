@@ -172,7 +172,7 @@ while IFS= read -r line; do
 done
 `,
   );
-  writeFileSync(join(root, "fixtures/footprint.fixture"), "4242 phys_footprint: 1024 MB (peak 2048 MB)\n");
+  writeFileSync(join(root, "fixtures/rss.fixture"), "4242 1048576\n");
   writeFileSync(join(root, "fixtures/memsize.fixture"), "1048576\n");
 }
 
@@ -239,7 +239,7 @@ run_once`,
         CMUX_RAM_SAMPLER_NOTIFY_URL: "http://localhost:3847/notify",
         CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE: join(root, "fixtures/memsize.fixture"),
         CMUX_RAM_SAMPLER_VMSTAT_FIXTURE: join(root, "fixtures/vmstat.fixture"),
-        CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE: join(root, "fixtures/footprint.fixture"),
+        CMUX_RAM_SAMPLER_PS_FIXTURE: join(root, "fixtures/rss.fixture"),
       },
     );
 
@@ -279,7 +279,7 @@ run_once`,
         CMUX_RAM_SAMPLER_NOTIFY_URL: "http://localhost:3847/notify",
         CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE: join(root, "fixtures/memsize.fixture"),
         CMUX_RAM_SAMPLER_VMSTAT_FIXTURE: join(root, "fixtures/vmstat.fixture"),
-        CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE: join(root, "fixtures/footprint.fixture"),
+        CMUX_RAM_SAMPLER_PS_FIXTURE: join(root, "fixtures/rss.fixture"),
       },
     );
 
