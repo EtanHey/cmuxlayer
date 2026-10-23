@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
@@ -113,4 +113,17 @@ it('retains the independent compressor signal while marking unknown RSS explicit
   const result = fixture(watchdogPaths[1]!, 'run_once', 'bad', '0', '0', '1', '3145729');
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout).toBe('decision:101 unknown 12884905984 compressor\n');
+});
+
+it('prohibits task-port commands throughout the shipped resource guard and sampler inventory', () => {
+  const paths = [
+    ...readdirSync(join(root, 'launchd/resource-guard')).filter(name => /\.(sh|c)$/.test(name))
+      .map(name => `launchd/resource-guard/${name}`),
+    ...watchdogPaths, 'launchd/cmux-ram-sampler/bin/cmux-ram-sampler.sh',
+    'scripts/install-mcp-reaper.sh', 'src/mcp-reaper.ts', 'src/resource-guard.ts',
+  ];
+  const command = /(?:^|[|;(]|\b(?:exec|command|timeout|gtimeout))\s*(?:\/(?:usr\/)?(?:bin|sbin)\/)?(?:vmmap|footprint|sample|leaks|heap|lldb|gdb|debugserver|dtrace)\b|\b(?:task_for_pid|task_read_for_pid|task_inspect_for_pid|mach_vm_read|mach_vm_region|task_info)\b/;
+  const findings = [...new Set(paths)].flatMap(path => readFileSync(join(root, path), 'utf8').split('\n')
+    .flatMap((line, i) => !/^\s*#/.test(line) && command.test(line) ? [`${path}:${i + 1}: ${line.trim()}`] : []));
+  expect(findings).toEqual([]);
 });

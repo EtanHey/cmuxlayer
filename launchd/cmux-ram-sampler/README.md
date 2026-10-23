@@ -1,8 +1,8 @@
 # cmux RAM Sampler
 
-Samples the stable and nightly cmux app processes with `phys_footprint`, the same
-per-process memory metric Activity Monitor reports. This catches compressed and
-swapped resident memory that `ps -o rss=` does not include.
+Samples the stable and nightly cmux app processes with `ps -o rss=` without
+requesting a task port. RSS excludes compressed/swapped memory accounted by
+physical footprint; the independent swap, compressor and free-RAM signals remain.
 
 ## What it records
 
@@ -22,8 +22,10 @@ Each row includes:
 - timestamp
 - instance name
 - pid
-- `phys_footprint_mb`
-- `phys_footprint_peak_mb`
+- `measurement_basis: "ps_rss"`, `memory_unit: "KiB"`
+- `rss_kib`: validated integer KiB; `rss_mb`: KiB / 1024 (MiB)
+- `rss_window_peak_mb`: maximum observed RSS in the trailing regression window
+  for that instance/PID/basis, including the current reading; not a lifetime peak
 - swap used/free from `sysctl vm.swapusage`
 - compressor pages from `vm_stat`
 - free RAM percent from `vm_stat` and `hw.memsize`
@@ -33,7 +35,7 @@ Each row includes:
 The sampler records routine-high memory pressure but does not notify for it.
 Defaults:
 
-- danger footprint: `20` GB
+- danger RSS: `20` GiB (same numeric threshold as the former footprint setting)
 - danger swap free: `2` GB
 - danger free RAM: `12` percent
 - near-crash free RAM: `4` percent
@@ -55,14 +57,20 @@ offender list. The sampler never kills processes.
 ## Prediction
 
 The sampler reads only the trailing window from the JSONL log, estimates the
-per-instance leak rate in MB/min, and projects ETA to the danger threshold.
-Prediction is logged only; it does not notify.
+per-instance/PID RSS growth in MiB/min, and projects ETA to the danger threshold.
+Only rows explicitly carrying the RSS basis/unit and valid integer KiB participate.
+Historical footprint rows/peaks remain unchanged and never enter RSS predictions
+or peaks. Failed, empty, malformed, multiline or oversized RSS is recorded as
+`null` in RSS fields and skips prediction; independent near-crash signals still
+route alerts. Prediction is logged only; it does not notify. New routed alerts
+carry the same RSS basis/unit and nullable RSS values. No history migration runs.
 
 ## Environment knobs
 
 - `CMUX_RAM_SAMPLER_LOG_DIR`
 - `CMUX_RAM_SAMPLER_SAMPLE_FILE`
-- `CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB`
+- `CMUX_RAM_SAMPLER_DANGER_RSS_GB` (takes precedence)
+- `CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB` (legacy numeric alias, now RSS)
 - `CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB`
 - `CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT`
 - `CMUX_RAM_SAMPLER_NEARCRASH_FREE_RAM_PCT`

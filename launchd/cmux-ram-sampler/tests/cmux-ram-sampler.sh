@@ -182,7 +182,16 @@ EOF
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
   source_sampler
 
-  eta="$(predict_eta_minutes "$log_dir/samples.jsonl" stable 2500 12)"
+  assert_eq "" "$(predict_eta_minutes "$log_dir/samples.jsonl" stable 2500 12 4242 || true)"
+  local legacy
+  legacy="$(cat "$log_dir/samples.jsonl")"
+  for entry in '10:00 1024000' '10:05 1280000' '10:10 1536000'; do
+    set -- $entry
+    printf '{"ts":"2026-06-09T%s:00+0000","instance":"stable","pid":4242,"measurement_basis":"ps_rss","memory_unit":"KiB","rss_kib":%s}\n' "$1" "$2" >>"$log_dir/samples.jsonl"
+  done
+  eta="$(predict_eta_minutes "$log_dir/samples.jsonl" stable 2500 12 4242)"
+  assert_eq "$legacy" "$(head -n 3 "$log_dir/samples.jsonl")"
+  assert_eq "" "$(predict_eta_minutes "$log_dir/samples.jsonl" stable 2500 12 5151 || true)"
   assert_eq "20" "$eta"
 
   unset CMUX_RAM_SAMPLER_SAMPLE_FILE
@@ -197,9 +206,9 @@ run_sampling_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 9.5 GB (peak 25 GB)
-5151 phys_footprint: 2048 MB (peak 4096 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 9961472
+5151 2097152
 EOF
   cat >"$root_dir/fixtures/swap.fixture" <<'EOF'
 vm.swapusage: total = 8192.00M  used = 6144.00M  free = 2048.00M  (encrypted)
@@ -212,7 +221,7 @@ EOF
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
   export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_SWAP_FIXTURE="$root_dir/fixtures/swap.fixture"
   export CMUX_RAM_SAMPLER_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
   export PATH="$root_dir/bin:$PATH"
@@ -224,8 +233,8 @@ EOF
   line_count="$(wc -l <"$sample_file" | tr -d ' ')"
   assert_eq "2" "$line_count"
   assert_file_contains "$sample_file" '"instance":"stable"'
-  assert_file_contains "$sample_file" '"phys_footprint_mb":9728'
-  assert_file_contains "$sample_file" '"phys_footprint_peak_mb":25600'
+  assert_file_contains "$sample_file" '"rss_mb":9728'
+  assert_file_contains "$sample_file" '"rss_window_peak_mb":9728'
   assert_file_contains "$sample_file" '"instance":"nightly"'
   assert_file_contains "$sample_file" '"swap_free_mb":2048'
   assert_file_contains "$sample_file" '"compressor_mb":1024'
@@ -241,9 +250,9 @@ run_ps_fallback_sampling_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_ps_fallback_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
-5151 phys_footprint: 2048 MB (peak 4096 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
+5151 2097152
 EOF
   cat >"$root_dir/fixtures/swap.fixture" <<'EOF'
 vm.swapusage: total = 8192.00M  used = 6144.00M  free = 1024.00M  (encrypted)
@@ -256,7 +265,7 @@ EOF
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
   export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_SWAP_FIXTURE="$root_dir/fixtures/swap.fixture"
   export CMUX_RAM_SAMPLER_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
   export PATH="$root_dir/bin:$PATH"
@@ -303,9 +312,9 @@ run_routine_high_records_without_alert_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
-5151 phys_footprint: 2048 MB (peak 4096 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
+5151 2097152
 EOF
   cat >"$root_dir/fixtures/swap.fixture" <<'EOF'
 vm.swapusage: total = 8192.00M  used = 1024.00M  free = 4096.00M  (encrypted)
@@ -317,7 +326,7 @@ EOF
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
   export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_SWAP_FIXTURE="$root_dir/fixtures/swap.fixture"
   export CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE="$root_dir/fixtures/memsize.fixture"
   export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
@@ -379,8 +388,8 @@ EOF
 
   install_kill_traps "$log_dir/kill.log"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
 EOF
 
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
@@ -388,7 +397,7 @@ EOF
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$sample_file"
   export CMUX_RAM_SAMPLER_BREACH_STATE_DIR="$log_dir/test-breach-state"
   export CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE="$alert_file"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
   export PATH="$root_dir/bin:$PATH"
 
@@ -398,6 +407,8 @@ EOF
 
   assert_eq "1" "$(alert_file_count "$alert_file")"
   assert_file_contains "$alert_file" '"type":"near_crash"'
+  assert_file_contains "$alert_file" '"measurement_basis":"ps_rss"'
+  assert_file_contains "$alert_file" '"rss_mb":1024'
   assert_file_contains "$alert_file" '"priority":"critical"'
   assert_file_contains "$alert_file" '"route":"orchestrator/cmux-LEAD"'
   assert_file_contains "$alert_file" '"offenders"'
@@ -428,8 +439,8 @@ EOF
 
   install_kill_traps "$log_dir/kill.log"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
 EOF
 
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
@@ -437,7 +448,7 @@ EOF
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
   export CMUX_RAM_SAMPLER_BREACH_STATE_DIR="$log_dir/test-breach-state"
   export CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE="$alert_file"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
   export PATH="$root_dir/bin:$PATH"
 
@@ -475,8 +486,8 @@ run_never_nearcrash_alert_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
 EOF
 
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
@@ -484,7 +495,7 @@ EOF
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
   export CMUX_RAM_SAMPLER_BREACH_STATE_DIR="$log_dir/test-breach-state"
   export CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE="$log_dir/routed-alerts.jsonl"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_NOTIFY_URL="http://localhost:3847/notify"
   export PATH="$root_dir/bin:$PATH"
 
@@ -632,9 +643,9 @@ run_free_ram_unknown_on_parse_failure_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 1024 MB (peak 2048 MB)
-5151 phys_footprint: 2048 MB (peak 4096 MB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 1048576
+5151 2097152
 EOF
   cat >"$root_dir/fixtures/swap.fixture" <<'EOF'
 vm.swapusage: total = 8192.00M  used = 1024.00M  free = 4096.00M  (encrypted)
@@ -652,7 +663,7 @@ EOF
   export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
   export CMUX_RAM_SAMPLER_LOG_DIR="$log_dir"
   export CMUX_RAM_SAMPLER_SAMPLE_FILE="$log_dir/samples.jsonl"
-  export CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_RAM_SAMPLER_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_RAM_SAMPLER_SWAP_FIXTURE="$root_dir/fixtures/swap.fixture"
   export CMUX_RAM_SAMPLER_MEMSIZE_FIXTURE="$root_dir/fixtures/memsize.fixture"
   export CMUX_RAM_SAMPLER_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
@@ -827,6 +838,70 @@ run_installer_plist_lint_case() {
   rm -rf "$root_dir"
 }
 
+run_rss_contract_case() (
+  local root_dir value result legacy
+  root_dir="$(mktemp -d)"
+  export CMUX_RAM_SAMPLER_SOURCE_ONLY=1
+  export CMUX_RAM_SAMPLER_LOG_DIR="$root_dir"
+  export CMUX_RAM_SAMPLER_SAMPLE_FILE="$root_dir/samples.jsonl"
+  unset CMUX_RAM_SAMPLER_PS_FIXTURE
+  source_sampler
+  ps() { printf '%s' "$TEST_RSS"; return "${TEST_PS_STATUS:-0}"; }
+  for value in '0' '1' $'  001024\t\n' '1048576'; do
+    TEST_RSS="$value"
+    result="$(rss_kib_for_pid 4242)"
+    assert_eq "$(printf '%s' "$value" | awk 'NF {printf "%.0f",$1}')" "$result"
+  done
+  for value in '' ' ' '-1' '1.5' '1G' '1 2' $'1\n2' $'1\n\n' 'RSS' '8796093022208' '999999999999999999999999' "$(printf '%065d' 0)"; do
+    TEST_RSS="$value"
+    if rss_kib_for_pid 4242; then fail "accepted malformed RSS"; fi
+  done
+  TEST_RSS=1024 TEST_PS_STATUS=1
+  if rss_kib_for_pid 4242; then fail "accepted failed ps"; fi
+  unset TEST_PS_STATUS
+  pid_for_path() { echo 4242; }
+  memsize_bytes() { echo 1048576; }
+  top_rss_offenders_json() { echo '[]'; }
+  printf '%s\n' '{"instance":"stable","pid":4242,"phys_footprint_mb":900000,"phys_footprint_peak_mb":999999}' >"$CMUX_RAM_SAMPLER_SAMPLE_FILE"
+  printf '%s\n' '{"instance":"stable","pid":4242,"measurement_basis":"physical_footprint","memory_unit":"KiB","rss_kib":999999999}' '{"instance":"stable","pid":4242,"measurement_basis":"ps_rss","memory_unit":"bytes","rss_kib":999999999}' '{"instance":"stable","pid":5151,"measurement_basis":"ps_rss","memory_unit":"KiB","rss_kib":999999999}' >>"$CMUX_RAM_SAMPLER_SAMPLE_FILE"
+  legacy="$(cat "$CMUX_RAM_SAMPLER_SAMPLE_FILE")"
+  TEST_RSS=1537
+  sample_instance stable ignored '2026-06-09T10:00:00+0000' 0 4096 0 50 20480
+  TEST_RSS=1024
+  sample_instance stable ignored '2026-06-09T10:05:00+0000' 0 4096 0 50 20480
+  assert_eq "1.5009765625" "$(tail -n 1 "$CMUX_RAM_SAMPLER_SAMPLE_FILE" | jq -r .rss_window_peak_mb)"
+  assert_eq "1" "$(tail -n 1 "$CMUX_RAM_SAMPLER_SAMPLE_FILE" | jq -r .rss_mb)"
+  assert_eq "$legacy" "$(head -n 4 "$CMUX_RAM_SAMPLER_SAMPLE_FILE")"
+  CMUX_RAM_SAMPLER_WINDOW_SAMPLES=2
+  TEST_RSS=512
+  sample_instance stable ignored '2026-06-09T10:10:00+0000' 0 4096 0 50 20480
+  TEST_RSS=256
+  sample_instance stable ignored '2026-06-09T10:15:00+0000' 0 4096 0 50 20480
+  assert_eq "0.5" "$(tail -n 1 "$CMUX_RAM_SAMPLER_SAMPLE_FILE" | jq -r .rss_window_peak_mb)"
+  TEST_RSS=bad
+  sample_instance stable ignored '2026-06-09T10:20:00+0000' 0 4096 0 4 20480
+  tail -n 1 "$CMUX_RAM_SAMPLER_SAMPLE_FILE" | jq -e '.measurement_basis=="ps_rss" and .memory_unit=="KiB" and .rss_kib==null and .rss_mb==null and .rss_window_peak_mb==null and (has("phys_footprint_mb")|not)' >/dev/null
+  assert_file_contains "$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE" '"rss_kib":null'
+  assert_file_contains "$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE" '"type":"near_crash"'
+  TEST_RSS=1024 TEST_PS_STATUS=1
+  sample_instance stable ignored '2026-06-09T10:21:00+0000' 0 4096 0 4 20480
+  tail -n 1 "$CMUX_RAM_SAMPLER_SAMPLE_FILE" | jq -e '.rss_kib==null and .rss_mb==null and .rss_window_peak_mb==null' >/dev/null
+  assert_eq "1" "$(wc -l <"$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE" | tr -d ' ')"
+  unset TEST_PS_STATUS
+  append_sample '2026-06-09T10:25:00+0000' stable 4242 1537 1537 0 4096 0 50
+  append_sample '2026-06-09T10:30:00+0000' stable 4242 2049 2049 0 4096 0 50
+  assert_eq "5" "$(predict_eta_minutes "$CMUX_RAM_SAMPLER_SAMPLE_FILE" stable 2.5 2 4242)"
+  TEST_RSS=2305
+  sample_instance stable ignored '2026-06-09T10:35:00+0000' 0 4096 0 50 2.5 2>"$root_dir/trend.log"
+  assert_file_contains "$root_dir/trend.log" 'GiB RSS'
+  post_notification() { printf '%s\n' "$*"; }
+  result="$(notify_warning stable 4242 1 unknown 4096 50)"
+  [[ "$result" == *'RSS=1 MiB'* ]] || fail "untruthful RSS notification"
+  printf 'PASS: RSS validates units/errors, isolates legacy peaks, preserves history and independent alerts\n'
+  rm -rf "$root_dir"
+)
+
+run_rss_contract_case
 run_vmstat_page_size_case
 run_routine_high_records_without_alert_case
 run_nearcrash_routed_alert_edge_case

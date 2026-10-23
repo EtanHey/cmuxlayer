@@ -52,9 +52,14 @@ RSS warns and skips action rather than substituting zero or probing task ports.
 Snapshots and notifications identify the measurement as RSS. Resource-guard
 retains its terminate-on-breach behavior; standalone remains warn-only.
 
-The separately dispatched RAM sampler still uses task-port memory inspection;
-its JSON/trend contract migration is a dependent change. These watchdog fixes
-do not establish that the whole guard is free of task-port access.
+The separately dispatched RAM sampler uses validated `ps` RSS in integer KiB,
+with explicit `measurement_basis:"ps_rss"` and `memory_unit:"KiB"` fields. It records
+nullable `rss_kib`, derived `rss_mb` (MiB), and `rss_window_peak_mb`. Trends and
+window peaks use only matching instance/PID/basis/unit rows. Legacy footprint
+rows and peaks stay unchanged. Unavailable RSS skips its trend while independent
+pressure alerts remain active. Source checks do not establish installed behavior
+or no-prompt acceptance. Verify installed bytes, naturally scheduled watchdog and
+sampler ticks, and a separately observed UI interval.
 jq is a Homebrew runtime dependency; socat is optional for the BrainBar sink.
 
 Homebrew compiles the native launcher with absolute installed Node/entry paths,

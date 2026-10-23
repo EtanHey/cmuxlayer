@@ -3,7 +3,8 @@ set -euo pipefail
 
 CMUX_RAM_SAMPLER_LOG_DIR="${CMUX_RAM_SAMPLER_LOG_DIR:-$HOME/Library/Logs/cmux-ram-sampler}"
 CMUX_RAM_SAMPLER_SAMPLE_FILE="${CMUX_RAM_SAMPLER_SAMPLE_FILE:-$CMUX_RAM_SAMPLER_LOG_DIR/samples.jsonl}"
-CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB="${CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB:-20}"
+# Keep the legacy setting as an input alias; its numeric threshold now applies to RSS.
+CMUX_RAM_SAMPLER_DANGER_RSS_GB="${CMUX_RAM_SAMPLER_DANGER_RSS_GB:-${CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB:-20}}"
 CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB="${CMUX_RAM_SAMPLER_DANGER_SWAP_FREE_GB:-2}"
 CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT="${CMUX_RAM_SAMPLER_DANGER_FREE_RAM_PCT:-12}"
 CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS="${CMUX_RAM_SAMPLER_SAMPLE_STALE_SECONDS:-600}"
@@ -101,46 +102,32 @@ pid_for_path() {
     }'
 }
 
-footprint_output_for_pid() {
-  local pid="$1"
-  if [[ -n "${CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE:-}" ]]; then
-    awk -v pid="$pid" '$1 == pid { $1 = ""; sub(/^ /, ""); print }' "$CMUX_RAM_SAMPLER_FOOTPRINT_FIXTURE"
-    return
+rss_kib_for_pid() {
+  local output pattern=$'^[ \t]*([0-9]+)[ \t]*\n?$'
+  # A sentinel preserves trailing newlines so multiple rows cannot collapse to one.
+  if [[ -n "${CMUX_RAM_SAMPLER_PS_FIXTURE:-}" ]]; then
+    output="$(awk -v pid="$1" '$1 == pid { $1=""; sub(/^ /, ""); print }' "$CMUX_RAM_SAMPLER_PS_FIXTURE" && printf x)" || return 1
+  else
+    output="$(ps -o rss= -p "$1" 2>/dev/null && printf x)" || return 1
   fi
-
-  footprint -p "$pid" 2>/dev/null || true
+  output="${output%x}"
+  [[ ${#output} -le 64 && "$output" =~ $pattern ]] || return 1
+  awk -v kib="${BASH_REMATCH[1]}" 'BEGIN {
+    if (kib + 0 > 8796093022207) exit 1
+    printf "%.0f\n", kib
+  }'
 }
 
-parse_footprint_mb() {
-  local output="$1"
-  local value
-  value="$(printf '%s\n' "$output" | awk '
-    /phys_footprint:/ {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "phys_footprint:") {
-          print $(i + 1) $(i + 2)
-          exit
-        }
-      }
-    }')"
-  bytes_to_mb "$(bytes_from_human "$value")"
-}
-
-parse_footprint_peak_mb() {
-  local output="$1"
-  local value
-  value="$(printf '%s\n' "$output" | awk '
-    /phys_footprint:/ {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "(peak") {
-          unit = $(i + 2)
-          gsub(/[)]/, "", unit)
-          print $(i + 1) unit
-          exit
-        }
-      }
-    }')"
-  bytes_to_mb "$(bytes_from_human "$value")"
+# Read only the current basis/PID. Legacy rows and their lifetime peaks stay untouched.
+rss_history() {
+  local file="$1" instance="$2" pid="$3" window="$4"
+  [[ -f "$file" ]] || return 0
+  jq -Rc --arg instance "$instance" --argjson pid "$pid" '
+    fromjson? | select(type=="object") | select(.instance==$instance and .pid==$pid
+      and .measurement_basis=="ps_rss" and .memory_unit=="KiB")
+    | select(.rss_kib | type=="number")
+    | select(.rss_kib>=0 and .rss_kib<=8796093022207 and (.rss_kib|floor)==.rss_kib)
+  ' "$file" | tail -n "$window"
 }
 
 swap_usage_output() {
@@ -297,29 +284,31 @@ json_string_field() {
 predict_eta_minutes() {
   local sample_file="$1"
   local instance="$2"
-  local danger_footprint_mb="$3"
+  local danger_rss_mb="$3"
   local window_samples="$4"
-  local rows line ts footprint_mb first_epoch="" first_mb="" last_epoch="" last_mb="" count=0
+  local pid="$5"
+  local rows line ts rss_mb first_epoch="" first_mb="" last_epoch="" last_mb="" count=0
   local slope eta
 
   [[ -f "$sample_file" ]] || return 1
-  rows="$(grep -F "\"instance\":\"$instance\"" "$sample_file" | tail -n "$window_samples" || true)"
+  rows="$(rss_history "$sample_file" "$instance" "$pid" "$window_samples")"
   [[ -n "$rows" ]] || return 1
 
   while IFS= read -r line; do
     ts="$(json_string_field "$line" ts)"
-    footprint_mb="$(json_number_field "$line" phys_footprint_mb)"
-    [[ -n "$ts" && -n "$footprint_mb" ]] || continue
+    rss_mb="$(printf '%s\n' "$line" | jq -r ' .rss_kib / 1024')"
+    [[ -n "$ts" && -n "$rss_mb" ]] || continue
     if [[ -z "$first_epoch" ]]; then
       first_epoch="$(timestamp_to_epoch "$ts")"
-      first_mb="$footprint_mb"
+      first_mb="$rss_mb"
     fi
     last_epoch="$(timestamp_to_epoch "$ts")"
-    last_mb="$footprint_mb"
+    last_mb="$rss_mb"
     count=$((count + 1))
   done <<<"$rows"
 
-  if (( count < 2 || last_epoch <= first_epoch || last_mb >= danger_footprint_mb )); then
+  if (( count < 2 || last_epoch <= first_epoch )) ||
+     awk -v current="$last_mb" -v danger="$danger_rss_mb" 'BEGIN {exit !(current >= danger)}'; then
     return 1
   fi
 
@@ -329,7 +318,7 @@ predict_eta_minutes() {
     return 1
   fi
 
-  eta="$(awk -v current="$last_mb" -v danger="$danger_footprint_mb" -v slope="$slope" \
+  eta="$(awk -v current="$last_mb" -v danger="$danger_rss_mb" -v slope="$slope" \
     'BEGIN { printf "%.0f\n", (danger - current) / slope }')"
   printf '%s\n' "$eta"
 }
@@ -338,8 +327,8 @@ append_sample() {
   local ts="$1"
   local instance="$2"
   local pid="$3"
-  local footprint_mb="$4"
-  local peak_mb="$5"
+  local rss_kib="$4"
+  local peak_kib="$5"
   local swap_used="$6"
   local swap_free="$7"
   local compressor="$8"
@@ -357,13 +346,13 @@ append_sample() {
     --arg ts "$ts" \
     --arg instance "$instance" \
     --argjson pid "$pid" \
-    --argjson footprint "$footprint_mb" \
-    --argjson peak "$peak_mb" \
+    --argjson rss "$rss_kib" \
+    --argjson peak "$peak_kib" \
     --argjson swap_used "$swap_used" \
     --argjson swap_free "$swap_free" \
     --argjson compressor "$compressor" \
     --argjson free_ram_pct "$free_ram_pct_json" \
-    '{ts:$ts,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,phys_footprint_peak_mb:$peak,swap_used_mb:$swap_used,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct}' \
+    '{ts:$ts,instance:$instance,pid:$pid,measurement_basis:"ps_rss",memory_unit:"KiB",rss_kib:$rss,rss_mb:($rss|if .==null then null else ./1024 end),rss_window_peak_mb:($peak|if .==null then null else ./1024 end),swap_used_mb:$swap_used,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct}' \
     >>"$CMUX_RAM_SAMPLER_SAMPLE_FILE"
 }
 
@@ -433,14 +422,14 @@ post_notification() {
 notify_warning() {
   local instance="$1"
   local pid="$2"
-  local footprint_mb="$3"
+  local rss_mb="$3"
   local eta_minutes="$4"
   local swap_free="$5"
   local free_ram_pct_value="${6:-unknown}"
 
   post_notification \
     "cmux RAM sampler" \
-    "$instance pid $pid phys_footprint=${footprint_mb} MB; projected danger ETA=${eta_minutes} min; swap_free=${swap_free} MB; free_ram_pct=${free_ram_pct_value}"
+    "$instance pid $pid RSS=${rss_mb} MiB; projected danger ETA=${eta_minutes} min; swap_free=${swap_free} MB; free_ram_pct=${free_ram_pct_value}"
 }
 
 nearcrash_state_file() {
@@ -521,7 +510,7 @@ top_rss_offenders_json() {
 emit_nearcrash_alert() {
   local instance="$1"
   local pid="$2"
-  local footprint_mb="$3"
+  local rss_kib="$3"
   local swap_free="$4"
   local compressor="$5"
   local free_ram_pct_value="$6"
@@ -546,19 +535,19 @@ emit_nearcrash_alert() {
     --arg instance "$instance" \
     --arg reason "$reason" \
     --argjson pid "$pid" \
-    --argjson footprint "$footprint_mb" \
+    --argjson rss "$rss_kib" \
     --argjson swap_free "$swap_free" \
     --argjson compressor "$compressor" \
     --argjson free_ram_pct "$free_ram_pct_json" \
     --argjson offenders "$offenders_json" \
-    '{type:$type,priority:$priority,route:$route,instance:$instance,pid:$pid,phys_footprint_mb:$footprint,swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct,reason:$reason,offenders:$offenders}' \
+    '{type:$type,priority:$priority,route:$route,instance:$instance,pid:$pid,measurement_basis:"ps_rss",memory_unit:"KiB",rss_kib:$rss,rss_mb:($rss|if .==null then null else ./1024 end),swap_free_mb:$swap_free,compressor_mb:$compressor,free_ram_pct:$free_ram_pct,reason:$reason,offenders:$offenders}' \
     >>"$CMUX_RAM_SAMPLER_ROUTED_ALERT_FILE"
 }
 
 route_on_nearcrash_transition() {
   local instance="$1"
   local pid="$2"
-  local footprint_mb="$3"
+  local rss_kib="$3"
   local swap_free="$4"
   local compressor="$5"
   local free_ram_pct_value="$6"
@@ -569,7 +558,7 @@ route_on_nearcrash_transition() {
   write_nearcrash_state "$instance" nearcrash
   log "$instance pid $pid sampled with $reason"
   if [[ "$previous_state" != "nearcrash" ]]; then
-    emit_nearcrash_alert "$instance" "$pid" "$footprint_mb" "$swap_free" "$compressor" "$free_ram_pct_value" "$reason"
+    emit_nearcrash_alert "$instance" "$pid" "$rss_kib" "$swap_free" "$compressor" "$free_ram_pct_value" "$reason"
   fi
 }
 
@@ -616,8 +605,8 @@ sample_instance() {
   local swap_free="$5"
   local compressor="$6"
   local free_ram_pct_value="$7"
-  local danger_footprint_mb="$8"
-  local pid output footprint_mb peak_mb eta_minutes="" nearcrash=""
+  local danger_rss_mb="$8"
+  local pid rss_kib peak_kib=null eta_minutes="" nearcrash=""
 
   pid="$(pid_for_path "$app_path")"
   if [[ -z "$pid" ]]; then
@@ -625,25 +614,31 @@ sample_instance() {
     return 0
   fi
 
-  output="$(footprint_output_for_pid "$pid")"
-  footprint_mb="$(parse_footprint_mb "$output")"
-  peak_mb="$(parse_footprint_peak_mb "$output")"
-  append_sample "$ts" "$instance" "$pid" "$footprint_mb" "$peak_mb" "$swap_used" "$swap_free" "$compressor" "$free_ram_pct_value"
+  if rss_kib="$(rss_kib_for_pid "$pid")"; then
+    peak_kib="$(rss_history "$CMUX_RAM_SAMPLER_SAMPLE_FILE" "$instance" "$pid" "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" | jq -s --argjson current "$rss_kib" --argjson window "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" '
+      ([.[].rss_kib] + [$current])[-$window:] | max')"
+  else
+    rss_kib=null
+    log "$instance pid $pid RSS unavailable; skipping RSS trend"
+  fi
+  append_sample "$ts" "$instance" "$pid" "$rss_kib" "$peak_kib" "$swap_used" "$swap_free" "$compressor" "$free_ram_pct_value"
 
-  eta_minutes="$(predict_eta_minutes "$CMUX_RAM_SAMPLER_SAMPLE_FILE" "$instance" "$danger_footprint_mb" "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" || true)"
+  if [[ "$rss_kib" != null ]]; then
+    eta_minutes="$(predict_eta_minutes "$CMUX_RAM_SAMPLER_SAMPLE_FILE" "$instance" "$danger_rss_mb" "$CMUX_RAM_SAMPLER_WINDOW_SAMPLES" "$pid" || true)"
+  fi
   if nearcrash="$(nearcrash_reason "$free_ram_pct_value" "$compressor")"; then
-    route_on_nearcrash_transition "$instance" "$pid" "$footprint_mb" "$swap_free" "$compressor" "$free_ram_pct_value" "$nearcrash"
+    route_on_nearcrash_transition "$instance" "$pid" "$rss_kib" "$swap_free" "$compressor" "$free_ram_pct_value" "$nearcrash"
   else
     write_nearcrash_state "$instance" clear
   fi
 
   if [[ -z "$nearcrash" && -n "$eta_minutes" && "$eta_minutes" -lt "$CMUX_RAM_SAMPLER_WARNING_LEAD_MINUTES" ]]; then
-    log "$instance pid $pid projected to reach $CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB GB phys_footprint in ${eta_minutes}m"
+    log "$instance pid $pid projected to reach $CMUX_RAM_SAMPLER_DANGER_RSS_GB GiB RSS in ${eta_minutes}m"
   fi
 }
 
 run_once() {
-  local ts swap_used swap_free compressor free_ram_pct_value danger_footprint_mb
+  local ts swap_used swap_free compressor free_ram_pct_value danger_rss_mb
   ts="$(date '+%Y-%m-%dT%H:%M:%S%z')"
   check_sample_freshness
   swap_used="$(swap_used_mb)"
@@ -653,10 +648,10 @@ run_once() {
   if [[ ! "$free_ram_pct_value" =~ ^[0-9]+$ ]]; then
     log "free_ram_pct unavailable; skipping free-RAM trigger"
   fi
-  danger_footprint_mb="$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_FOOTPRINT_GB")"
+  danger_rss_mb="$(gb_to_mb "$CMUX_RAM_SAMPLER_DANGER_RSS_GB")"
 
-  sample_instance stable "$CMUX_RAM_SAMPLER_STABLE_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_footprint_mb"
-  sample_instance nightly "$CMUX_RAM_SAMPLER_NIGHTLY_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_footprint_mb"
+  sample_instance stable "$CMUX_RAM_SAMPLER_STABLE_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_rss_mb"
+  sample_instance nightly "$CMUX_RAM_SAMPLER_NIGHTLY_PATH" "$ts" "${swap_used:-0}" "${swap_free:-0}" "$compressor" "$free_ram_pct_value" "$danger_rss_mb"
 }
 
 if [[ "${CMUX_RAM_SAMPLER_SOURCE_ONLY:-0}" != "1" ]]; then
