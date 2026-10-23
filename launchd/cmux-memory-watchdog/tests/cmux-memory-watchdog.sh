@@ -193,7 +193,7 @@ run_case() {
   local name="$1"
   local expect_breach="$2"
   local expected_signals="$3"
-  local footprint_fixture="$4"
+  local rss_fixture="$4"
   local vmstat_fixture="$5"
   local pgrep_cmux="$6"
   local pgrep_pids="$7"
@@ -211,7 +211,7 @@ run_case() {
     /bin/sleep 0.1
   done
 
-  printf '%s' "$footprint_fixture" >"$root_dir/fixtures/footprint.fixture"
+  printf '%s' "$rss_fixture" >"$root_dir/fixtures/rss.fixture"
   printf '%s' "$vmstat_fixture" >"$root_dir/fixtures/vmstat.fixture"
 
   export CMUX_MEM_WATCHDOG_SOURCE_ONLY=1
@@ -220,7 +220,7 @@ run_case() {
   export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
   export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
   export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
-  export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_MEM_WATCHDOG_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
   export CMUX_MEM_WATCHDOG_PGREP_CMUX="$pgrep_cmux"
   export CMUX_MEM_WATCHDOG_PGREP_CMUXPIDS="$pgrep_pids"
@@ -260,35 +260,35 @@ run_case() {
 
 run_case "no breach when both below threshold" \
   0 "" \
-  $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
+  $'4242 1048576\n5001 524288\n' \
   $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 1048576.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
-run_case "breach when footprint above threshold" \
-  1 "footprint" \
-  $'4242 phys_footprint: 9.5 GB (peak 25 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
+run_case "breach when RSS above threshold" \
+  1 "rss" \
+  $'4242 9961472\n5001 524288\n' \
   $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 1048576.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "breach when compressor above threshold" \
   1 "compressor" \
-  $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 512 MB (peak 1 GB)\n' \
+  $'4242 1048576\n5001 524288\n' \
   $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 3145729.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "breach when both above threshold" \
-  1 "footprint,compressor" \
-  $'4242 phys_footprint: 3 GB (peak 4 GB)\n5001 phys_footprint: 3 GB (peak 4 GB)\n' \
+  1 "rss,compressor" \
+  $'4242 3145728\n5001 3145728\n' \
   $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 4194305.\n' \
   $'4242\n5001\n' \
   $'4242\n5001\n'
 
 run_case "no cmux pid exits cleanly" \
   0 "" \
-  $'4242 phys_footprint: 1024 MB (peak 2 GB)\n5001 phys_footprint: 1024 MB (peak 2 GB)\n' \
+  $'4242 1048576\n5001 1048576\n' \
   $'Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 4194305.\n' \
   "" \
   ""
@@ -661,8 +661,8 @@ run_ps_fallback_case() {
     /bin/sleep 0.1
   done
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 6 GB (peak 8 GB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 6291456
 EOF
   cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
 Mach Virtual Memory Statistics: (page size of 4096 bytes)
@@ -675,7 +675,7 @@ EOF
   export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
   export CMUX_MEM_WATCHDOG_BRAINBAR_SOCK="$brainbar_sock"
   export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
-  export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_MEM_WATCHDOG_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
   export PATH="$root_dir/bin:$PATH"
 
@@ -686,7 +686,7 @@ EOF
   assert_file_missing_or_empty "$log_dir/kill.log"
   assert_file_contains "$log_dir/socat.log" "UNIX-CONNECT:$brainbar_sock"
   snapshot="$(find "$log_dir" -type f -name '20*.log' -print -quit)"
-  assert_file_contains "$snapshot" "breached_signals=footprint"
+  assert_file_contains "$snapshot" "breached_signals=rss"
 
   printf 'PASS: watchdog falls back to ps command discovery when pgrep misses GUI apps\n'
   stop_brainbar_socket "$brainbar_pid"
@@ -702,8 +702,8 @@ run_top_rss_offenders_case() {
   mkdir -p "$root_dir/bin" "$root_dir/fixtures" "$log_dir"
   seed_fake_commands "$root_dir" "$log_dir"
 
-  cat >"$root_dir/fixtures/footprint.fixture" <<'EOF'
-4242 phys_footprint: 6 GB (peak 8 GB)
+  cat >"$root_dir/fixtures/rss.fixture" <<'EOF'
+4242 6291456
 EOF
   cat >"$root_dir/fixtures/vmstat.fixture" <<'EOF'
 Mach Virtual Memory Statistics: (page size of 4096 bytes)
@@ -721,7 +721,7 @@ EOF
   export CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB=12
   export CMUX_MEM_WATCHDOG_LOG_DIR="$log_dir"
   export CMUX_MEM_WATCHDOG_KILL_BIN="$root_dir/bin/kill"
-  export CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE="$root_dir/fixtures/footprint.fixture"
+  export CMUX_MEM_WATCHDOG_PS_FIXTURE="$root_dir/fixtures/rss.fixture"
   export CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE="$root_dir/fixtures/vmstat.fixture"
   export CMUX_MEM_WATCHDOG_PS_TOP_FIXTURE="$root_dir/fixtures/top-ps.fixture"
   export CMUX_MEM_WATCHDOG_PGREP_CMUX=$'4242\n'
