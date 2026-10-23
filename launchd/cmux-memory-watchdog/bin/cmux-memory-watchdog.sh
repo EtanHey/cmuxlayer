@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB="${CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB:-${CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB:-${CMUX_MEM_WATCHDOG_THRESHOLD_GB:-5}}}"
+# Keep legacy threshold precedence and numeric defaults; the measurement is RSS.
+CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB="${CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB:-${CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB:-${CMUX_MEM_WATCHDOG_THRESHOLD_GB:-5}}}"
 CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB="${CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB:-12}"
 CMUX_MEM_WATCHDOG_LOG_DIR="${CMUX_MEM_WATCHDOG_LOG_DIR:-$HOME/Library/Logs/cmux-watchdog}"
 CMUX_MEM_WATCHDOG_NOTIFY_URL="${CMUX_MEM_WATCHDOG_NOTIFY_URL:-http://localhost:3847/notify}"
@@ -51,6 +52,7 @@ bytes_from_human() {
 
 bytes_to_gb() {
   local bytes="$1"
+  [[ "$bytes" == "unknown" ]] && { printf 'unknown'; return; }
   awk -v bytes="$bytes" 'BEGIN { printf "%.2f", bytes / (1024 * 1024 * 1024) }'
 }
 
@@ -87,42 +89,25 @@ ps_cmux_pids() {
     }'
 }
 
-parse_phys_footprint_bytes() {
-  local output="$1"
-  local value
-
-  value="$(printf '%s\n' "$output" | awk '
-    /phys_footprint:/ {
-      for (i = 1; i <= NF; i++) {
-        if ($i == "phys_footprint:") {
-          print $(i + 1) $(i + 2)
-          exit
-        }
-      }
-    }')"
-
-  bytes_from_human "$value"
-}
-
-cmux_footprint_bytes_for_pid() {
-  local pid="$1"
-  local output
-
-  if [[ -n "${CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE:-}" ]]; then
-    output="$(awk -v pid="$pid" '$1 == pid { $1 = ""; sub(/^ /, ""); print }' "$CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE")"
-  elif [[ -n "${CMUX_MEM_WATCHDOG_PS_FIXTURE:-}" ]]; then
-    output="$(awk -v pid="$pid" '$1 == pid { print "phys_footprint: " $2 "K" }' "$CMUX_MEM_WATCHDOG_PS_FIXTURE")"
+# RSS is resident memory in KiB, not physical footprint. No task-port fallback.
+rss_bytes_for_pid() {
+  local rss_kb
+  if [[ -n "${CMUX_MEM_WATCHDOG_PS_FIXTURE:-}" ]]; then
+    rss_kb="$(awk -v pid="$1" '$1 == pid { print $2 }' "$CMUX_MEM_WATCHDOG_PS_FIXTURE")" || return 1
   else
-    output="$(footprint -p "$pid" 2>/dev/null || true)"
+    rss_kb="$(ps -o rss= -p "$1" 2>/dev/null)" || return 1
   fi
-
-  parse_phys_footprint_bytes "$output"
+  [[ "$rss_kb" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]] || return 1
+  awk -v kb="${BASH_REMATCH[1]}" 'BEGIN {
+    if (kb + 0 > 8796093022207) exit 1
+    printf "%.0f\n", kb * 1024
+  }'
 }
 
-aggregate_cmux_footprint_bytes() {
+aggregate_cmux_rss_bytes() {
   local total_bytes=0
   local pid
-  local footprint_bytes
+  local rss_bytes
   local pids
 
   # Match BOTH cmux bundles (stable cmux.app + nightly "cmux NIGHTLY.app") so
@@ -131,9 +116,10 @@ aggregate_cmux_footprint_bytes() {
   # transient pgrep command itself on macOS.
   pids="$({ ps_cmux_pids || true; pgrep -x cmux 2>/dev/null || true; } | awk 'NF && !seen[$1]++ { print $1 }')"
   for pid in $pids; do
-    footprint_bytes="$(cmux_footprint_bytes_for_pid "$pid")"
-    if [[ -n "$footprint_bytes" ]]; then
-      total_bytes=$((total_bytes + footprint_bytes))
+    rss_bytes="$(rss_bytes_for_pid "$pid")" || return 1
+    if [[ -n "$rss_bytes" ]]; then
+      (( rss_bytes <= 9223372036854775807 - total_bytes )) || return 1
+      total_bytes=$((total_bytes + rss_bytes))
     fi
   done
 
@@ -206,24 +192,24 @@ snapshot_path() {
 
 capture_process_snapshot() {
   local pid="$1"
-  local cmux_footprint_bytes="$2"
+  local cmux_rss_bytes="$2"
   local vmstat_compressor_bytes_value="$3"
   local tripped="$4"
   local path="$5"
-  local cmux_footprint_gb
+  local cmux_rss_gb
   local compressor_gb
 
-  cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
+  cmux_rss_gb="$(bytes_to_gb "$cmux_rss_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
 
   mkdir -p "$CMUX_MEM_WATCHDOG_LOG_DIR"
   {
     printf 'timestamp=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'pid=%s\n' "$pid"
-    printf 'footprint_threshold_gb=%s\n' "$CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB"
+    printf 'rss_threshold_gb=%s\n' "$CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB"
     printf 'compressor_threshold_gb=%s\n' "$CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB"
-    printf 'cmux_footprint_bytes=%s\n' "$cmux_footprint_bytes"
-    printf 'cmux_footprint_gb=%s\n' "$cmux_footprint_gb"
+    printf 'cmux_rss_bytes=%s\n' "$cmux_rss_bytes"
+    printf 'cmux_rss_gb=%s\n' "$cmux_rss_gb"
     printf 'vmstat_compressor_bytes=%s\n' "$vmstat_compressor_bytes_value"
     printf 'vmstat_compressor_gb=%s\n' "$compressor_gb"
     printf 'breached_signals=%s\n' "$tripped"
@@ -238,21 +224,21 @@ capture_process_snapshot() {
 
 brain_store_breach() {
   local pid="$1"
-  local cmux_footprint_bytes="$2"
+  local cmux_rss_bytes="$2"
   local vmstat_compressor_bytes_value="$3"
   local snapshot="$4"
   local processes="$5"
   local tripped="$6"
-  local cmux_footprint_gb
+  local cmux_rss_gb
   local compressor_gb
   local content
   local payload
   local send_error
   local send_status
 
-  cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
+  cmux_rss_gb="$(bytes_to_gb "$cmux_rss_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
-  content="cmux watchdog threshold breach. WHAT: cmux pid $pid crossed signal(s): $tripped. WHY: dual-memory checks found $cmux_footprint_gb GB phys_footprint and $compressor_gb GB compressed memory. Details: cmux_footprint_gb=$cmux_footprint_gb footprint_threshold_gb=$CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB vm_compressor_gb=$compressor_gb compressor_threshold_gb=$CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB snapshot=$snapshot processes=$processes"
+  content="cmux watchdog threshold breach. WHAT: cmux pid $pid crossed signal(s): $tripped. WHY: dual-memory checks found $cmux_rss_gb GB RSS and $compressor_gb GB compressed memory. Details: cmux_rss_gb=$cmux_rss_gb rss_threshold_gb=$CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB vm_compressor_gb=$compressor_gb compressor_threshold_gb=$CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB snapshot=$snapshot processes=$processes"
 
   if [[ ! -S "$CMUX_MEM_WATCHDOG_BRAINBAR_SOCK" ]]; then
     log "brainbar socket missing at $CMUX_MEM_WATCHDOG_BRAINBAR_SOCK"
@@ -310,16 +296,16 @@ notify_listener_available() {
 notify_breach() {
   local pid="$1"
   local tripped="$2"
-  local cmux_footprint_bytes="$3"
+  local cmux_rss_bytes="$3"
   local vmstat_compressor_bytes_value="$4"
   local snapshot="$5"
-  local cmux_footprint_gb
+  local cmux_rss_gb
   local compressor_gb
   local payload
   local post_error
   local post_status
 
-  cmux_footprint_gb="$(bytes_to_gb "$cmux_footprint_bytes")"
+  cmux_rss_gb="$(bytes_to_gb "$cmux_rss_bytes")"
   compressor_gb="$(bytes_to_gb "$vmstat_compressor_bytes_value")"
 
   local host port
@@ -335,7 +321,7 @@ notify_breach() {
 
   if ! payload="$(jq -cn \
     --arg title "cmux watchdog" \
-    --arg body "cmux hit $cmux_footprint_gb GB phys_footprint / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Warning only; cmux was not terminated." \
+    --arg body "cmux hit $cmux_rss_gb GB RSS / $compressor_gb GB compressed memory, tripped $tripped. Snapshot: $snapshot. Warning only; cmux was not terminated." \
     --arg source "$CMUX_MEM_WATCHDOG_SOURCE" \
     --arg priority "$CMUX_MEM_WATCHDOG_PRIORITY" \
     '{title:$title,body:$body,source:$source,priority:$priority}')"; then
@@ -360,27 +346,27 @@ notify_breach() {
 
 handle_breach() {
   local pid="$1"
-  local cmux_footprint_bytes="$2"
+  local cmux_rss_bytes="$2"
   local vmstat_compressor_bytes_value="$3"
   local tripped="$4"
   local snapshot
   local processes
 
-  log "cmux process $pid breached memory thresholds: $tripped (footprint_bytes=$cmux_footprint_bytes, vmstat_compressor_bytes=$vmstat_compressor_bytes_value)"
+  log "cmux process $pid breached memory thresholds: $tripped (rss_bytes=$cmux_rss_bytes, vmstat_compressor_bytes=$vmstat_compressor_bytes_value)"
 
   snapshot="$(snapshot_path)"
-  capture_process_snapshot "$pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$tripped" "$snapshot"
+  capture_process_snapshot "$pid" "$cmux_rss_bytes" "$vmstat_compressor_bytes_value" "$tripped" "$snapshot"
   processes="$(top_rss_offenders | tr '\n' ';' | sed 's/;$/\n/' || true)"
-  brain_store_breach "$pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot" "$processes" "$tripped"
-  notify_breach "$pid" "$tripped" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$snapshot"
+  brain_store_breach "$pid" "$cmux_rss_bytes" "$vmstat_compressor_bytes_value" "$snapshot" "$processes" "$tripped"
+  notify_breach "$pid" "$tripped" "$cmux_rss_bytes" "$vmstat_compressor_bytes_value" "$snapshot"
   log "cmux process $pid left running after memory breach (warn-only default)"
 }
 
 run_once() {
   local cmux_pid
-  local cmux_footprint_bytes
+  local cmux_rss_bytes
   local vmstat_compressor_bytes_value
-  local footprint_threshold_bytes
+  local rss_threshold_bytes
   local compressor_threshold_bytes
   local tripped
 
@@ -389,14 +375,17 @@ run_once() {
     return 0
   fi
 
-  cmux_footprint_bytes="$(aggregate_cmux_footprint_bytes)"
+  if ! cmux_rss_bytes="$(aggregate_cmux_rss_bytes)"; then
+    log "RSS unavailable or invalid; skipping RSS signal (fail-safe)"
+    cmux_rss_bytes=unknown
+  fi
   vmstat_compressor_bytes_value="$(vmstat_compressor_bytes)"
-  footprint_threshold_bytes="$(threshold_bytes "$CMUX_MEM_WATCHDOG_FOOTPRINT_THRESHOLD_GB")"
+  rss_threshold_bytes="$(threshold_bytes "$CMUX_MEM_WATCHDOG_RSS_THRESHOLD_GB")"
   compressor_threshold_bytes="$(threshold_bytes "$CMUX_MEM_WATCHDOG_COMPRESSOR_THRESHOLD_GB")"
 
   tripped=""
-  if (( cmux_footprint_bytes > footprint_threshold_bytes )); then
-    tripped="footprint"
+  if [[ "$cmux_rss_bytes" != "unknown" ]] && (( cmux_rss_bytes > rss_threshold_bytes )); then
+    tripped="rss"
   fi
 
   if (( vmstat_compressor_bytes_value > compressor_threshold_bytes )); then
@@ -408,7 +397,7 @@ run_once() {
   fi
 
   if [[ -n "$tripped" ]]; then
-    handle_breach "$cmux_pid" "$cmux_footprint_bytes" "$vmstat_compressor_bytes_value" "$tripped"
+    handle_breach "$cmux_pid" "$cmux_rss_bytes" "$vmstat_compressor_bytes_value" "$tripped"
   fi
 }
 

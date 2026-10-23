@@ -17,7 +17,7 @@ Fresh installs enable only the sampler and dry-run reaper (`REAPER_DRY_RUN=1`).
 The systems watchdog and controllayer heavy-ML guardian are host-specific, disabled
 unless `watchdog` / `guardian` are true in
 `~/.config/cmuxlayer/resource-guard.json`. Enabling them preserves their destructive
-defaults: watchdog terminates cmux above its physical-footprint threshold; guardian
+defaults: watchdog terminates cmux above its RSS threshold; guardian
 reclaims idle backfills and kills unprotected runaways under memory danger. Set
 `CMUX_MEM_WATCHDOG_DRY_RUN=1` / `HEAVY_ML_GUARD_ENABLE_KILL=0` for observation only.
 
@@ -43,10 +43,19 @@ host event sink exists; no clx, BrainBar, notify server, or agent skills are req
 The sampler's legacy stale threshold is preserved; tune it above 1800 seconds if
 stale notifications are unwanted with the 30-tick cadence.
 
-The two shell duty ports preserve their original behavior except vmmap stderr:
-the watchdog replaces its noisy raw diagnostics with one concise failure warning
-and skips that PID. jq is a Homebrew runtime dependency. socat is optional for the
-watchdog's BrainBar sink. Node and jq run from the installed Homebrew dependencies.
+Both watchdog entrypoints measure process RSS with `ps -o rss=` (KiB), converted
+to bytes with 1024. RSS is not physical footprint: IOSurface/compressed allocations
+may be missing. Numeric thresholds and the resource-guard minimum floor are
+unchanged; resource-guard compares each GUI PID, while the standalone watchdog
+sums deduplicated stable/nightly PIDs and retains its compressor check. Unknown
+RSS warns and skips action rather than substituting zero or probing task ports.
+Snapshots and notifications identify the measurement as RSS. Resource-guard
+retains its terminate-on-breach behavior; standalone remains warn-only.
+
+The separately dispatched RAM sampler still uses task-port memory inspection;
+its JSON/trend contract migration is a dependent change. These watchdog fixes
+do not establish that the whole guard is free of task-port access.
+jq is a Homebrew runtime dependency; socat is optional for the BrainBar sink.
 
 Homebrew compiles the native launcher with absolute installed Node/entry paths,
 and installs the launchd duty files under libexec. Release tooling applies the versioned

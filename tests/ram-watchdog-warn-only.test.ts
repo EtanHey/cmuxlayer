@@ -127,7 +127,7 @@ set -euo pipefail
 printf '%s\\n' "$*" >>"${logDir}/kill.log"
 `,
   );
-  writeFileSync(join(root, "fixtures/footprint.fixture"), "4242 phys_footprint: 6 GB (peak 8 GB)\n");
+  writeFileSync(join(root, "fixtures/rss.fixture"), "4242 6291456\n");
   writeFileSync(
     join(root, "fixtures/vmstat.fixture"),
     "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages occupied by compressor: 0.\n",
@@ -197,7 +197,7 @@ run_once`,
         CMUX_MEM_WATCHDOG_BRAINBAR_SOCK: join(root, "missing-brainbar.sock"),
         CMUX_MEM_WATCHDOG_KILL_BIN: join(root, "bin/kill"),
         CMUX_MEM_WATCHDOG_TERM_GRACE_SECONDS: "0",
-        CMUX_MEM_WATCHDOG_FOOTPRINT_FIXTURE: join(root, "fixtures/footprint.fixture"),
+        CMUX_MEM_WATCHDOG_PS_FIXTURE: join(root, "fixtures/rss.fixture"),
         CMUX_MEM_WATCHDOG_VMSTAT_FIXTURE: join(root, "fixtures/vmstat.fixture"),
       },
     );

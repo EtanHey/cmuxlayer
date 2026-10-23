@@ -14,8 +14,8 @@ CMUX_MEM_WATCHDOG_KILL_BIN="${CMUX_MEM_WATCHDOG_KILL_BIN:-kill}"
 CMUX_MEM_WATCHDOG_DRY_RUN="${CMUX_MEM_WATCHDOG_DRY_RUN:-0}"
 
 # SCOPE (finding #3 / M5): this watchdog targets the cmux GUI app process(es)
-# and terminates one only when its OWN vmmap physical footprint crosses the
-# threshold (the IOSurface-backed leak that is invisible to ps RSS). Orphaned
+# and terminates one only when its OWN resident set crosses the threshold.
+# RSS does not measure all IOSurface/compressed allocations. Orphaned
 # cmuxlayer workers such as `node .../dist/index.js` (ppid=1) and
 # `bun .../src/index.ts` are DELIBERATELY out of scope here — they belong to a
 # separate cmuxlayer reaper. We never mass-kill on a coarse name match.
@@ -131,27 +131,16 @@ process_identity() {
   ps -o comm=,lstart= -p "$pid" 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//'
 }
 
-read_vmmap_summary() {
-  local pid="$1"
-  if [[ -n "${CMUX_MEM_WATCHDOG_VMMAP_FIXTURE:-}" ]]; then
-    cat "$CMUX_MEM_WATCHDOG_VMMAP_FIXTURE"
-    return
-  fi
-  vmmap -summary "$pid" 2>/dev/null
-}
-
-extract_physical_footprint_bytes() {
-  local vmmap_output="$1"
-  local line
-  line="$(printf '%s\n' "$vmmap_output" | awk -F: '/Physical footprint:/ {print $2; exit}')"
-  # R1 fail-safe: a MISSING or garbled "Physical footprint:" line yields an
-  # empty value here. Emit NOTHING (not "0") so run_once can tell "vmmap format
-  # drifted / could not parse" apart from a genuine below-threshold reading —
-  # otherwise a format change would silently turn the watchdog into a no-op.
-  if [[ -z "${line//[[:space:]]/}" ]]; then
-    return 0
-  fi
-  bytes_from_human "$line"
+# ps reports RSS in KiB, not physical footprint. Reject unknown, malformed or
+# oversized measurements; never substitute zero or use a task-port fallback.
+rss_bytes_for_pid() {
+  local rss_kb
+  rss_kb="$(ps -o rss= -p "$1" 2>/dev/null)" || return 1
+  [[ "$rss_kb" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]] || return 1
+  awk -v kb="${BASH_REMATCH[1]}" 'BEGIN {
+    if (kb + 0 > 8796093022207) exit 1
+    printf "%.0f\n", kb * 1024
+  }'
 }
 
 snapshot_path() {
@@ -162,37 +151,35 @@ snapshot_path() {
 
 capture_process_snapshot() {
   local pid="$1"
-  local vmmap_output="$2"
-  local footprint_bytes="$3"
-  local path="$4"
-  local footprint_gb
-  footprint_gb="$(bytes_to_gb "$footprint_bytes")"
+  local rss_bytes="$2"
+  local path="$3"
+  local rss_gb
+  rss_gb="$(bytes_to_gb "$rss_bytes")"
 
   mkdir -p "$CMUX_MEM_WATCHDOG_LOG_DIR"
   {
     printf 'timestamp=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'pid=%s\n' "$pid"
     printf 'threshold_gb=%s\n' "$CMUX_MEM_WATCHDOG_THRESHOLD_GB"
-    printf 'physical_footprint_gb=%s\n' "$footprint_gb"
+    printf 'rss_gb=%s\n' "$rss_gb"
     printf '\n[ps]\n'
     ps -o pid,ppid,rss,vsz,%cpu,etime,command -p "$pid"
     printf '\n[pgrep]\n'
     pgrep -lf cmux || true
-    printf '\n[vmmap-summary]\n%s\n' "$vmmap_output"
   } >"$path"
 }
 
 brain_store_breach() {
   local pid="$1"
-  local footprint_bytes="$2"
+  local rss_bytes="$2"
   local snapshot="$3"
   local processes="$4"
-  local footprint_gb
+  local rss_gb
   local content
   local socat_bin
-  footprint_gb="$(bytes_to_gb "$footprint_bytes")"
+  rss_gb="$(bytes_to_gb "$rss_bytes")"
   content="$(cat <<EOF
-cmux watchdog threshold breach. WHAT: cmux pid $pid crossed ${CMUX_MEM_WATCHDOG_THRESHOLD_GB} GB and was terminated by the local watchdog. WHY: cmux can leak IOSurface-backed memory that is invisible to ps RSS, so the watchdog uses vmmap physical footprint as the kill threshold. Details: measured_gb=$footprint_gb threshold_gb=$CMUX_MEM_WATCHDOG_THRESHOLD_GB snapshot=$snapshot processes=$processes
+cmux watchdog threshold breach. WHAT: cmux pid $pid crossed ${CMUX_MEM_WATCHDOG_THRESHOLD_GB} GB and was terminated by the local watchdog. WHY: the process resident set exceeded the configured threshold; RSS excludes some IOSurface/compressed allocations. Details: measured_gb=$rss_gb threshold_gb=$CMUX_MEM_WATCHDOG_THRESHOLD_GB snapshot=$snapshot processes=$processes
 EOF
 )"
 
@@ -227,16 +214,16 @@ EOF
 
 notify_breach() {
   local pid="$1"
-  local footprint_bytes="$2"
+  local rss_bytes="$2"
   local snapshot="$3"
-  local footprint_gb
-  footprint_gb="$(bytes_to_gb "$footprint_bytes")"
+  local rss_gb
+  rss_gb="$(bytes_to_gb "$rss_bytes")"
 
   # Bounded (M7): curl connect + total time caps so a wedged notify endpoint
   # cannot delay the termination decision.
   jq -cn \
     --arg title "cmux watchdog" \
-    --arg body "cmux hit ${footprint_gb} GB > ${CMUX_MEM_WATCHDOG_THRESHOLD_GB} GB. Snapshot: $snapshot. Terminating." \
+    --arg body "cmux hit ${rss_gb} GB RSS > ${CMUX_MEM_WATCHDOG_THRESHOLD_GB} GB. Snapshot: $snapshot. Terminating." \
     --arg source "$CMUX_MEM_WATCHDOG_SOURCE" \
     --arg priority "$CMUX_MEM_WATCHDOG_PRIORITY" \
     '{title:$title,body:$body,source:$source,priority:$priority}' \
@@ -285,26 +272,24 @@ terminate_cmux() {
 
 handle_breach() {
   local pid="$1"
-  local vmmap_output="$2"
-  local footprint_bytes="$3"
+  local rss_bytes="$2"
   local snapshot
   local processes
   local identity
 
   identity="$(process_identity "$pid")"
   snapshot="$(snapshot_path)"
-  capture_process_snapshot "$pid" "$vmmap_output" "$footprint_bytes" "$snapshot"
+  capture_process_snapshot "$pid" "$rss_bytes" "$snapshot"
   processes="$(pgrep -lf cmux | tr '\n' ';' | sed 's/;$/\n/' || true)"
-  brain_store_breach "$pid" "$footprint_bytes" "$snapshot" "$processes"
-  notify_breach "$pid" "$footprint_bytes" "$snapshot"
+  brain_store_breach "$pid" "$rss_bytes" "$snapshot" "$processes"
+  notify_breach "$pid" "$rss_bytes" "$snapshot"
   terminate_cmux "$pid" "$identity"
 }
 
 run_once() {
   local pids
   local pid
-  local vmmap_output
-  local footprint_bytes
+  local rss_bytes
   local limit_bytes
 
   # M1: refuse to do anything destructive on a bad threshold.
@@ -321,27 +306,13 @@ run_once() {
 
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
-    if ! vmmap_output="$(read_vmmap_summary "$pid")"; then
-      log "vmmap unavailable for pid $pid; skipping (no kill)"
-      continue
-    fi
-    footprint_bytes="$(extract_physical_footprint_bytes "$vmmap_output")"
-
-    # R1 fail-safe: empty means the "Physical footprint:" line was absent/garbled.
-    # Warn LOUDLY — this is the "silent no-op watchdog" failure class (vmmap
-    # format drift would otherwise let a real leak run unbounded, unnoticed).
-    if [[ -z "$footprint_bytes" ]]; then
-      log "WARNING: no parseable 'Physical footprint:' line in vmmap for pid $pid; skipping (fail-safe, no kill) — vmmap output may have drifted"
-      continue
-    fi
-    # Defense in depth: any other non-integer must NOT trigger a kill either.
-    if ! [[ "$footprint_bytes" =~ ^[0-9]+$ ]]; then
-      log "could not parse physical footprint ('$footprint_bytes') for pid $pid; skipping (fail-safe, no kill)"
+    if ! rss_bytes="$(rss_bytes_for_pid "$pid")"; then
+      log "RSS unavailable or invalid for pid $pid; skipping (fail-safe, no kill)"
       continue
     fi
 
-    if [[ "$footprint_bytes" -ge "$limit_bytes" ]]; then
-      handle_breach "$pid" "$vmmap_output" "$footprint_bytes"
+    if [[ "$rss_bytes" -ge "$limit_bytes" ]]; then
+      handle_breach "$pid" "$rss_bytes"
     fi
   done <<< "$pids"
 }
