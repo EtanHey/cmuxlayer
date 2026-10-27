@@ -21,6 +21,13 @@ export function readVersion(): string {
 /** Process identity is immutable even if Homebrew deletes this Cellar tree. */
 export const RUNNING_VERSION = readVersion();
 
+// git archive expands this at export time, so it can name its own commit.
+// Checkouts and archives without substitution deliberately report unknown.
+const archiveCommit = "$Format:%H$";
+export const RUNNING_COMMIT = /^[0-9a-f]{40}$/.test(archiveCommit)
+  ? archiveCommit
+  : null;
+
 export interface BuildVersionCheck {
   /** True when the running build matches `expected`. */
   ok: boolean;

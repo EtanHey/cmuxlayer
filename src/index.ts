@@ -9,7 +9,7 @@
 
 import { renderDoctorJson, renderDoctorText, runDoctor } from "./doctor.js";
 import { refuseUnderT3Code } from "./t3-code-guard.js";
-import { RUNNING_VERSION } from "./version.js";
+import { RUNNING_COMMIT, RUNNING_VERSION } from "./version.js";
 import { runDaemonFirstEntry } from "./entry.js";
 import { isMainModule } from "./is-main.js";
 import { writeInboxCursor } from "./inbox.js";
@@ -29,7 +29,8 @@ Usage:
                        choose how agents handle tool approvals. Writes the
                        config those choices produce. Add --yes with --repo for
                        scripted installs; "cmuxlayer init --help" lists flags.
-  cmuxlayer --version  Print the version and exit.
+  cmuxlayer --version  Print the version and exit. Add --json for version and
+                       build commit (null when the archive stamp is absent).
   cmuxlayer --help     Print this help and exit.
   cmuxlayer doctor     Run non-interactive health checks (Robust Brew Layer
                        standard §0/§1/§3/§6) and exit. Read-only; no mutation.
@@ -69,10 +70,6 @@ async function main() {
   // The config `cmuxlayer init` wrote applies wherever cmuxlayer is launched
   // from, not only from a shell that sourced it. Real env vars still win.
   loadCmuxlayerConfigFile();
-  if (arg === "--version" || arg === "-v") {
-    process.stdout.write(`cmuxlayer ${RUNNING_VERSION}\n`);
-    return;
-  }
   if (arg === "--help" || arg === "-h") {
     process.stdout.write(HELP_TEXT);
     return;
@@ -125,9 +122,17 @@ async function main() {
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {
-  if (refuseUnderT3Code()) process.exit(0);
-  main().catch((error) => {
-    console.error("[cmuxlayer] fatal", error);
-    process.exit(1);
-  });
+  if (process.argv[2] === "--version" || process.argv[2] === "-v") {
+    process.stdout.write(
+      (process.argv.includes("--json")
+        ? JSON.stringify({ version: RUNNING_VERSION, commit: RUNNING_COMMIT })
+        : `cmuxlayer ${RUNNING_VERSION}`) + "\n",
+    );
+  } else {
+    if (refuseUnderT3Code()) process.exit(0);
+    main().catch((error) => {
+      console.error("[cmuxlayer] fatal", error);
+      process.exit(1);
+    });
+  }
 }
