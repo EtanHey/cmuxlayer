@@ -55,8 +55,8 @@ terminates other processes with its bundle ID. Private HOME/socket overrides
 do not prevent that behavior or isolate its real-account state writes.
 
 `--capability` tests launch, ping, workspace creation and pane text only. The
-PR-triggered macos-15 capability matrix downloads digest-pinned NIGHTLY and
-**0.64.22**, validates notarization, and uploads separate receipts. 0.64.22 is
+PR-triggered macos-15 capability workflow downloads digest-pinned **0.64.22**,
+validates notarization, and uploads its receipts. 0.64.22 is
 **hosted only**: `--hosted-release` requires `--capability`, GitHub Actions on a
 `github-hosted` macOS runner, an app under `RUNNER_TEMP`, the production bundle ID
 and version `0.64.22`. An existing process with that bundle ID refuses the run.
@@ -82,16 +82,18 @@ so the offline staple is not a prerequisite for a notarized CI download.
 **Required gate policy:** pinned hosted 0.64.22 capability and replay rows become
 the required check once hosted capability is proven. R1 adds the capability
 candidate; it does not activate required checks or add hosted replay rows.
-Required-check activation remains with the owner through the lead. NIGHTLY
-capability and replay rows are early-warning reports, **never required**. Its
-capability job uses `continue-on-error`; a failure retains its FAIL receipt and
-artifact without blocking the stable gate. The 0.64.22 job does not allow failure.
+Required-check activation remains with the owner through the lead. The hosted
+NIGHTLY capability matrix entry was removed because its download/verification
+prerequisites failed before the probe; re-add once its prerequisites are proven.
+Local NIGHTLY capability and replay remain early-warning reports, **never
+required**. The 0.64.22 job does not allow failure.
 
 The dedicated M1, when available, will add local pinned 0.64.22 coverage. Before
 every launch it must refuse if a non-test `com.cmuxterm.app` process is running.
 That future M1 path is not enabled here; the current runner's stable exception
 remains hosted-only, and this MBP must not launch 0.64.22.
 
-The `nightly` release tag rolls: the pinned DMG may disappear when it republishes.
+For any future hosted NIGHTLY entry, the `nightly` release tag rolls: the pinned
+DMG may disappear when it republishes.
 A download HTTP 404 reports distinct FAIL stage `asset_gone`; update the asset
 URL and independently verified digest together before retrying through a new PR.
