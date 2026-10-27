@@ -10,8 +10,8 @@ interface Job {
   source: string;
 }
 
-/** Every job, across every workflow, that runs the cmuxlayer test suite. */
-function suiteJobs(): Job[] {
+/** Every job, across every workflow. */
+function workflowJobs(): Job[] {
   const jobs: Job[] = [];
 
   for (const file of readdirSync(workflowDir)) {
@@ -38,10 +38,14 @@ function suiteJobs(): Job[] {
     flush();
   }
 
+  return jobs;
+}
+
+function suiteJobs(): Job[] {
   // Match the job BODY, not the `run:` line: `run: |` with the invocation on the
   // next line is the ordinary Actions idiom, and a filter anchored to `run:`
   // walks straight past it — along with composite and reusable workflows.
-  return jobs.filter(({ source }) => /\b(npm|bun) (run )?test\b/.test(source));
+  return workflowJobs().filter(({ source }) => /\b(npm|bun) (run )?test\b/.test(source));
 }
 
 /**
@@ -85,6 +89,38 @@ describe("workflow toolchain matches what the suite spawns", () => {
           Number(version),
           `${label} pins node ${version} but engines require ${engines}`,
         ).toBeGreaterThanOrEqual(minimumMajor);
+      }
+    }
+  });
+
+  it("pins setup-node jobs and line-start Node commands to patched LTS runtimes", () => {
+    const nodeCommand = /(?:^|\n)\s*(?:-\s*)?(?:run:\s*)?node\s/;
+    const jobs = workflowJobs().filter(
+      ({ source }) => source.includes("actions/setup-node@") || nodeCommand.test(source),
+    );
+    expect(jobs.map(({ label }) => label)).toEqual(
+      expect.arrayContaining(["ci.yml:build-site", "ratchet-capability.yml:capability"]),
+    );
+
+    for (const { label, source } of jobs) {
+      const setup = source.match(
+        /uses: actions\/setup-node@[a-f0-9]{40}[^\n]*\n\s+with:\n\s+node-version:\s*["']?(\d+)\.(\d+)\.(\d+)["']?\s*(?:#.*)?$/m,
+      );
+      expect(setup, `${label} needs SHA-pinned setup-node with an exact version`).not.toBeNull();
+      if (!setup) continue;
+
+      const [, major, minor, patch] = setup.map(Number);
+      const minimumMinor = major === 24 ? 22 : major === 22 ? 23 : null;
+      const minimumPatch = major === 24 ? 1 : 4;
+      expect(
+        minimumMinor !== null &&
+          (minor > minimumMinor || (minor === minimumMinor && patch >= minimumPatch)),
+        `${label} requires Node >=24.22.1 on 24.x or >=22.23.4 on 22.x`,
+      ).toBe(true);
+
+      const command = source.search(nodeCommand);
+      if (command !== -1) {
+        expect(setup.index, `${label} must install Node before running it`).toBeLessThan(command);
       }
     }
   });
