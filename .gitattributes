@@ -1,3 +1,6 @@
 # Raw terminal captures preserve right-padding spaces from the rendered pane.
 # They also keep LF endings so exact-substring assertions are cross-platform.
 tests/fixtures/**/*.txt text eol=lf whitespace=-blank-at-eol
+
+# GitHub tag archives stamp the peeled commit before Homebrew compiles this file.
+src/version.ts export-subst
