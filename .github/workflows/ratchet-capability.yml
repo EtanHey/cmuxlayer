@@ -56,6 +56,9 @@ jobs:
           trap 'hdiutil detach "$RUNNER_TEMP/cmux-mount"' EXIT
           ditto "$RUNNER_TEMP/cmux-mount/$CAPABILITY_APP" "$RUNNER_TEMP/$CAPABILITY_APP"
           bash scripts/verify-cmux-capability-app.sh "$RUNNER_TEMP/$CAPABILITY_APP" "$RUNNER_TEMP/notarization-assessment.txt"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.22.1
       - name: Shell capability (fail closed)
         shell: bash
         run: |
