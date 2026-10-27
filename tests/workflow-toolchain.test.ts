@@ -93,7 +93,7 @@ describe("workflow toolchain matches what the suite spawns", () => {
     }
   });
 
-  it("pins every Node-running job to a patched LTS runtime before use", () => {
+  it("pins setup-node jobs and line-start Node commands to patched LTS runtimes", () => {
     const nodeCommand = /(?:^|\n)\s*(?:-\s*)?(?:run:\s*)?node\s/;
     const jobs = workflowJobs().filter(
       ({ source }) => source.includes("actions/setup-node@") || nodeCommand.test(source),
