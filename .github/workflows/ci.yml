@@ -33,8 +33,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Guard against tracked docs.local
-        run: bash scripts/guard-no-docslocal.sh
+          fetch-depth: 0
+      - name: Guard against tracked or range-added docs.local
+        env:
+          RANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          RANGE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/guard-no-docslocal.sh --range "$RANGE_BASE..$RANGE_HEAD"
 
   # Keep the committed baseline calibrated to current PR-class runners by
   # importing their perf artifact via baseline_source_run_id: observed PR send
