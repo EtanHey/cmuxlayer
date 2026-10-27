@@ -45,12 +45,26 @@ export function Nav({ product, links = [] }: NavProps) {
 
   return (
     <nav
-      className={`fixed top-0 left-0 right-0 z-50 py-4 backdrop-blur-2xl transition-[border-color] duration-300 ${
+      className={`fixed top-0 left-0 right-0 z-50 backdrop-blur-2xl transition-[border-color] duration-300 ${
         scrolled ? "border-b border-border" : "border-b border-transparent"
       }`}
       style={{ background: "rgba(9, 9, 11, 0.8)" }}
     >
-      <div className="max-w-[960px] mx-auto px-6 flex items-center justify-between">
+      {product === "cmuxlayer" && (
+        <div className="border-b border-border">
+          <p className="max-w-[960px] mx-auto px-6 py-2 text-center text-[12px] leading-[1.45] text-text-secondary">
+            cmuxLayer is no longer maintained. We used it before moving to{" "}
+            <a
+              href="https://github.com/pingdotgg/t3code"
+              className="text-text underline decoration-text-dim underline-offset-2 hover:decoration-text-secondary transition-colors"
+            >
+              T3 Code
+            </a>
+            , which now covers most of what it did.
+          </p>
+        </div>
+      )}
+      <div className="max-w-[960px] mx-auto px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <a
             href="#"
