@@ -79,6 +79,9 @@ describe("pre-PR script ladder", () => {
     );
     const contractGate = release.indexOf('bun run test:contract 2>&1 | tee');
 
+    expect(release).toContain(
+      "/Gits/golems/.worktrees/hooks-live/scripts/hooks/heavy-suite.py",
+    );
     expect(hermeticGate).toBeGreaterThan(-1);
     expect(contractGate).toBeGreaterThan(hermeticGate);
     // The lane's outcome is classified into the receipt instead of scrolling by (#370).
