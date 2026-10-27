@@ -24,6 +24,8 @@
 
 html {
   scroll-behavior: smooth;
+  /* Clear the fixed nav (with its notice) on anchor jumps */
+  scroll-padding-top: 96px;
   overflow-x: hidden;
 }
 
