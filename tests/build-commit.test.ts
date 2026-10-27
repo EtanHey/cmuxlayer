@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync,
   symlinkSync, writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -10,7 +10,16 @@ const repo = resolve(import.meta.dirname, "..");
 const scratch = join(repo, "docs.local", "scratch", "i3");
 mkdirSync(scratch, { recursive: true });
 const root = mkdtempSync(join(scratch, "build-commit-"));
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+  try {
+    rmdirSync(scratch);
+  } catch (error) {
+    // Preserve another run's fixtures or worker receipts in the shared parent.
+    if (!(error instanceof Error && "code" in error &&
+      ["ENOTEMPTY", "EEXIST", "ENOENT"].includes(String(error.code)))) throw error;
+  }
+});
 
 function run(command: string, args: string[], cwd = repo): string {
   return execFileSync(command, args, {
@@ -29,6 +38,7 @@ describe("build commit identity", () => {
     });
   });
 
+  // Shared CI runners need time for a full TypeScript build and real CLI probes.
   it("ships the peeled annotated-tag commit through a git-free archive build", () => {
     const source = join(root, "source");
     const installed = join(root, "libexec");
@@ -65,9 +75,9 @@ describe("build commit identity", () => {
     // A corrupt or absent stamp must not turn into a guessed commit.
     const versionJs = join(installed, "dist", "version.js");
     const compiled = readFileSync(versionJs, "utf8");
-    for (const stamp of ["", "bad-commit"]) {
+    for (const stamp of ["", "bad-commit", "A".repeat(40), "a".repeat(39), "a".repeat(41)]) {
       writeFileSync(versionJs, compiled.replace(commit, stamp));
       expect(JSON.parse(run(process.execPath, args, installed)).commit).toBeNull();
     }
-  });
+  }, 60_000);
 });
