@@ -29,6 +29,10 @@ html {
   overflow-x: hidden;
 }
 
+@media (max-width: 639px) {
+  html { scroll-padding-top: 120px; }
+}
+
 body {
   background: var(--color-bg);
   color: var(--color-text);

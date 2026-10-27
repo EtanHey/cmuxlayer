@@ -52,11 +52,11 @@ export function Nav({ product, links = [] }: NavProps) {
     >
       {product === "cmuxlayer" && (
         <div className="border-b border-border">
-          <p className="max-w-[960px] mx-auto px-6 py-2 text-center text-[12px] leading-[1.45] text-text-dim">
+          <p className="max-w-[960px] mx-auto px-6 py-2 text-center text-[12px] leading-[1.45] text-text-secondary">
             cmuxLayer is no longer maintained. We used it before moving to{" "}
             <a
               href="https://github.com/pingdotgg/t3code"
-              className="text-text-secondary underline decoration-border-hover underline-offset-2 hover:text-text transition-colors"
+              className="text-text underline decoration-text-dim underline-offset-2 hover:decoration-text-secondary transition-colors"
             >
               T3 Code
             </a>
