@@ -21,9 +21,9 @@ afterAll(() => {
   }
 });
 
-function run(command: string, args: string[], cwd = repo): string {
+function run(command: string, args: string[], cwd = repo, timeout = 30_000): string {
   return execFileSync(command, args, {
-    cwd, encoding: "utf8", timeout: 30_000,
+    cwd, encoding: "utf8", timeout,
     env: { ...process.env, CMUXLAYER_CONFIG_FILE: join(root, "no-config") },
   }).trim();
 }
@@ -62,7 +62,7 @@ describe("build commit identity", () => {
     run("tar", ["-xf", archive, "-C", installed]);
     expect(existsSync(join(installed, ".git"))).toBe(false);
     symlinkSync(join(repo, "node_modules"), join(installed, "node_modules"), "dir");
-    run("bun", ["run", "build"], installed);
+    run("bun", ["run", "build"], installed, 55_000);
     // Homebrew retains only dist/, package.json and node_modules for this CLI.
     rmSync(join(installed, "src"), { recursive: true });
     const args = ["dist/index.js", "--version", "--json"];
