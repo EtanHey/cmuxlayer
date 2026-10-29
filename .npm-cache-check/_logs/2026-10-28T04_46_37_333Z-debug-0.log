@@ -1,0 +1,218 @@
+0 verbose cli /opt/homebrew/Cellar/node/26.12.1/bin/node /opt/homebrew/bin/npm
+1 info using npm@11.20.0
+2 info using node@v26.12.1
+3 silly config load:file:/opt/homebrew/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/happycampr/.t3/worktrees/cmuxlayer/security-site-next-16-4-1/site/.npmrc
+5 silly config load:file:/Users/happycampr/.npmrc
+6 silly config load:file:/opt/homebrew/etc/npmrc
+7 verbose title npm install
+8 verbose argv "install" "--ignore-scripts" "--no-audit" "--no-fund"
+9 verbose logfile logs-max:10 dir:/Users/happycampr/.t3/worktrees/cmuxlayer/security-site-next-16-4-1/.npm-cache-check/_logs/2026-10-28T04_46_37_333Z-
+10 verbose logfile /Users/happycampr/.t3/worktrees/cmuxlayer/security-site-next-16-4-1/.npm-cache-check/_logs/2026-10-28T04_46_37_333Z-debug-0.log
+11 silly logfile start cleaning logs, removing 1 files
+12 silly packumentCache heap:4395630592 maxSize:1098907648 maxEntrySize:549453824
+13 silly logfile done cleaning log files
+14 silly idealTree buildDeps
+15 silly reify moves {}
+16 http cache undici-types@https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz 0ms (cache hit)
+17 http cache typescript@https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz 0ms (cache hit)
+18 http cache tapable@https://registry.npmjs.org/tapable/-/tapable-2.3.2.tgz 0ms (cache hit)
+19 http cache tslib@https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz 0ms (cache hit)
+20 http cache source-map-js@https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz 0ms (cache hit)
+21 http cache styled-jsx@https://registry.npmjs.org/styled-jsx/-/styled-jsx-5.1.6.tgz 0ms (cache hit)
+22 http cache tailwindcss@https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.2.2.tgz 0ms (cache hit)
+23 http cache semver@https://registry.npmjs.org/semver/-/semver-7.8.5.tgz 0ms (cache hit)
+24 http cache react-dom@https://registry.npmjs.org/react-dom/-/react-dom-19.2.4.tgz 0ms (cache hit)
+25 http cache sharp@https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz 0ms (cache hit)
+26 http cache scheduler@https://registry.npmjs.org/scheduler/-/scheduler-0.27.0.tgz 0ms (cache hit)
+27 http cache postcss@https://registry.npmjs.org/postcss/-/postcss-8.5.23.tgz 0ms (cache hit)
+28 http cache react@https://registry.npmjs.org/react/-/react-19.2.4.tgz 0ms (cache hit)
+29 http cache picocolors@https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz 0ms (cache hit)
+30 http cache next@https://registry.npmjs.org/next/-/next-16.4.1.tgz 0ms (cache hit)
+31 http cache nanoid@https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz 0ms (cache hit)
+32 http cache motion-dom@https://registry.npmjs.org/motion-dom/-/motion-dom-12.38.0.tgz 0ms (cache hit)
+33 http cache lightningcss-darwin-arm64@https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.32.0.tgz 0ms (cache hit)
+34 http cache magic-string@https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz 0ms (cache hit)
+35 http cache lightningcss@https://registry.npmjs.org/lightningcss/-/lightningcss-1.32.0.tgz 0ms (cache hit)
+36 http cache jiti@https://registry.npmjs.org/jiti/-/jiti-2.6.1.tgz 0ms (cache hit)
+37 http cache framer-motion@https://registry.npmjs.org/framer-motion/-/framer-motion-12.38.0.tgz 0ms (cache hit)
+38 http cache motion-utils@https://registry.npmjs.org/motion-utils/-/motion-utils-12.36.0.tgz 0ms (cache hit)
+39 http cache graceful-fs@https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz 0ms (cache hit)
+40 http cache csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 0ms (cache hit)
+41 http cache client-only@https://registry.npmjs.org/client-only/-/client-only-0.0.1.tgz 0ms (cache hit)
+42 http cache detect-libc@https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz 0ms (cache hit)
+43 http cache enhanced-resolve@https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.20.1.tgz 0ms (cache hit)
+44 http cache caniuse-lite@https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001784.tgz 0ms (cache hit)
+45 http cache @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.14.tgz 0ms (cache hit)
+46 http cache @types/node@https://registry.npmjs.org/@types/node/-/node-20.19.37.tgz 0ms (cache hit)
+47 http cache @tailwindcss/postcss@https://registry.npmjs.org/@tailwindcss/postcss/-/postcss-4.2.2.tgz 0ms (cache hit)
+48 http cache baseline-browser-mapping@https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.25.tgz 0ms (cache hit)
+49 http cache @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 0ms (cache hit)
+50 http cache @tailwindcss/oxide-darwin-arm64@https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.2.2.tgz 0ms (cache hit)
+51 http cache @swc/helpers@https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.23.tgz 0ms (cache hit)
+52 http cache @tailwindcss/oxide@https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.2.2.tgz 0ms (cache hit)
+53 http cache @tailwindcss/node@https://registry.npmjs.org/@tailwindcss/node/-/node-4.2.2.tgz 0ms (cache hit)
+54 http cache @next/swc-darwin-arm64@https://registry.npmjs.org/@next/swc-darwin-arm64/-/swc-darwin-arm64-16.4.1.tgz 0ms (cache hit)
+55 http cache @jridgewell/trace-mapping@https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz 0ms (cache hit)
+56 http cache @jridgewell/sourcemap-codec@https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz 0ms (cache hit)
+57 http cache @jridgewell/resolve-uri@https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz 0ms (cache hit)
+58 http cache @jridgewell/remapping@https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz 0ms (cache hit)
+59 http cache @jridgewell/gen-mapping@https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz 0ms (cache hit)
+60 http cache @img/sharp-libvips-darwin-arm64@https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz 0ms (cache hit)
+61 http cache @next/env@https://registry.npmjs.org/@next/env/-/env-16.4.1.tgz 0ms (cache hit)
+62 silly tarball no local data for undici-types@https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz. Extracting by manifest.
+63 silly tarball no local data for typescript@https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz. Extracting by manifest.
+64 silly tarball no local data for tslib@https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz. Extracting by manifest.
+65 silly tarball no local data for tapable@https://registry.npmjs.org/tapable/-/tapable-2.3.2.tgz. Extracting by manifest.
+66 silly tarball no local data for source-map-js@https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz. Extracting by manifest.
+67 silly tarball no local data for styled-jsx@https://registry.npmjs.org/styled-jsx/-/styled-jsx-5.1.6.tgz. Extracting by manifest.
+68 silly tarball no local data for tailwindcss@https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.2.2.tgz. Extracting by manifest.
+69 silly tarball no local data for semver@https://registry.npmjs.org/semver/-/semver-7.8.5.tgz. Extracting by manifest.
+70 silly tarball no local data for react-dom@https://registry.npmjs.org/react-dom/-/react-dom-19.2.4.tgz. Extracting by manifest.
+71 silly tarball no local data for sharp@https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz. Extracting by manifest.
+72 silly tarball no local data for scheduler@https://registry.npmjs.org/scheduler/-/scheduler-0.27.0.tgz. Extracting by manifest.
+73 silly tarball no local data for postcss@https://registry.npmjs.org/postcss/-/postcss-8.5.23.tgz. Extracting by manifest.
+74 silly tarball no local data for react@https://registry.npmjs.org/react/-/react-19.2.4.tgz. Extracting by manifest.
+75 silly tarball no local data for picocolors@https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz. Extracting by manifest.
+76 silly tarball no local data for next@https://registry.npmjs.org/next/-/next-16.4.1.tgz. Extracting by manifest.
+77 silly tarball no local data for nanoid@https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz. Extracting by manifest.
+78 silly tarball no local data for motion-dom@https://registry.npmjs.org/motion-dom/-/motion-dom-12.38.0.tgz. Extracting by manifest.
+79 silly tarball no local data for lightningcss-darwin-arm64@https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.32.0.tgz. Extracting by manifest.
+80 silly tarball no local data for magic-string@https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz. Extracting by manifest.
+81 silly tarball no local data for lightningcss@https://registry.npmjs.org/lightningcss/-/lightningcss-1.32.0.tgz. Extracting by manifest.
+82 silly tarball no local data for jiti@https://registry.npmjs.org/jiti/-/jiti-2.6.1.tgz. Extracting by manifest.
+83 silly tarball no local data for framer-motion@https://registry.npmjs.org/framer-motion/-/framer-motion-12.38.0.tgz. Extracting by manifest.
+84 silly tarball no local data for motion-utils@https://registry.npmjs.org/motion-utils/-/motion-utils-12.36.0.tgz. Extracting by manifest.
+85 silly tarball no local data for graceful-fs@https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz. Extracting by manifest.
+86 silly tarball no local data for csstype@https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz. Extracting by manifest.
+87 silly tarball no local data for client-only@https://registry.npmjs.org/client-only/-/client-only-0.0.1.tgz. Extracting by manifest.
+88 silly tarball no local data for enhanced-resolve@https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.20.1.tgz. Extracting by manifest.
+89 silly tarball no local data for caniuse-lite@https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001784.tgz. Extracting by manifest.
+90 silly tarball no local data for detect-libc@https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz. Extracting by manifest.
+91 silly tarball no local data for @types/react@https://registry.npmjs.org/@types/react/-/react-19.2.14.tgz. Extracting by manifest.
+92 silly tarball no local data for @types/node@https://registry.npmjs.org/@types/node/-/node-20.19.37.tgz. Extracting by manifest.
+93 silly tarball no local data for @tailwindcss/postcss@https://registry.npmjs.org/@tailwindcss/postcss/-/postcss-4.2.2.tgz. Extracting by manifest.
+94 silly tarball no local data for baseline-browser-mapping@https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.25.tgz. Extracting by manifest.
+95 silly tarball no local data for @types/react-dom@https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz. Extracting by manifest.
+96 silly tarball no local data for @tailwindcss/oxide-darwin-arm64@https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.2.2.tgz. Extracting by manifest.
+97 silly tarball no local data for @swc/helpers@https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.23.tgz. Extracting by manifest.
+98 silly tarball no local data for @tailwindcss/oxide@https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.2.2.tgz. Extracting by manifest.
+99 silly tarball no local data for @tailwindcss/node@https://registry.npmjs.org/@tailwindcss/node/-/node-4.2.2.tgz. Extracting by manifest.
+100 http cache @img/sharp-darwin-arm64@https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.5.tgz 0ms (cache hit)
+101 silly tarball no local data for @next/swc-darwin-arm64@https://registry.npmjs.org/@next/swc-darwin-arm64/-/swc-darwin-arm64-16.4.1.tgz. Extracting by manifest.
+102 silly tarball no local data for @jridgewell/trace-mapping@https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz. Extracting by manifest.
+103 silly tarball no local data for @jridgewell/sourcemap-codec@https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz. Extracting by manifest.
+104 silly tarball no local data for @jridgewell/resolve-uri@https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz. Extracting by manifest.
+105 silly tarball no local data for @jridgewell/remapping@https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz. Extracting by manifest.
+106 silly tarball no local data for @jridgewell/gen-mapping@https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz. Extracting by manifest.
+107 http cache @img/colour@https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz 0ms (cache hit)
+108 http cache @alloc/quick-lru@https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.2.0.tgz 0ms (cache hit)
+109 silly tarball no local data for @img/sharp-libvips-darwin-arm64@https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz. Extracting by manifest.
+110 silly tarball no local data for @next/env@https://registry.npmjs.org/@next/env/-/env-16.4.1.tgz. Extracting by manifest.
+111 silly tarball no local data for @img/sharp-darwin-arm64@https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.5.tgz. Extracting by manifest.
+112 silly tarball no local data for @img/colour@https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz. Extracting by manifest.
+113 silly tarball no local data for @alloc/quick-lru@https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.2.0.tgz. Extracting by manifest.
+114 http fetch GET 200 https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz 164ms (cache miss)
+115 http fetch GET 200 https://registry.npmjs.org/scheduler/-/scheduler-0.27.0.tgz 191ms (cache miss)
+116 http fetch GET 200 https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz 196ms (cache miss)
+117 http fetch GET 200 https://registry.npmjs.org/graceful-fs/-/graceful-fs-4.2.11.tgz 195ms (cache miss)
+118 http fetch GET 200 https://registry.npmjs.org/tapable/-/tapable-2.3.2.tgz 217ms (cache miss)
+119 http fetch GET 200 https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz 220ms (cache miss)
+120 http fetch GET 200 https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz 216ms (cache miss)
+121 http fetch GET 200 https://registry.npmjs.org/client-only/-/client-only-0.0.1.tgz 217ms (cache miss)
+122 http fetch GET 200 https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz 223ms (cache miss)
+123 http fetch GET 200 https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz 230ms (cache miss)
+124 http fetch GET 200 https://registry.npmjs.org/react/-/react-19.2.4.tgz 234ms (cache miss)
+125 http fetch GET 200 https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz 248ms (cache miss)
+126 http fetch GET 200 https://registry.npmjs.org/lightningcss/-/lightningcss-1.32.0.tgz 255ms (cache miss)
+127 http fetch GET 200 https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz 257ms (cache miss)
+128 http fetch GET 200 https://registry.npmjs.org/styled-jsx/-/styled-jsx-5.1.6.tgz 262ms (cache miss)
+129 http fetch GET 200 https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.25.tgz 268ms (cache miss)
+130 http fetch GET 200 https://registry.npmjs.org/tailwindcss/-/tailwindcss-4.2.2.tgz 280ms (cache miss)
+131 http fetch GET 200 https://registry.npmjs.org/semver/-/semver-7.8.5.tgz 280ms (cache miss)
+132 http fetch GET 200 https://registry.npmjs.org/postcss/-/postcss-8.5.23.tgz 287ms (cache miss)
+133 http fetch GET 200 https://registry.npmjs.org/jiti/-/jiti-2.6.1.tgz 292ms (cache miss)
+134 http fetch GET 200 https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.20.1.tgz 305ms (cache miss)
+135 http fetch GET 200 https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz 307ms (cache miss)
+136 http fetch GET 200 https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz 311ms (cache miss)
+137 http fetch GET 200 https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz 330ms (cache miss)
+138 http fetch GET 200 https://registry.npmjs.org/motion-utils/-/motion-utils-12.36.0.tgz 337ms (cache miss)
+139 http fetch GET 200 https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz 335ms (cache miss)
+140 http fetch GET 200 https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz 355ms (cache miss)
+141 http fetch GET 200 https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz 361ms (cache miss)
+142 http fetch GET 200 https://registry.npmjs.org/react-dom/-/react-dom-19.2.4.tgz 384ms (cache miss)
+143 http fetch GET 200 https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.32.0.tgz 408ms (cache miss)
+144 http fetch GET 200 https://registry.npmjs.org/@types/react/-/react-19.2.14.tgz 440ms (cache miss)
+145 http fetch GET 200 https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.3.tgz 449ms (cache miss)
+146 http fetch GET 200 https://registry.npmjs.org/@types/node/-/node-20.19.37.tgz 484ms (cache miss)
+147 http fetch GET 200 https://registry.npmjs.org/@tailwindcss/oxide/-/oxide-4.2.2.tgz 497ms (cache miss)
+148 http fetch GET 200 https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.23.tgz 507ms (cache miss)
+149 http fetch GET 200 https://registry.npmjs.org/@tailwindcss/postcss/-/postcss-4.2.2.tgz 520ms (cache miss)
+150 http fetch GET 200 https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz 562ms (cache miss)
+151 http fetch GET 200 https://registry.npmjs.org/@next/env/-/env-16.4.1.tgz 615ms (cache miss)
+152 http fetch GET 200 https://registry.npmjs.org/@tailwindcss/node/-/node-4.2.2.tgz 619ms (cache miss)
+153 http fetch GET 200 https://registry.npmjs.org/framer-motion/-/framer-motion-12.38.0.tgz 653ms (cache miss)
+154 http fetch GET 200 https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.5.tgz 660ms (cache miss)
+155 http fetch GET 200 https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz 674ms (cache miss)
+156 http fetch GET 200 https://registry.npmjs.org/@alloc/quick-lru/-/quick-lru-5.2.0.tgz 703ms (cache miss)
+157 http fetch GET 200 https://registry.npmjs.org/motion-dom/-/motion-dom-12.38.0.tgz 738ms (cache miss)
+158 http fetch GET 200 https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001784.tgz 751ms (cache miss)
+159 http fetch GET 200 https://registry.npmjs.org/@tailwindcss/oxide-darwin-arm64/-/oxide-darwin-arm64-4.2.2.tgz 761ms (cache miss)
+160 http fetch GET 200 https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz 1236ms (cache miss)
+161 http fetch GET 200 https://registry.npmjs.org/@next/swc-darwin-arm64/-/swc-darwin-arm64-16.4.1.tgz 2195ms (cache miss)
+162 http fetch GET 200 https://registry.npmjs.org/next/-/next-16.4.1.tgz 3187ms (cache miss)
+163 silly ADD node_modules/undici-types
+164 silly ADD node_modules/typescript
+165 silly ADD node_modules/tslib
+166 silly ADD node_modules/tapable
+167 silly ADD node_modules/tailwindcss
+168 silly ADD node_modules/styled-jsx
+169 silly ADD node_modules/source-map-js
+170 silly ADD node_modules/sharp
+171 silly ADD node_modules/semver
+172 silly ADD node_modules/scheduler
+173 silly ADD node_modules/react-dom
+174 silly ADD node_modules/react
+175 silly ADD node_modules/postcss
+176 silly ADD node_modules/picocolors
+177 silly ADD node_modules/next
+178 silly ADD node_modules/nanoid
+179 silly ADD node_modules/motion-utils
+180 silly ADD node_modules/motion-dom
+181 silly ADD node_modules/magic-string
+182 silly ADD node_modules/lightningcss-darwin-arm64
+183 silly ADD node_modules/lightningcss
+184 silly ADD node_modules/jiti
+185 silly ADD node_modules/graceful-fs
+186 silly ADD node_modules/framer-motion
+187 silly ADD node_modules/enhanced-resolve
+188 silly ADD node_modules/detect-libc
+189 silly ADD node_modules/csstype
+190 silly ADD node_modules/client-only
+191 silly ADD node_modules/caniuse-lite
+192 silly ADD node_modules/baseline-browser-mapping
+193 silly ADD node_modules/@types/react-dom
+194 silly ADD node_modules/@types/react
+195 silly ADD node_modules/@types/node
+196 silly ADD node_modules/@tailwindcss/postcss
+197 silly ADD node_modules/@tailwindcss/oxide-darwin-arm64
+198 silly ADD node_modules/@tailwindcss/oxide
+199 silly ADD node_modules/@tailwindcss/node
+200 silly ADD node_modules/@swc/helpers
+201 silly ADD node_modules/@next/swc-darwin-arm64
+202 silly ADD node_modules/@next/env
+203 silly ADD node_modules/@jridgewell/trace-mapping
+204 silly ADD node_modules/@jridgewell/sourcemap-codec
+205 silly ADD node_modules/@jridgewell/resolve-uri
+206 silly ADD node_modules/@jridgewell/remapping
+207 silly ADD node_modules/@jridgewell/gen-mapping
+208 silly ADD node_modules/@img/sharp-libvips-darwin-arm64
+209 silly ADD node_modules/@img/sharp-darwin-arm64
+210 silly ADD node_modules/@img/colour
+211 silly ADD node_modules/@alloc/quick-lru
+212 verbose cwd /Users/happycampr/.t3/worktrees/cmuxlayer/security-site-next-16-4-1/site
+213 verbose os Darwin 25.5.0
+214 verbose node v26.12.1
+215 verbose npm  v11.20.0
+216 verbose exit 0
+217 info ok
