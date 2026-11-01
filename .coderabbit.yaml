@@ -1,0 +1,5 @@
+# Review bots cut back (Etan 2026-11-01): CodeRabbit does not review automatically in this repo.
+# Ask for one by hand with a PR comment: @coderabbitai review
+reviews:
+  auto_review:
+    enabled: false
